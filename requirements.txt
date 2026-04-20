@@ -1,3 +1,6 @@
 opencv-python
 face_recognition
 numpy
+pandas
+ultralytics
+flask

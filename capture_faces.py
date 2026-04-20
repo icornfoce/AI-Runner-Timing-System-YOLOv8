@@ -20,7 +20,7 @@ def capture_faces():
     print("Press 'q' to finish.")
 
     while True:
-        ret, frame = cap.cap = cap.read()
+        ret, frame = cap.read()
         if not ret:
             break
 
