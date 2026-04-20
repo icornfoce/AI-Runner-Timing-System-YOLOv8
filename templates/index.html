@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Runner Dashboard | ระบบจับเวลาอัจฉริยะ</title>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --primary: #00f2fe;
+            --secondary: #4facfe;
+            --bg: #0f172a;
+            --card-bg: rgba(30, 41, 59, 0.7);
+            --text: #f8fafc;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: 'Outfit', sans-serif;
+        }
+
+        body {
+            background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+            color: var(--text);
+            min-height: 100vh;
+            padding: 2rem;
+            overflow-x: hidden;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 3rem;
+            animation: fadeInDown 0.8s ease-out;
+        }
+
+        .logo {
+            font-size: 2rem;
+            font-weight: 800;
+            background: linear-gradient(to right, var(--primary), var(--secondary));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+        }
+
+        .status {
+            padding: 0.5rem 1.2rem;
+            background: rgba(34, 197, 94, 0.2);
+            border: 1px solid #22c55e;
+            border-radius: 50px;
+            color: #4ade80;
+            font-size: 0.9rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .pulse {
+            width: 8px;
+            height: 8px;
+            background: #22c55e;
+            border-radius: 50%;
+            box-shadow: 0 0 10px #22c55e;
+            animation: pulse 2s infinite;
+        }
+
+        /* Dashboard Grid */
+        .dashboard-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 2rem;
+            margin-bottom: 3rem;
+        }
+
+        .stat-card {
+            background: var(--card-bg);
+            backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            padding: 2rem;
+            border-radius: 24px;
+            transition: transform 0.3s ease;
+        }
+
+        .stat-card:hover {
+            transform: translateY(-5px);
+        }
+
+        .stat-label {
+            color: #94a3b8;
+            font-size: 0.9rem;
+            margin-bottom: 0.5rem;
+        }
+
+        .stat-value {
+            font-size: 2.5rem;
+            font-weight: 700;
+        }
+
+        /* Leaderboard Table */
+        .results-container {
+            background: var(--card-bg);
+            backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 24px;
+            overflow: hidden;
+            animation: fadeInUp 0.8s ease-out;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            text-align: left;
+        }
+
+        th {
+            background: rgba(255, 255, 255, 0.05);
+            padding: 1.5rem;
+            color: #94a3b8;
+            font-weight: 400;
+            text-transform: uppercase;
+            font-size: 0.8rem;
+            letter-spacing: 1px;
+        }
+
+        td {
+            padding: 1.5rem;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+            font-size: 1.1rem;
+        }
+
+        tr:last-child td {
+            border-bottom: none;
+        }
+
+        tr:hover td {
+            background: rgba(255, 255, 255, 0.02);
+        }
+
+        .lap-time {
+            color: var(--primary);
+            font-weight: 600;
+        }
+
+        @keyframes pulse {
+            0% { transform: scale(0.95); opacity: 0.7; }
+            70% { transform: scale(1.1); opacity: 1; }
+            100% { transform: scale(0.95); opacity: 0.7; }
+        }
+
+        @keyframes fadeInDown {
+            from { opacity: 0; transform: translateY(-20px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        @keyframes fadeInUp {
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        /* Mobile Responsive */
+        @media (max-width: 768px) {
+            body { padding: 1rem; }
+            .stat-value { font-size: 1.8rem; }
+            td, th { padding: 1rem; font-size: 0.9rem; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div class="logo">RunnerTrack Demo</div>
+            <div class="status">
+                <div class="pulse"></div>
+                Live Monitoring
+            </div>
+        </header>
+
+        <div class="dashboard-grid">
+            <div class="stat-card">
+                <div class="stat-label">นักวิ่งทั้งหมด</div>
+                <div class="stat-value" id="total-runners">0</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">เข้าเส้นชัยแล้ว</div>
+                <div class="stat-value" id="finished-count" style="color: #4ade80;">0</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Checkpoints Active</div>
+                <div class="stat-value">2</div>
+            </div>
+        </div>
+
+        <div class="results-container">
+            <table>
+                <thead>
+                    <tr>
+                        <th>ลำดับ</th>
+                        <th>ชื่อนักวิ่ง</th>
+                        <th>จุดที่ 1</th>
+                        <th>จุดที่ 2 (เข้าเส้นชัย)</th>
+                        <th>เวลารวม</th>
+                    </tr>
+                </thead>
+                <tbody id="runners-table">
+                    <!-- ข้อมูลจะถูกเติมโดย JS -->
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <script>
+        async function updateData() {
+            try {
+                const response = await fetch('/api/data');
+                const data = await response.json();
+                
+                const tableBody = document.getElementById('runners-table');
+                const totalRunnersEl = document.getElementById('total-runners');
+                const finishedCountEl = document.getElementById('finished-count');
+
+                tableBody.innerHTML = '';
+                let finishedCount = 0;
+
+                data.forEach((runner, index) => {
+                    const row = document.createElement('tr');
+                    
+                    if (runner.Total_Time !== "-") finishedCount++;
+
+                    row.innerHTML = `
+                        <td>#${index + 1}</td>
+                        <td style="font-weight: 600;">${runner.Name}</td>
+                        <td>${runner.CP1_Time}</td>
+                        <td>${runner.CP2_Time}</td>
+                        <td class="lap-time">${runner.Total_Time}</td>
+                    `;
+                    tableBody.appendChild(row);
+                });
+
+                totalRunnersEl.innerText = data.length;
+                finishedCountEl.innerText = finishedCount;
+
+            } catch (error) {
+                console.error("Failed to fetch data:", error);
+            }
+        }
+
+        // อัปเดตข้อมูลทุกๆ 1 วินาที (Super Smooth)
+        setInterval(updateData, 1000);
+        updateData();
+    </script>
+</body>
+</html>

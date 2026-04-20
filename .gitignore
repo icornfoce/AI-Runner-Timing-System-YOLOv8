@@ -1,0 +1,26 @@
+# Computer Vision Files
+*.pt
+*.weights
+*.h5
+
+# Project Specific
+Data/
+running_results.csv
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+env/
+venv/
+ENV/
+.env
+
+# IDEs
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
