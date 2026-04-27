@@ -5,14 +5,32 @@ import numpy as np
 import time
 import urllib.request
 import pandas as pd
+import easyocr
 from ultralytics import YOLO
 from datetime import datetime
 
 # ================= CONFIGURATION =================
 CHECKPOINT_ID = 1  # เปลี่ยนเป็น 1 หรือ 2 ตามจุดที่วางคอมพิวเตอร์
 LOG_FILE = "running_results.csv"
+REGISTRY_FILE = "runners_registry.csv"
+VIOLATION_DIR = "violations"
 COOLDOWN_SECONDS = 30 # ป้องกันการบันทึกซ้ำซ้อนในจุดเดิม
+CONFIDENCE_THRESHOLD = 0.5 # ความแม่นยำขั้นต่ำ
 # =================================================
+
+def load_registry():
+    if os.path.exists(REGISTRY_FILE):
+        df = pd.read_csv(REGISTRY_FILE)
+        return dict(zip(df['Name'], df['BibNumber'].astype(str)))
+    return {}
+
+RUNNER_REGISTRY = load_registry()
+
+if not os.path.exists(VIOLATION_DIR):
+    os.makedirs(VIOLATION_DIR)
+
+# Initialize EasyOCR
+reader = easyocr.Reader(['en'])
 
 def init_log_file():
     if not os.path.exists(LOG_FILE):
@@ -166,18 +184,51 @@ def main():
 
         # วาดหน้าจอ UI
         cv2.putText(frame, f"CHECKPOINT: {CHECKPOINT_ID}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2)
+        
         for (top, right, bottom, left), name in zip(face_locations, face_names):
             top, right, bottom, left = top*2, right*2, bottom*2, left*2
-            color = (0, 255, 0) if name != "Unknown" else (0, 0, 255)
-            cv2.rectangle(frame, (left, top), (right, bottom), color, 2)
             
-            label = name
+            # --- BIB DETECTION & VERIFICATION ---
+            detected_bib = "N/A"
+            status_color = (0, 255, 0) # เขียว = ปกติ
+            
             if name != "Unknown":
-                # แสดงเวลาล่าสุดของคนนั้นสั้นๆ
-                label = f"{name} (PASS!)"
+                # Crop พื้นที่ใต้ใบหน้าเพื่อหา Bib (กะประมาณตำแหน่ง)
+                face_height = bottom - top
+                bib_top = bottom
+                bib_bottom = min(frame.shape[0], bottom + int(face_height * 2.5))
+                bib_left = max(0, left - int(face_height * 0.5))
+                bib_right = min(frame.shape[1], right + int(face_height * 0.5))
+                
+                bib_crop = frame[bib_top:bib_bottom, bib_left:bib_right]
+                
+                if bib_crop.size > 0:
+                    results = reader.readtext(bib_crop)
+                    for (bbox, text, prob) in results:
+                        if text.isdigit(): # หาตัวเลขบิบ
+                            detected_bib = text
+                            break
+                
+                # ตรวจสอบความถูกต้อง
+                expected_bib = RUNNER_REGISTRY.get(name, "Unknown")
+                if detected_bib != "N/A" and detected_bib != expected_bib:
+                    status_color = (0, 0, 255) # แดง = ผิดปกติ (สลับเสื้อ)
+                    print(f"⚠️ VIOLATION: {name} (Expected {expected_bib}, Found {detected_bib})")
+                    
+                    # บันทึกหลักฐาน
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    filename = f"{VIOLATION_DIR}/{name}_violation_{timestamp}.jpg"
+                    cv2.imwrite(filename, frame)
             
-            cv2.rectangle(frame, (left, top - 30), (right, top), color, cv2.FILLED)
-            cv2.putText(frame, label, (left + 5, top - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+            # วาดกรอบและป้ายชื่อ
+            cv2.rectangle(frame, (left, top), (right, bottom), status_color, 2)
+            
+            label = f"{name} | Bib: {detected_bib}"
+            if status_color == (0, 0, 255):
+                label += " (MISMATCH!)"
+            
+            cv2.rectangle(frame, (left, top - 30), (right, top), status_color, cv2.FILLED)
+            cv2.putText(frame, label, (left + 5, top - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
         cv2.imshow('Runner Timing System', frame)
         if cv2.waitKey(1) & 0xFF == ord('q'): break

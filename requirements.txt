@@ -4,3 +4,5 @@ numpy
 pandas
 ultralytics
 flask
+easyocr
+python-socketio
