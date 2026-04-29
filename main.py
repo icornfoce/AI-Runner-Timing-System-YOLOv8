@@ -24,7 +24,7 @@ def load_registry():
         return dict(zip(df['Name'], df['BibNumber'].astype(str)))
     return {}
 
-RUNNER_REGISTRY = load_registry()
+# Registry จะถูกโหลดใน main() และ reload อัตโนมัติ
 
 if not os.path.exists(VIOLATION_DIR):
     os.makedirs(VIOLATION_DIR)
@@ -129,10 +129,17 @@ def get_yolo_model():
     return YOLO(MODEL_PATH)
 
 def main():
+    global RUNNER_REGISTRY
     init_log_file()
     DATA_PATH = "Data"
     known_face_encodings, known_face_names = load_known_faces(DATA_PATH)
     yolo_model = get_yolo_model()
+    
+    # โหลด Registry ครั้งแรก
+    RUNNER_REGISTRY = load_registry()
+    last_registry_reload = time.time()
+    REGISTRY_RELOAD_INTERVAL = 10  # โหลดใหม่ทุก 10 วินาที
+    print(f"📋 Loaded Registry: {RUNNER_REGISTRY}")
     
     print(f"--- RUNNING SYSTEM START (CHECKPOINT {CHECKPOINT_ID}) ---")
     video_capture = cv2.VideoCapture(0)
@@ -144,6 +151,12 @@ def main():
     while True:
         ret, frame = video_capture.read()
         if not ret: break
+        
+        # Auto-reload registry ทุก 10 วินาที
+        if time.time() - last_registry_reload > REGISTRY_RELOAD_INTERVAL:
+            RUNNER_REGISTRY = load_registry()
+            last_registry_reload = time.time()
+            print(f"🔄 Registry reloaded: {RUNNER_REGISTRY}")
 
         small_frame = cv2.resize(frame, (0, 0), fx=0.5, fy=0.5)
         rgb_small_frame = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
@@ -190,9 +203,13 @@ def main():
             
             # --- BIB DETECTION & VERIFICATION ---
             detected_bib = "N/A"
+            ocr_bib = None  # เก็บผลจาก OCR แยกต่างหาก
             status_color = (0, 255, 0) # เขียว = ปกติ
             
             if name != "Unknown":
+                # ดึง Bib ที่ลงทะเบียนไว้จาก Registry
+                expected_bib = RUNNER_REGISTRY.get(name, None)
+                
                 # Crop พื้นที่ใต้ใบหน้าเพื่อหา Bib (กะประมาณตำแหน่ง)
                 face_height = bottom - top
                 bib_top = bottom
@@ -203,22 +220,47 @@ def main():
                 bib_crop = frame[bib_top:bib_bottom, bib_left:bib_right]
                 
                 if bib_crop.size > 0:
-                    results = reader.readtext(bib_crop)
-                    for (bbox, text, prob) in results:
+                    ocr_results = reader.readtext(bib_crop)
+                    for (bbox, text, prob) in ocr_results:
                         if text.isdigit(): # หาตัวเลขบิบ
-                            detected_bib = text
+                            ocr_bib = text
                             break
                 
-                # ตรวจสอบความถูกต้อง
-                expected_bib = RUNNER_REGISTRY.get(name, "Unknown")
-                if detected_bib != "N/A" and detected_bib != expected_bib:
-                    status_color = (0, 0, 255) # แดง = ผิดปกติ (สลับเสื้อ)
-                    print(f"⚠️ VIOLATION: {name} (Expected {expected_bib}, Found {detected_bib})")
+                # ถ้า OCR อ่านได้ ใช้ค่าจาก OCR
+                if ocr_bib is not None:
+                    detected_bib = ocr_bib
                     
-                    # บันทึกหลักฐาน
-                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    filename = f"{VIOLATION_DIR}/{name}_violation_{timestamp}.jpg"
-                    cv2.imwrite(filename, frame)
+                    # สร้าง reverse lookup: Bib → ชื่อเจ้าของ
+                    bib_to_owner = {v: k for k, v in RUNNER_REGISTRY.items()}
+                    bib_owner = bib_to_owner.get(ocr_bib, None)
+                    
+                    is_violation = False
+                    violation_msg = ""
+                    
+                    if expected_bib is not None and ocr_bib != expected_bib:
+                        # กรณี 1: มี bib ลงทะเบียนแล้ว แต่ใส่ bib ไม่ตรง
+                        is_violation = True
+                        violation_msg = f"Expected Bib {expected_bib}, Found {ocr_bib}"
+                    elif expected_bib is None and bib_owner is not None and bib_owner != name:
+                        # กรณี 2: ไม่มี bib ลงทะเบียน แต่ใส่ bib ของคนอื่น (ขโมย bib)
+                        is_violation = True
+                        violation_msg = f"NOT REGISTERED! Wearing Bib {ocr_bib} (belongs to {bib_owner})"
+                    elif expected_bib is None and bib_owner is None:
+                        # กรณี 3: ไม่มีในระบบ และ bib ที่ใส่ก็ไม่มีในระบบ
+                        is_violation = True
+                        violation_msg = f"UNREGISTERED runner with unknown Bib {ocr_bib}"
+                    
+                    if is_violation:
+                        status_color = (0, 0, 255) # แดง = ผิดปกติ
+                        print(f"⚠️ VIOLATION: {name} - {violation_msg}")
+                        
+                        # บันทึกหลักฐาน
+                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        filename = f"{VIOLATION_DIR}/{name}_violation_{timestamp}.jpg"
+                        cv2.imwrite(filename, frame)
+                elif expected_bib is not None:
+                    # OCR อ่านไม่ได้ → ใช้ Bib จาก Registry แทน
+                    detected_bib = expected_bib
             
             # วาดกรอบและป้ายชื่อ
             cv2.rectangle(frame, (left, top), (right, bottom), status_color, 2)
