@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Runner Dashboard | ระบบจับเวลาอัจฉริยะ</title>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&display=swap" rel="stylesheet">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.4/socket.io.min.js"></script>
     <style>
         :root {
             --primary: #00f2fe;
@@ -43,6 +44,12 @@
             animation: fadeInDown 0.8s ease-out;
         }
 
+        .header-left {
+            display: flex;
+            align-items: center;
+            gap: 1.5rem;
+        }
+
         .logo {
             font-size: 2rem;
             font-weight: 800;
@@ -51,6 +58,37 @@
             -webkit-text-fill-color: transparent;
             text-transform: uppercase;
             letter-spacing: 2px;
+        }
+
+        .nav-links {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+        }
+
+        .nav-link {
+            color: #94a3b8;
+            text-decoration: none;
+            padding: 0.5rem 1rem;
+            border-radius: 8px;
+            transition: all 0.3s ease;
+            font-size: 0.9rem;
+        }
+
+        .nav-link:hover {
+            color: var(--text);
+            background: rgba(255, 255, 255, 0.05);
+        }
+
+        .badge {
+            background: var(--danger);
+            color: white;
+            border-radius: 50%;
+            padding: 2px 7px;
+            font-size: 0.7rem;
+            font-weight: 700;
+            margin-left: 4px;
+            animation: pulse 2s infinite;
         }
 
         .status {
@@ -65,13 +103,46 @@
             gap: 0.5rem;
         }
 
-        .pulse {
+        .pulse-dot {
             width: 8px;
             height: 8px;
             background: #22c55e;
             border-radius: 50%;
             box-shadow: 0 0 10px #22c55e;
             animation: pulse 2s infinite;
+        }
+
+        /* Alert Banner */
+        .alert-banner {
+            display: none;
+            background: linear-gradient(135deg, #ff4b2b, #ff416c);
+            padding: 1rem 2rem;
+            border-radius: 16px;
+            margin-bottom: 2rem;
+            animation: shake 0.5s ease-in-out, fadeInDown 0.5s ease-out;
+            box-shadow: 0 4px 20px rgba(255, 75, 43, 0.4);
+        }
+
+        .alert-banner.show {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+        }
+
+        .alert-banner .alert-text {
+            font-weight: 600;
+            font-size: 1.1rem;
+        }
+
+        .alert-banner .dismiss-btn {
+            margin-left: auto;
+            background: rgba(255, 255, 255, 0.2);
+            border: none;
+            color: white;
+            padding: 0.4rem 1rem;
+            border-radius: 8px;
+            cursor: pointer;
+            font-family: 'Outfit', sans-serif;
         }
 
         /* Dashboard Grid */
@@ -204,6 +275,29 @@
             color: #94a3b8;
         }
 
+        .violation-status {
+            font-size: 0.7rem;
+            padding: 2px 8px;
+            border-radius: 4px;
+            display: inline-block;
+            margin-top: 4px;
+        }
+
+        .violation-status.pending {
+            background: rgba(251, 191, 36, 0.2);
+            color: #fbbf24;
+        }
+
+        .violation-status.confirmed {
+            background: rgba(239, 68, 68, 0.2);
+            color: #ef4444;
+        }
+
+        .violation-status.dismissed {
+            background: rgba(34, 197, 94, 0.2);
+            color: #22c55e;
+        }
+
         @keyframes shake {
             0%, 100% { transform: translateX(0); }
             25% { transform: translateX(-5px); }
@@ -224,18 +318,35 @@
             body { padding: 1rem; }
             .stat-value { font-size: 1.8rem; }
             td, th { padding: 1rem; font-size: 0.9rem; }
+            header { flex-direction: column; gap: 1rem; }
         }
     </style>
 </head>
 <body>
     <div class="container">
         <header>
-            <div class="logo">RunnerTrack Demo</div>
+            <div class="header-left">
+                <div class="logo">RunnerTrack</div>
+                <nav class="nav-links">
+                    <a href="/" class="nav-link" style="color: var(--primary);">Dashboard</a>
+                    <a href="/judge" class="nav-link" id="judge-link">
+                        🔒 Judge Panel
+                        <span class="badge" id="violation-badge" style="display: none;">0</span>
+                    </a>
+                </nav>
+            </div>
             <div class="status">
-                <div class="pulse"></div>
+                <div class="pulse-dot"></div>
                 Live Monitoring
             </div>
         </header>
+
+        <!-- Alert Banner for real-time violation push -->
+        <div class="alert-banner" id="alert-banner">
+            <span style="font-size: 1.5rem;">🚨</span>
+            <span class="alert-text" id="alert-text">Violation detected!</span>
+            <button class="dismiss-btn" onclick="dismissAlert()">Dismiss</button>
+        </div>
 
         <div class="dashboard-grid">
             <div class="stat-card">
@@ -257,7 +368,7 @@
                 <span style="color: var(--danger);">⚠️ รายงานความผิดปกติ (Real-time)</span>
             </div>
             <div class="violations-grid" id="violations-container">
-                <!-- Violation cards will be injected here -->
+                <!-- Violation cards injected by JS -->
             </div>
         </div>
 
@@ -284,11 +395,66 @@
     </div>
 
     <script>
+        // Socket.IO connection
+        const socket = io();
+        let violationCount = 0;
+
+        // Beep audio for alerts
+        function playBeep() {
+            try {
+                const ctx = new (window.AudioContext || window.webkitAudioContext)();
+                const osc = ctx.createOscillator();
+                const gain = ctx.createGain();
+                osc.connect(gain);
+                gain.connect(ctx.destination);
+                osc.frequency.value = 880;
+                osc.type = 'square';
+                gain.gain.value = 0.3;
+                osc.start();
+                setTimeout(() => { osc.stop(); ctx.close(); }, 200);
+            } catch (e) { /* Audio not supported */ }
+        }
+
+        // Real-time violation alert via Socket.IO
+        socket.on('new_violation', (data) => {
+            console.log('🚨 New violation:', data);
+            playBeep();
+
+            // Show alert banner
+            const banner = document.getElementById('alert-banner');
+            const alertText = document.getElementById('alert-text');
+            alertText.textContent = `⚠️ ${data.Name} — Bib ${data.Detected_Bib} (Expected: ${data.Expected_Bib})`;
+            banner.classList.add('show');
+
+            // Update badge
+            violationCount++;
+            updateBadge();
+
+            // Refresh violation list
+            updateViolations();
+        });
+
+        socket.on('violation_updated', (data) => {
+            updateViolations();
+        });
+
+        function dismissAlert() {
+            document.getElementById('alert-banner').classList.remove('show');
+        }
+
+        function updateBadge() {
+            const badge = document.getElementById('violation-badge');
+            if (violationCount > 0) {
+                badge.style.display = 'inline';
+                badge.textContent = violationCount;
+            }
+        }
+
         async function updateData() {
             try {
                 const response = await fetch('/api/data');
                 const data = await response.json();
-                
+
                 const tableBody = document.getElementById('runners-table');
                 const totalRunnersEl = document.getElementById('total-runners');
                 const finishedCountEl = document.getElementById('finished-count');
@@ -298,7 +464,7 @@
 
                 data.forEach((runner, index) => {
                     const row = document.createElement('tr');
-                    
+
                     if (runner.Total_Time !== "-") finishedCount++;
 
                     row.innerHTML = `
@@ -323,24 +489,33 @@
             try {
                 const response = await fetch('/api/violations');
                 const data = await response.json();
-                
+
                 const container = document.getElementById('violations-container');
                 const section = document.getElementById('violation-section');
                 const countEl = document.getElementById('violation-count');
 
                 countEl.innerText = data.length;
+                violationCount = data.filter(v => v.Status === 'pending').length;
+                updateBadge();
 
                 if (data.length > 0) {
                     section.style.display = 'block';
                     container.innerHTML = '';
-                    data.slice(0, 4).forEach(v => {
+                    // No slice limit — show all violations
+                    data.forEach(v => {
+                        const imagePath = v.Image_Path ? v.Image_Path.replace(/\\/g, '/') : '';
+                        const imageUrl = imagePath.includes('violations/') ?
+                            '/' + imagePath.substring(imagePath.indexOf('violations/')) : '';
+
                         const card = document.createElement('div');
                         card.className = 'violation-card';
                         card.innerHTML = `
-                            <img src="${v.image_url}" class="violation-img" alt="violation">
+                            ${imageUrl ? `<img src="${imageUrl}" class="violation-img" alt="violation">` : ''}
                             <div class="violation-info">
-                                <div class="violation-name">${v.name}</div>
-                                <div class="violation-time">${v.timestamp}</div>
+                                <div class="violation-name">${v.Name}</div>
+                                <div class="violation-time">Bib: ${v.Detected_Bib} (Expected: ${v.Expected_Bib})</div>
+                                <div class="violation-time">${v.Timestamp}</div>
+                                <span class="violation-status ${v.Status}">${v.Status}</span>
                             </div>
                         `;
                         container.appendChild(card);
@@ -351,9 +526,9 @@
             } catch (e) { console.error(e); }
         }
 
-        // อัปเดตข้อมูลทุกๆ 1 วินาที
+        // Poll data every 1s, violations every 5s (Socket.IO handles instant alerts)
         setInterval(updateData, 1000);
-        setInterval(updateViolations, 2000);
+        setInterval(updateViolations, 5000);
         updateData();
         updateViolations();
     </script>

@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Judge Panel | ระบบตรวจสอบความผิดปกติ</title>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&display=swap" rel="stylesheet">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.4/socket.io.min.js"></script>
+    <style>
+        :root {
+            --primary: #00f2fe;
+            --secondary: #4facfe;
+            --danger: #ff4b2b;
+            --success: #22c55e;
+            --warning: #fbbf24;
+            --bg: #0f172a;
+            --card-bg: rgba(30, 41, 59, 0.7);
+            --text: #f8fafc;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: 'Outfit', sans-serif;
+        }
+
+        body {
+            background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+            color: var(--text);
+            min-height: 100vh;
+            padding: 2rem;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 3rem;
+        }
+
+        .header-left {
+            display: flex;
+            align-items: center;
+            gap: 1.5rem;
+        }
+
+        .logo {
+            font-size: 2rem;
+            font-weight: 800;
+            background: linear-gradient(to right, var(--danger), #ff416c);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+        }
+
+        .nav-links {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+        }
+
+        .nav-link {
+            color: #94a3b8;
+            text-decoration: none;
+            padding: 0.5rem 1rem;
+            border-radius: 8px;
+            transition: all 0.3s ease;
+            font-size: 0.9rem;
+        }
+
+        .nav-link:hover {
+            color: var(--text);
+            background: rgba(255, 255, 255, 0.05);
+        }
+
+        /* Login Form */
+        .login-container {
+            max-width: 400px;
+            margin: 10vh auto;
+            background: var(--card-bg);
+            backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 24px;
+            padding: 3rem;
+            text-align: center;
+        }
+
+        .login-container h2 {
+            margin-bottom: 0.5rem;
+            font-size: 1.8rem;
+        }
+
+        .login-container p {
+            color: #94a3b8;
+            margin-bottom: 2rem;
+        }
+
+        .login-container input[type="password"] {
+            width: 100%;
+            padding: 1rem;
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 12px;
+            color: var(--text);
+            font-size: 1.2rem;
+            text-align: center;
+            letter-spacing: 8px;
+            font-family: 'Outfit', sans-serif;
+            outline: none;
+            margin-bottom: 1rem;
+        }
+
+        .login-container input[type="password"]:focus {
+            border-color: var(--primary);
+            box-shadow: 0 0 20px rgba(0, 242, 254, 0.2);
+        }
+
+        .login-container button {
+            width: 100%;
+            padding: 1rem;
+            background: linear-gradient(135deg, var(--primary), var(--secondary));
+            border: none;
+            border-radius: 12px;
+            color: #0f172a;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            font-family: 'Outfit', sans-serif;
+            transition: transform 0.2s ease;
+        }
+
+        .login-container button:hover {
+            transform: translateY(-2px);
+        }
+
+        .error-msg {
+            color: var(--danger);
+            margin-top: 1rem;
+            font-size: 0.9rem;
+        }
+
+        /* Judge Table */
+        .judge-table-container {
+            background: var(--card-bg);
+            backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 24px;
+            overflow: hidden;
+            overflow-x: auto;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            text-align: left;
+            min-width: 900px;
+        }
+
+        th {
+            background: rgba(255, 255, 255, 0.05);
+            padding: 1.2rem;
+            color: #94a3b8;
+            font-weight: 400;
+            text-transform: uppercase;
+            font-size: 0.75rem;
+            letter-spacing: 1px;
+        }
+
+        td {
+            padding: 1.2rem;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+            font-size: 0.95rem;
+        }
+
+        tr:last-child td {
+            border-bottom: none;
+        }
+
+        tr:hover td {
+            background: rgba(255, 255, 255, 0.02);
+        }
+
+        .status-badge {
+            padding: 4px 12px;
+            border-radius: 6px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+
+        .status-badge.pending {
+            background: rgba(251, 191, 36, 0.15);
+            color: var(--warning);
+        }
+
+        .status-badge.confirmed {
+            background: rgba(239, 68, 68, 0.15);
+            color: var(--danger);
+        }
+
+        .status-badge.dismissed {
+            background: rgba(34, 197, 94, 0.15);
+            color: var(--success);
+        }
+
+        .action-btns {
+            display: flex;
+            gap: 0.5rem;
+        }
+
+        .btn {
+            padding: 6px 14px;
+            border: none;
+            border-radius: 8px;
+            font-size: 0.8rem;
+            cursor: pointer;
+            font-family: 'Outfit', sans-serif;
+            font-weight: 600;
+            transition: all 0.2s ease;
+        }
+
+        .btn:hover {
+            transform: translateY(-1px);
+        }
+
+        .btn-confirm {
+            background: rgba(239, 68, 68, 0.2);
+            color: var(--danger);
+            border: 1px solid var(--danger);
+        }
+
+        .btn-dismiss {
+            background: rgba(34, 197, 94, 0.2);
+            color: var(--success);
+            border: 1px solid var(--success);
+        }
+
+        .btn-export {
+            padding: 0.7rem 1.5rem;
+            background: linear-gradient(135deg, var(--primary), var(--secondary));
+            border: none;
+            border-radius: 12px;
+            color: #0f172a;
+            font-size: 0.9rem;
+            font-weight: 600;
+            cursor: pointer;
+            font-family: 'Outfit', sans-serif;
+            transition: transform 0.2s ease;
+            text-decoration: none;
+        }
+
+        .btn-export:hover {
+            transform: translateY(-2px);
+        }
+
+        .toolbar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1.5rem;
+        }
+
+        .section-title {
+            font-size: 1.5rem;
+            font-weight: 600;
+        }
+
+        .violation-thumb {
+            width: 60px;
+            height: 40px;
+            object-fit: cover;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: transform 0.2s;
+        }
+
+        .violation-thumb:hover {
+            transform: scale(2.5);
+            z-index: 10;
+            position: relative;
+        }
+
+        @media (max-width: 768px) {
+            body { padding: 1rem; }
+            td, th { padding: 0.8rem; font-size: 0.8rem; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div class="header-left">
+                <div class="logo">🔒 Judge Panel</div>
+                <nav class="nav-links">
+                    <a href="/" class="nav-link">← Dashboard</a>
+                    {% if authenticated %}
+                    <a href="/judge/logout" class="nav-link" style="color: var(--danger);">Logout</a>
+                    {% endif %}
+                </nav>
+            </div>
+        </header>
+
+        {% if not authenticated %}
+        <!-- Login Form -->
+        <div class="login-container">
+            <h2>🔐 ยืนยันตัวตน</h2>
+            <p>กรอก PIN เพื่อเข้าสู่ระบบตรวจสอบ</p>
+            <form method="POST">
+                <input type="password" name="pin" placeholder="PIN" maxlength="8" autofocus required>
+                <button type="submit">เข้าสู่ระบบ</button>
+            </form>
+            {% if error %}
+            <div class="error-msg">{{ error }}</div>
+            {% endif %}
+        </div>
+        {% else %}
+        <!-- Authenticated Judge Panel -->
+        <div class="toolbar">
+            <div class="section-title">⚖️ รายการ Violation ทั้งหมด</div>
+            <button class="btn-export" onclick="exportCSV()">📥 Export CSV</button>
+        </div>
+
+        <div class="judge-table-container">
+            <table>
+                <thead>
+                    <tr>
+                        <th>ลำดับ</th>
+                        <th>ภาพ</th>
+                        <th>ชื่อ</th>
+                        <th>Bib ที่พบ</th>
+                        <th>Bib ที่ลงทะเบียน</th>
+                        <th>Checkpoint</th>
+                        <th>เวลา</th>
+                        <th>สถานะ</th>
+                        <th>จัดการ</th>
+                    </tr>
+                </thead>
+                <tbody id="violations-table">
+                    <!-- Populated by JS -->
+                </tbody>
+            </table>
+        </div>
+        {% endif %}
+    </div>
+
+    {% if authenticated %}
+    <script>
+        const socket = io();
+
+        socket.on('new_violation', () => {
+            loadViolations();
+        });
+
+        socket.on('violation_updated', () => {
+            loadViolations();
+        });
+
+        async function loadViolations() {
+            try {
+                const response = await fetch('/api/violations');
+                const data = await response.json();
+                const tbody = document.getElementById('violations-table');
+                tbody.innerHTML = '';
+
+                data.forEach((v, index) => {
+                    const imagePath = v.Image_Path ? v.Image_Path.replace(/\\/g, '/') : '';
+                    const imageUrl = imagePath.includes('violations/') ?
+                        '/' + imagePath.substring(imagePath.indexOf('violations/')) : '';
+
+                    const row = document.createElement('tr');
+                    row.innerHTML = `
+                        <td>#${index + 1}</td>
+                        <td>${imageUrl ? `<img src="${imageUrl}" class="violation-thumb" alt="evidence">` : '-'}</td>
+                        <td style="font-weight: 600;">${v.Name}</td>
+                        <td style="color: var(--danger); font-weight: 600;">${v.Detected_Bib}</td>
+                        <td>${v.Expected_Bib}</td>
+                        <td>CP${v.Checkpoint_ID}</td>
+                        <td style="font-size: 0.85rem;">${v.Timestamp}</td>
+                        <td><span class="status-badge ${v.Status}">${v.Status}</span></td>
+                        <td>
+                            <div class="action-btns">
+                                ${v.Status === 'pending' ? `
+                                    <button class="btn btn-confirm" onclick="updateStatus('${v.Timestamp}', 'confirmed')">
+                                        ❌ Confirm
+                                    </button>
+                                    <button class="btn btn-dismiss" onclick="updateStatus('${v.Timestamp}', 'dismissed')">
+                                        ✅ Dismiss
+                                    </button>
+                                ` : `<span style="color: #64748b; font-size: 0.8rem;">Reviewed</span>`}
+                            </div>
+                        </td>
+                    `;
+                    tbody.appendChild(row);
+                });
+            } catch (e) {
+                console.error('Failed to load violations:', e);
+            }
+        }
+
+        async function updateStatus(timestamp, status) {
+            try {
+                const response = await fetch(`/api/violations/${encodeURIComponent(timestamp)}/status`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ status })
+                });
+                const result = await response.json();
+                if (result.success) {
+                    loadViolations();
+                } else {
+                    alert('Error: ' + (result.error || 'Unknown error'));
+                }
+            } catch (e) {
+                console.error('Failed to update:', e);
+            }
+        }
+
+        function exportCSV() {
+            window.open('/api/violations');
+        }
+
+        loadViolations();
+    </script>
+    {% endif %}
+</body>
+</html>

@@ -4,5 +4,6 @@ numpy
 pandas
 ultralytics
 flask
+flask-socketio
 easyocr
-python-socketio
+requests
