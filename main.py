@@ -10,6 +10,7 @@ from helpers.csv_helper import init_log_file, record_checkpoint, log_violation
 from helpers.registry_helper import load_registry, get_bib_to_owner
 from helpers.image_helper import save_violation_image, get_bib_crop
 from helpers.face_helper import load_known_faces, get_yolo_model
+from helpers.event_helper import get_active_event_paths
 
 # Client mode: import sender for remote reporting
 if config.MODE == "client":
@@ -25,6 +26,13 @@ def main():
     else:
         init_log_file()
 
+    # Resolve event paths for standalone mode
+    event_paths = get_active_event_paths()
+    if config.MODE == "standalone" and event_paths:
+        violations_dir = event_paths["violations_dir"]
+    else:
+        violations_dir = config.VIOLATION_DIR
+
     known_face_encodings, known_face_names = load_known_faces(config.DATA_PATH)
     yolo_model = get_yolo_model(config.YOLO_MODEL_PATH, config.YOLO_MODEL_URL)
 
@@ -32,8 +40,8 @@ def main():
     print("Initializing EasyOCR...")
     reader = easyocr.Reader(['en'])
 
-    if not os.path.exists(config.VIOLATION_DIR):
-        os.makedirs(config.VIOLATION_DIR)
+    if not os.path.exists(violations_dir):
+        os.makedirs(violations_dir)
 
     # โหลด Registry ครั้งแรก + Bug 1 fix: compute bib_to_owner once on reload
     runner_registry = load_registry(config.REGISTRY_FILE)
@@ -144,6 +152,9 @@ def main():
             ocr_bib = None
             status_color = (0, 255, 0)  # เขียว = ปกติ
 
+            if name == "Unknown":
+                status_color = (0, 0, 255)  # แดง = ไม่รู้จัก
+
             if name != "Unknown":
                 expected_bib = runner_registry.get(name, None)
 
@@ -195,7 +206,7 @@ def main():
                                 except Exception as e:
                                     print(f"⚠️ Could not send violation to server: {e}")
                             else:
-                                image_path = save_violation_image(frame, name, config.VIOLATION_DIR)
+                                image_path = save_violation_image(frame, name, violations_dir)
                                 log_violation(name, expected_bib, ocr_bib,
                                               config.CHECKPOINT_ID, image_path)
                             violation_cooldowns[name] = now
@@ -212,7 +223,7 @@ def main():
 
             cv2.rectangle(frame, (left, top - 30), (right, top), status_color, cv2.FILLED)
             cv2.putText(frame, label, (left + 5, top - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
 
         # FPS counter
         fps_frame_count += 1

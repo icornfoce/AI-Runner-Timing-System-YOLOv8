@@ -3,534 +3,230 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Runner Dashboard | ระบบจับเวลาอัจฉริยะ</title>
+    <title>Runner Dashboard</title>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&display=swap" rel="stylesheet">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.4/socket.io.min.js"></script>
     <style>
-        :root {
-            --primary: #00f2fe;
-            --secondary: #4facfe;
-            --danger: #ff4b2b;
-            --bg: #0f172a;
-            --card-bg: rgba(30, 41, 59, 0.7);
-            --text: #f8fafc;
-        }
-
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-            font-family: 'Outfit', sans-serif;
-        }
-
-        body {
-            background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
-            color: var(--text);
-            min-height: 100vh;
-            padding: 2rem;
-            overflow-x: hidden;
-        }
-
-        .container {
-            max-width: 1200px;
-            margin: 0 auto;
-        }
-
-        header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 3rem;
-            animation: fadeInDown 0.8s ease-out;
-        }
-
-        .header-left {
-            display: flex;
-            align-items: center;
-            gap: 1.5rem;
-        }
-
-        .logo {
-            font-size: 2rem;
-            font-weight: 800;
-            background: linear-gradient(to right, var(--primary), var(--secondary));
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            text-transform: uppercase;
-            letter-spacing: 2px;
-        }
-
-        .nav-links {
-            display: flex;
-            align-items: center;
-            gap: 1rem;
-        }
-
-        .nav-link {
-            color: #94a3b8;
-            text-decoration: none;
-            padding: 0.5rem 1rem;
-            border-radius: 8px;
-            transition: all 0.3s ease;
-            font-size: 0.9rem;
-        }
-
-        .nav-link:hover {
-            color: var(--text);
-            background: rgba(255, 255, 255, 0.05);
-        }
-
-        .badge {
-            background: var(--danger);
-            color: white;
-            border-radius: 50%;
-            padding: 2px 7px;
-            font-size: 0.7rem;
-            font-weight: 700;
-            margin-left: 4px;
-            animation: pulse 2s infinite;
-        }
-
-        .status {
-            padding: 0.5rem 1.2rem;
-            background: rgba(34, 197, 94, 0.2);
-            border: 1px solid #22c55e;
-            border-radius: 50px;
-            color: #4ade80;
-            font-size: 0.9rem;
-            display: flex;
-            align-items: center;
-            gap: 0.5rem;
-        }
-
-        .pulse-dot {
-            width: 8px;
-            height: 8px;
-            background: #22c55e;
-            border-radius: 50%;
-            box-shadow: 0 0 10px #22c55e;
-            animation: pulse 2s infinite;
-        }
-
-        /* Alert Banner */
-        .alert-banner {
-            display: none;
-            background: linear-gradient(135deg, #ff4b2b, #ff416c);
-            padding: 1rem 2rem;
-            border-radius: 16px;
-            margin-bottom: 2rem;
-            animation: shake 0.5s ease-in-out, fadeInDown 0.5s ease-out;
-            box-shadow: 0 4px 20px rgba(255, 75, 43, 0.4);
-        }
-
-        .alert-banner.show {
-            display: flex;
-            align-items: center;
-            gap: 1rem;
-        }
-
-        .alert-banner .alert-text {
-            font-weight: 600;
-            font-size: 1.1rem;
-        }
-
-        .alert-banner .dismiss-btn {
-            margin-left: auto;
-            background: rgba(255, 255, 255, 0.2);
-            border: none;
-            color: white;
-            padding: 0.4rem 1rem;
-            border-radius: 8px;
-            cursor: pointer;
-            font-family: 'Outfit', sans-serif;
-        }
-
-        /* Dashboard Grid */
-        .dashboard-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-            gap: 2rem;
-            margin-bottom: 3rem;
-        }
-
-        .stat-card {
-            background: var(--card-bg);
-            backdrop-filter: blur(12px);
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            padding: 2rem;
-            border-radius: 24px;
-            transition: transform 0.3s ease;
-        }
-
-        .stat-card:hover {
-            transform: translateY(-5px);
-        }
-
-        .stat-label {
-            color: #94a3b8;
-            font-size: 0.9rem;
-            margin-bottom: 0.5rem;
-        }
-
-        .stat-value {
-            font-size: 2.5rem;
-            font-weight: 700;
-        }
-
-        /* Leaderboard Table */
-        .results-container {
-            background: var(--card-bg);
-            backdrop-filter: blur(12px);
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            border-radius: 24px;
-            overflow: hidden;
-            animation: fadeInUp 0.8s ease-out;
-        }
-
-        table {
-            width: 100%;
-            border-collapse: collapse;
-            text-align: left;
-        }
-
-        th {
-            background: rgba(255, 255, 255, 0.05);
-            padding: 1.5rem;
-            color: #94a3b8;
-            font-weight: 400;
-            text-transform: uppercase;
-            font-size: 0.8rem;
-            letter-spacing: 1px;
-        }
-
-        td {
-            padding: 1.5rem;
-            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
-            font-size: 1.1rem;
-        }
-
-        tr:last-child td {
-            border-bottom: none;
-        }
-
-        tr:hover td {
-            background: rgba(255, 255, 255, 0.02);
-        }
-
-        .lap-time {
-            color: var(--primary);
-            font-weight: 600;
-        }
-
-        @keyframes pulse {
-            0% { transform: scale(0.95); opacity: 0.7; }
-            70% { transform: scale(1.1); opacity: 1; }
-            100% { transform: scale(0.95); opacity: 0.7; }
-        }
-
-        @keyframes fadeInDown {
-            from { opacity: 0; transform: translateY(-20px); }
-            to { opacity: 1; transform: translateY(0); }
-        }
-
-        @keyframes fadeInUp {
-            from { opacity: 0; transform: translateY(20px); }
-            to { opacity: 1; transform: translateY(0); }
-        }
-
-        /* Violations Section */
-        .violations-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-            gap: 1.5rem;
-            margin-bottom: 3rem;
-        }
-
-        .violation-card {
-            background: rgba(255, 75, 43, 0.1);
-            border: 1px solid var(--danger);
-            border-radius: 16px;
-            overflow: hidden;
-            animation: shake 0.5s ease-in-out;
-        }
-
-        .violation-img {
-            width: 100%;
-            height: 150px;
-            object-fit: cover;
-        }
-
-        .violation-info {
-            padding: 1rem;
-        }
-
-        .violation-name {
-            font-weight: 800;
-            color: var(--danger);
-            font-size: 0.9rem;
-        }
-
-        .violation-time {
-            font-size: 0.75rem;
-            color: #94a3b8;
-        }
-
-        .violation-status {
-            font-size: 0.7rem;
-            padding: 2px 8px;
-            border-radius: 4px;
-            display: inline-block;
-            margin-top: 4px;
-        }
-
-        .violation-status.pending {
-            background: rgba(251, 191, 36, 0.2);
-            color: #fbbf24;
-        }
-
-        .violation-status.confirmed {
-            background: rgba(239, 68, 68, 0.2);
-            color: #ef4444;
-        }
-
-        .violation-status.dismissed {
-            background: rgba(34, 197, 94, 0.2);
-            color: #22c55e;
-        }
-
-        @keyframes shake {
-            0%, 100% { transform: translateX(0); }
-            25% { transform: translateX(-5px); }
-            75% { transform: translateX(5px); }
-        }
-
-        .section-title {
-            font-size: 1.5rem;
-            font-weight: 600;
-            margin-bottom: 1.5rem;
-            display: flex;
-            align-items: center;
-            gap: 0.5rem;
-        }
-
-        /* Mobile Responsive */
-        @media (max-width: 768px) {
-            body { padding: 1rem; }
-            .stat-value { font-size: 1.8rem; }
-            td, th { padding: 1rem; font-size: 0.9rem; }
-            header { flex-direction: column; gap: 1rem; }
-        }
+        :root{--primary:#00f2fe;--secondary:#4facfe;--danger:#ff4b2b;--bg:#0f172a;--card-bg:rgba(30,41,59,0.7);--text:#f8fafc}
+        *{margin:0;padding:0;box-sizing:border-box;font-family:'Outfit',sans-serif}
+        body{background:linear-gradient(135deg,#0f172a,#1e293b);color:var(--text);min-height:100vh;padding:2rem}
+        .container{max-width:1200px;margin:0 auto}
+        header{display:flex;justify-content:space-between;align-items:center;margin-bottom:2rem;flex-wrap:wrap;gap:1rem}
+        .header-left{display:flex;align-items:center;gap:1rem;flex-wrap:wrap}
+        .logo{font-size:2rem;font-weight:800;background:linear-gradient(to right,var(--primary),var(--secondary));-webkit-background-clip:text;-webkit-text-fill-color:transparent;letter-spacing:2px}
+        .nav-links{display:flex;align-items:center;gap:0.5rem}
+        .nav-link{color:#94a3b8;text-decoration:none;padding:0.4rem 0.8rem;border-radius:8px;font-size:0.85rem;transition:all .3s}
+        .nav-link:hover{color:var(--text);background:rgba(255,255,255,0.05)}
+        .badge{background:var(--danger);color:#fff;border-radius:50%;padding:2px 7px;font-size:0.7rem;font-weight:700;margin-left:4px}
+        .event-tag{background:rgba(0,242,254,0.15);border:1px solid var(--primary);color:var(--primary);padding:0.3rem 0.8rem;border-radius:8px;font-size:0.8rem;font-weight:600}
+        .header-actions{display:flex;align-items:center;gap:0.5rem}
+        .btn-sm{padding:0.4rem 0.8rem;border:1px solid rgba(255,255,255,0.15);background:rgba(255,255,255,0.05);color:#94a3b8;border-radius:8px;font-size:0.8rem;cursor:pointer;font-family:'Outfit';transition:all .2s}
+        .btn-sm:hover{color:var(--text);background:rgba(255,255,255,0.1)}
+        .btn-danger{border-color:var(--danger);color:var(--danger)}
+        .btn-danger:hover{background:rgba(255,75,43,0.2)}
+        .status{padding:0.4rem 1rem;background:rgba(34,197,94,0.2);border:1px solid #22c55e;border-radius:50px;color:#4ade80;font-size:0.85rem;display:flex;align-items:center;gap:0.5rem}
+        .pulse-dot{width:8px;height:8px;background:#22c55e;border-radius:50%;animation:pulse 2s infinite}
+        .dashboard-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:1.5rem;margin-bottom:2rem}
+        .stat-card{background:var(--card-bg);backdrop-filter:blur(12px);border:1px solid rgba(255,255,255,0.1);padding:1.5rem;border-radius:20px;transition:transform .3s}
+        .stat-card:hover{transform:translateY(-4px)}
+        .stat-label{color:#94a3b8;font-size:0.85rem;margin-bottom:0.3rem}
+        .stat-value{font-size:2.2rem;font-weight:700}
+        .results-container{background:var(--card-bg);backdrop-filter:blur(12px);border:1px solid rgba(255,255,255,0.1);border-radius:20px;overflow:hidden}
+        table{width:100%;border-collapse:collapse;text-align:left}
+        th{background:rgba(255,255,255,0.05);padding:1.2rem;color:#94a3b8;font-weight:400;text-transform:uppercase;font-size:0.75rem;letter-spacing:1px}
+        td{padding:1.2rem;border-bottom:1px solid rgba(255,255,255,0.05);font-size:1rem}
+        tr:last-child td{border-bottom:none}
+        tr:hover td{background:rgba(255,255,255,0.02)}
+        .lap-time{color:var(--primary);font-weight:600}
+        .section-title{font-size:1.3rem;font-weight:600;margin-bottom:1rem}
+        .alert-banner{display:none;background:linear-gradient(135deg,#ff4b2b,#ff416c);padding:0.8rem 1.5rem;border-radius:12px;margin-bottom:1.5rem;box-shadow:0 4px 20px rgba(255,75,43,0.4)}
+        .alert-banner.show{display:flex;align-items:center;gap:1rem}
+        .alert-banner .dismiss-btn{margin-left:auto;background:rgba(255,255,255,0.2);border:none;color:#fff;padding:0.3rem 0.8rem;border-radius:6px;cursor:pointer;font-family:'Outfit'}
+        .violations-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:1rem;margin-bottom:2rem}
+        .violation-card{background:rgba(255,75,43,0.1);border:1px solid var(--danger);border-radius:12px;overflow:hidden}
+        .violation-img{width:100%;height:120px;object-fit:cover}
+        .violation-info{padding:0.8rem}
+        .violation-name{font-weight:700;color:var(--danger);font-size:0.85rem}
+        .violation-time{font-size:0.7rem;color:#94a3b8}
+        .violation-status{font-size:0.65rem;padding:2px 6px;border-radius:4px;display:inline-block;margin-top:3px}
+        .violation-status.pending{background:rgba(251,191,36,0.2);color:#fbbf24}
+        .violation-status.confirmed{background:rgba(239,68,68,0.2);color:#ef4444}
+        .violation-status.dismissed{background:rgba(34,197,94,0.2);color:#22c55e}
+        /* Modal */
+        .modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,0.7);backdrop-filter:blur(8px);display:flex;align-items:center;justify-content:center;z-index:1000}
+        .modal{background:#1e293b;border:1px solid rgba(255,255,255,0.1);border-radius:24px;padding:2.5rem;max-width:480px;width:90%;box-shadow:0 20px 60px rgba(0,0,0,0.5)}
+        .modal h2{margin-bottom:0.5rem;font-size:1.5rem}
+        .modal p{color:#94a3b8;margin-bottom:1.5rem;font-size:0.9rem}
+        .modal select,.modal input[type="text"],.modal input[type="password"]{width:100%;padding:0.8rem;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.15);border-radius:10px;color:var(--text);font-size:1rem;font-family:'Outfit';margin-bottom:0.8rem;outline:none}
+        .modal select:focus,.modal input:focus{border-color:var(--primary)}
+        .modal-actions{display:flex;gap:0.5rem;margin-top:1rem}
+        .modal-btn{flex:1;padding:0.8rem;border:none;border-radius:10px;font-size:0.95rem;font-weight:600;cursor:pointer;font-family:'Outfit';transition:transform .2s}
+        .modal-btn:hover{transform:translateY(-2px)}
+        .modal-btn-primary{background:linear-gradient(135deg,var(--primary),var(--secondary));color:#0f172a}
+        .modal-btn-secondary{background:rgba(255,255,255,0.1);color:var(--text)}
+        .modal-btn-danger{background:linear-gradient(135deg,#ff4b2b,#ff416c);color:#fff}
+        .radio-group{margin:1rem 0}
+        .radio-group label{display:block;padding:0.6rem 0;color:#cbd5e1;font-size:0.9rem;cursor:pointer}
+        .radio-group input{margin-right:0.5rem}
+        .error-inline{color:var(--danger);font-size:0.85rem;margin-top:0.5rem;display:none}
+        .hidden{display:none!important}
+        @keyframes pulse{0%{transform:scale(.95);opacity:.7}70%{transform:scale(1.1);opacity:1}100%{transform:scale(.95);opacity:.7}}
+        @media(max-width:768px){body{padding:1rem}.stat-value{font-size:1.6rem}td,th{padding:0.8rem;font-size:0.85rem}header{flex-direction:column}}
     </style>
 </head>
 <body>
-    <div class="container">
-        <header>
-            <div class="header-left">
-                <div class="logo">RunnerTrack</div>
-                <nav class="nav-links">
-                    <a href="/" class="nav-link" style="color: var(--primary);">Dashboard</a>
-                    <a href="/judge" class="nav-link" id="judge-link">
-                        🔒 Judge Panel
-                        <span class="badge" id="violation-badge" style="display: none;">0</span>
-                    </a>
-                </nav>
+    <!-- Event Selector Modal -->
+    <div class="modal-overlay hidden" id="event-modal">
+        <div class="modal">
+            <h2>🏁 Select or Create Event</h2>
+            <p>เลือก Event ที่มีอยู่ หรือสร้างใหม่ก่อนเริ่มใช้งาน</p>
+            <select id="event-select"><option value="">-- เลือก Event --</option></select>
+            <div class="modal-actions">
+                <button class="modal-btn modal-btn-primary" onclick="openSelectedEvent()">Open Selected</button>
             </div>
-            <div class="status">
-                <div class="pulse-dot"></div>
-                Live Monitoring
+            <hr style="border-color:rgba(255,255,255,0.1);margin:1.2rem 0">
+            <input type="text" id="new-event-name" placeholder="ชื่อ Event ใหม่ เช่น Marathon_May_2025">
+            <div class="modal-actions">
+                <button class="modal-btn modal-btn-secondary" onclick="createNewEvent()">➕ Create New Event</button>
             </div>
-        </header>
-
-        <!-- Alert Banner for real-time violation push -->
-        <div class="alert-banner" id="alert-banner">
-            <span style="font-size: 1.5rem;">🚨</span>
-            <span class="alert-text" id="alert-text">Violation detected!</span>
-            <button class="dismiss-btn" onclick="dismissAlert()">Dismiss</button>
-        </div>
-
-        <div class="dashboard-grid">
-            <div class="stat-card">
-                <div class="stat-label">นักวิ่งทั้งหมด</div>
-                <div class="stat-value" id="total-runners">0</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-label">เข้าเส้นชัยแล้ว</div>
-                <div class="stat-value" id="finished-count" style="color: #4ade80;">0</div>
-            </div>
-            <div class="stat-card" style="border-color: var(--danger);">
-                <div class="stat-label">ความผิดปกติที่พบ</div>
-                <div class="stat-value" id="violation-count" style="color: var(--danger);">0</div>
-            </div>
-        </div>
-
-        <div id="violation-section" style="display: none;">
-            <div class="section-title">
-                <span style="color: var(--danger);">⚠️ รายงานความผิดปกติ (Real-time)</span>
-            </div>
-            <div class="violations-grid" id="violations-container">
-                <!-- Violation cards injected by JS -->
-            </div>
-        </div>
-
-        <div class="section-title">
-            <span>🏁 ตารางอันดับนักวิ่ง</span>
-        </div>
-
-        <div class="results-container">
-            <table>
-                <thead>
-                    <tr>
-                        <th>ลำดับ</th>
-                        <th>ชื่อนักวิ่ง</th>
-                        <th>จุดที่ 1</th>
-                        <th>จุดที่ 2 (เข้าเส้นชัย)</th>
-                        <th>เวลารวม</th>
-                    </tr>
-                </thead>
-                <tbody id="runners-table">
-                    <!-- ข้อมูลจะถูกเติมโดย JS -->
-                </tbody>
-            </table>
         </div>
     </div>
 
-    <script>
-        // Socket.IO connection
-        const socket = io();
-        let violationCount = 0;
+    <!-- Clear Data Modal -->
+    <div class="modal-overlay hidden" id="clear-modal">
+        <div class="modal">
+            <h2>🗑️ ลบข้อมูล</h2>
+            <p style="color:var(--danger)">⚠️ การกระทำนี้ไม่สามารถย้อนกลับได้</p>
+            <div class="radio-group">
+                <label><input type="radio" name="clear-target" value="current" checked> ล้างข้อมูล Event ปัจจุบัน (เก็บโฟลเดอร์ไว้)</label>
+                <label><input type="radio" name="clear-target" value="all"> ลบ Event ทั้งหมด (ลบโฟลเดอร์ กลับสู่หน้าเลือก Event)</label>
+            </div>
+            <input type="password" id="clear-pin" placeholder="กรอก Judge PIN เพื่อยืนยัน">
+            <div class="error-inline" id="clear-error">❌ PIN ไม่ถูกต้อง</div>
+            <div class="modal-actions">
+                <button class="modal-btn modal-btn-danger" onclick="confirmClear()">Confirm Delete</button>
+                <button class="modal-btn modal-btn-secondary" onclick="closeClearModal()">Cancel</button>
+            </div>
+        </div>
+    </div>
 
-        // Beep audio for alerts
-        function playBeep() {
-            try {
-                const ctx = new (window.AudioContext || window.webkitAudioContext)();
-                const osc = ctx.createOscillator();
-                const gain = ctx.createGain();
-                osc.connect(gain);
-                gain.connect(ctx.destination);
-                osc.frequency.value = 880;
-                osc.type = 'square';
-                gain.gain.value = 0.3;
-                osc.start();
-                setTimeout(() => { osc.stop(); ctx.close(); }, 200);
-            } catch (e) { /* Audio not supported */ }
-        }
+    <div class="container" id="main-content">
+        <header>
+            <div class="header-left">
+                <div class="logo">RunnerTrack</div>
+                <span class="event-tag" id="event-tag">📌 No Event</span>
+                <nav class="nav-links">
+                    <a href="/" class="nav-link" style="color:var(--primary)">Dashboard</a>
+                    <a href="/judge" class="nav-link">🔒 Judge<span class="badge hidden" id="violation-badge">0</span></a>
+                </nav>
+            </div>
+            <div class="header-actions">
+                <button class="btn-sm" onclick="showEventModal()">🔄 Switch Event</button>
+                <button class="btn-sm btn-danger" onclick="showClearModal()">🗑️ Clear Data</button>
+                <div class="status"><div class="pulse-dot"></div>Live</div>
+            </div>
+        </header>
+        <div class="alert-banner" id="alert-banner">
+            <span>🚨</span><span id="alert-text">Violation!</span>
+            <button class="dismiss-btn" onclick="document.getElementById('alert-banner').classList.remove('show')">Dismiss</button>
+        </div>
+        <div class="dashboard-grid">
+            <div class="stat-card"><div class="stat-label">นักวิ่งทั้งหมด</div><div class="stat-value" id="total-runners">0</div></div>
+            <div class="stat-card"><div class="stat-label">เข้าเส้นชัยแล้ว</div><div class="stat-value" id="finished-count" style="color:#4ade80">0</div></div>
+            <div class="stat-card" style="border-color:var(--danger)"><div class="stat-label">ความผิดปกติ</div><div class="stat-value" id="violation-count" style="color:var(--danger)">0</div></div>
+        </div>
+        <div id="violation-section" class="hidden">
+            <div class="section-title" style="color:var(--danger)">⚠️ Violations (Real-time)</div>
+            <div class="violations-grid" id="violations-container"></div>
+        </div>
+        <div class="section-title">🏁 ตารางอันดับนักวิ่ง</div>
+        <div class="results-container">
+            <table><thead><tr><th>ลำดับ</th><th>ชื่อ</th><th>CP1</th><th>CP2</th><th>เวลารวม</th></tr></thead>
+            <tbody id="runners-table"></tbody></table>
+        </div>
+    </div>
+<script>
+const socket = io();
+let violationCount = 0;
 
-        // Real-time violation alert via Socket.IO
-        socket.on('new_violation', (data) => {
-            console.log('🚨 New violation:', data);
-            playBeep();
+function playBeep(){try{const c=new(window.AudioContext||window.webkitAudioContext)(),o=c.createOscillator(),g=c.createGain();o.connect(g);g.connect(c.destination);o.frequency.value=880;o.type='square';g.gain.value=0.3;o.start();setTimeout(()=>{o.stop();c.close()},200)}catch(e){}}
 
-            // Show alert banner
-            const banner = document.getElementById('alert-banner');
-            const alertText = document.getElementById('alert-text');
-            alertText.textContent = `⚠️ ${data.Name} — Bib ${data.Detected_Bib} (Expected: ${data.Expected_Bib})`;
-            banner.classList.add('show');
+// ---- Event Management ----
+async function checkActiveEvent(){
+    const r=await fetch('/api/events/active');
+    const d=await r.json();
+    if(!d.active_event){showEventModal();document.getElementById('main-content').style.opacity='0.2'}
+    else{document.getElementById('event-tag').textContent='📌 '+d.active_event;document.getElementById('main-content').style.opacity='1'}
+}
 
-            // Update badge
-            violationCount++;
-            updateBadge();
+async function loadEventList(){
+    const r=await fetch('/api/events');
+    const events=await r.json();
+    const sel=document.getElementById('event-select');
+    sel.innerHTML='<option value="">-- เลือก Event --</option>';
+    events.forEach(e=>{const o=document.createElement('option');o.value=e;o.textContent=e;sel.appendChild(o)});
+}
 
-            // Refresh violation list
-            updateViolations();
-        });
+function showEventModal(){loadEventList();document.getElementById('event-modal').classList.remove('hidden')}
 
-        socket.on('violation_updated', (data) => {
-            updateViolations();
-        });
+async function openSelectedEvent(){
+    const name=document.getElementById('event-select').value;
+    if(!name){alert('กรุณาเลือก Event');return}
+    const r=await fetch('/api/events/select',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})});
+    const d=await r.json();
+    if(d.success){document.getElementById('event-modal').classList.add('hidden');location.reload()}
+    else{alert(d.error||'Error')}
+}
 
-        function dismissAlert() {
-            document.getElementById('alert-banner').classList.remove('show');
-        }
+async function createNewEvent(){
+    const name=document.getElementById('new-event-name').value.trim();
+    if(!name){alert('กรุณาพิมพ์ชื่อ Event');return}
+    const r=await fetch('/api/events/create',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})});
+    const d=await r.json();
+    if(d.success){document.getElementById('event-modal').classList.add('hidden');location.reload()}
+    else{alert(d.error||'Error')}
+}
 
-        function updateBadge() {
-            const badge = document.getElementById('violation-badge');
-            if (violationCount > 0) {
-                badge.style.display = 'inline';
-                badge.textContent = violationCount;
-            }
-        }
+// ---- Clear Data ----
+function showClearModal(){document.getElementById('clear-modal').classList.remove('hidden');document.getElementById('clear-pin').value='';document.getElementById('clear-error').style.display='none'}
+function closeClearModal(){document.getElementById('clear-modal').classList.add('hidden')}
 
-        async function updateData() {
-            try {
-                const response = await fetch('/api/data');
-                const data = await response.json();
+async function confirmClear(){
+    const pin=document.getElementById('clear-pin').value;
+    const target=document.querySelector('input[name="clear-target"]:checked').value;
+    const r=await fetch('/api/events/clear',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pin,target})});
+    const d=await r.json();
+    if(d.success){closeClearModal();location.reload()}
+    else{document.getElementById('clear-error').style.display='block';document.getElementById('clear-error').textContent='❌ '+(d.error||'Error')}
+}
 
-                const tableBody = document.getElementById('runners-table');
-                const totalRunnersEl = document.getElementById('total-runners');
-                const finishedCountEl = document.getElementById('finished-count');
+// ---- Socket.IO ----
+socket.on('new_violation',d=>{playBeep();document.getElementById('alert-banner').classList.add('show');document.getElementById('alert-text').textContent=`⚠️ ${d.Name} — Bib ${d.Detected_Bib}`;violationCount++;updateBadge();updateViolations()});
+socket.on('violation_updated',()=>updateViolations());
+socket.on('event_changed',()=>location.reload());
 
-                tableBody.innerHTML = '';
-                let finishedCount = 0;
+function updateBadge(){const b=document.getElementById('violation-badge');if(violationCount>0){b.classList.remove('hidden');b.textContent=violationCount}}
 
-                data.forEach((runner, index) => {
-                    const row = document.createElement('tr');
+async function updateData(){
+    try{const r=await fetch('/api/data');const data=await r.json();if(data.error)return;
+    const tb=document.getElementById('runners-table');tb.innerHTML='';let fin=0;
+    data.forEach((run,i)=>{if(run.Total_Time!=='-')fin++;const row=document.createElement('tr');
+    row.innerHTML=`<td>#${i+1}</td><td style="font-weight:600">${run.Name}</td><td>${run.CP1_Time}</td><td>${run.CP2_Time}</td><td class="lap-time">${run.Total_Time}</td>`;tb.appendChild(row)});
+    document.getElementById('total-runners').textContent=data.length;document.getElementById('finished-count').textContent=fin}catch(e){}}
 
-                    if (runner.Total_Time !== "-") finishedCount++;
+async function updateViolations(){
+    try{const r=await fetch('/api/violations');const data=await r.json();
+    const c=document.getElementById('violations-container'),s=document.getElementById('violation-section');
+    document.getElementById('violation-count').textContent=data.length;
+    violationCount=data.filter(v=>v.Status==='pending').length;updateBadge();
+    if(data.length>0){s.classList.remove('hidden');c.innerHTML='';
+    data.forEach(v=>{const ip=v.Image_Path?v.Image_Path.replace(/\\/g,'/'):'';const iu=ip.includes('violations/')?'/'+ip.substring(ip.indexOf('violations/')):'';
+    const card=document.createElement('div');card.className='violation-card';
+    card.innerHTML=`${iu?`<img src="${iu}" class="violation-img">`:''}
+    <div class="violation-info"><div class="violation-name">${v.Name}</div><div class="violation-time">Bib:${v.Detected_Bib}</div><div class="violation-time">${v.Timestamp}</div><span class="violation-status ${v.Status}">${v.Status}</span></div>`;
+    c.appendChild(card)})}else{s.classList.add('hidden')}}catch(e){}}
 
-                    row.innerHTML = `
-                        <td>#${index + 1}</td>
-                        <td style="font-weight: 600;">${runner.Name}</td>
-                        <td>${runner.CP1_Time}</td>
-                        <td>${runner.CP2_Time}</td>
-                        <td class="lap-time">${runner.Total_Time}</td>
-                    `;
-                    tableBody.appendChild(row);
-                });
-
-                totalRunnersEl.innerText = data.length;
-                finishedCountEl.innerText = finishedCount;
-
-            } catch (error) {
-                console.error("Failed to fetch data:", error);
-            }
-        }
-
-        async function updateViolations() {
-            try {
-                const response = await fetch('/api/violations');
-                const data = await response.json();
-
-                const container = document.getElementById('violations-container');
-                const section = document.getElementById('violation-section');
-                const countEl = document.getElementById('violation-count');
-
-                countEl.innerText = data.length;
-                violationCount = data.filter(v => v.Status === 'pending').length;
-                updateBadge();
-
-                if (data.length > 0) {
-                    section.style.display = 'block';
-                    container.innerHTML = '';
-                    // No slice limit — show all violations
-                    data.forEach(v => {
-                        const imagePath = v.Image_Path ? v.Image_Path.replace(/\\/g, '/') : '';
-                        const imageUrl = imagePath.includes('violations/') ?
-                            '/' + imagePath.substring(imagePath.indexOf('violations/')) : '';
-
-                        const card = document.createElement('div');
-                        card.className = 'violation-card';
-                        card.innerHTML = `
-                            ${imageUrl ? `<img src="${imageUrl}" class="violation-img" alt="violation">` : ''}
-                            <div class="violation-info">
-                                <div class="violation-name">${v.Name}</div>
-                                <div class="violation-time">Bib: ${v.Detected_Bib} (Expected: ${v.Expected_Bib})</div>
-                                <div class="violation-time">${v.Timestamp}</div>
-                                <span class="violation-status ${v.Status}">${v.Status}</span>
-                            </div>
-                        `;
-                        container.appendChild(card);
-                    });
-                } else {
-                    section.style.display = 'none';
-                }
-            } catch (e) { console.error(e); }
-        }
-
-        // Poll data every 1s, violations every 5s (Socket.IO handles instant alerts)
-        setInterval(updateData, 1000);
-        setInterval(updateViolations, 5000);
-        updateData();
-        updateViolations();
-    </script>
+checkActiveEvent();setInterval(updateData,1000);setInterval(updateViolations,5000);updateData();updateViolations();
+</script>
 </body>
 </html>

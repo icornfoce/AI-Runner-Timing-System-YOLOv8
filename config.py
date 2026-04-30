@@ -13,6 +13,10 @@ VIOLATIONS_LOG_FILE = "violations_log.csv"
 VIOLATION_DIR = "violations"
 DATA_PATH = "Data"
 
+# --- Event/Session Management ---
+EVENTS_DIR = "events"                # โฟลเดอร์รากที่เก็บข้อมูลทุก Event
+ACTIVE_EVENT_FILE = "active_event.txt"  # ไฟล์เก็บชื่อ Event ที่ใช้งานอยู่
+
 # --- Cooldowns ---
 COOLDOWN_SECONDS = 30           # ป้องกันการบันทึกซ้ำซ้อนในจุดเดิม
 VIOLATION_COOLDOWN_SECONDS = 60 # ป้องกันการบันทึกภาพ violation ซ้ำซ้อน
