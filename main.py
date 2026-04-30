@@ -87,6 +87,9 @@ def main():
                                  fx=config.FRAME_RESIZE_FACTOR,
                                  fy=config.FRAME_RESIZE_FACTOR)
         # Robust conversion to 8-bit RGB for AI processing
+        if small_frame.dtype != np.uint8:
+            small_frame = (small_frame / 256).astype(np.uint8) if small_frame.dtype == np.uint16 else small_frame.astype(np.uint8)
+
         if len(small_frame.shape) == 2:  # Grayscale
             rgb_small_frame = cv2.cvtColor(small_frame, cv2.COLOR_GRAY2RGB)
         elif small_frame.shape[2] == 4:  # BGRA
@@ -139,6 +142,8 @@ def main():
                         face_names.append(name)
                 except Exception as e:
                     print(f"❌ Face recognition error: {e}")
+                    if 'rgb_small_frame' in locals():
+                        print(f"   Frame info: shape={rgb_small_frame.shape}, dtype={rgb_small_frame.dtype}")
                     face_names = ["Error"] * len(face_locations)
             # Issue 6 fix: removed redundant `else: face_names = []` (dead code)
 

@@ -21,18 +21,35 @@ def load_known_faces(data_path):
             if image_name.lower().endswith(('.png', '.jpg', '.jpeg')):
                 image_path = os.path.join(person_dir, image_name)
                 try:
-                    # ใช้ face_recognition.load_image_file โดยตรง (ใช้ PIL โหลด)
-                    image = face_recognition.load_image_file(image_path)
+                    # Use cv2 for robust image loading
+                    img = cv2.imread(image_path)
+                    if img is None:
+                        print(f"⚠️ Could not read {image_name}")
+                        continue
                     
-                    # บังคับเป็น uint8 และ contiguous อีกครั้งเพื่อความชัวร์ (แก้ปัญหา dlib บน Python 3.12)
-                    image = np.ascontiguousarray(image, dtype=np.uint8)
+                    # Ensure 8-bit depth
+                    if img.dtype != np.uint8:
+                        img = (img / 256).astype(np.uint8) if img.dtype == np.uint16 else img.astype(np.uint8)
+
+                    # Robust conversion to RGB
+                    if len(img.shape) == 2:  # Grayscale
+                        rgb_img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+                    elif img.shape[2] == 4:  # BGRA
+                        rgb_img = cv2.cvtColor(img, cv2.COLOR_BGRA2RGB)
+                    else:  # BGR
+                        rgb_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
                     
-                    encodings = face_recognition.face_encodings(image)
+                    rgb_img = np.ascontiguousarray(rgb_img, dtype=np.uint8)
+                    
+                    encodings = face_recognition.face_encodings(rgb_img)
                     if len(encodings) > 0:
                         known_face_encodings.append(encodings[0])
                         known_face_names.append(person_name)
                 except Exception as e:
+                    # Capture more detail in the error message
                     print(f"❌ Error loading {image_name} from {person_name}: {e}")
+                    if 'rgb_img' in locals():
+                        print(f"   Image info: shape={rgb_img.shape}, dtype={rgb_img.dtype}, contiguous={rgb_img.flags.c_contiguous}")
     print(f"Loaded {len(known_face_encodings)} face(s) from {data_path}")
     return np.array(known_face_encodings), known_face_names
 
