@@ -1,9 +1,16 @@
+# --- Computer Vision & AI ---
 opencv-python
 face_recognition
 numpy
-pandas
 ultralytics
+easyocr
+Pillow
+
+# --- Web Framework ---
 flask
 flask-socketio
-easyocr
+pandas
 requests
+
+# --- Socket Server (Optional but recommended for Production) ---
+eventlet

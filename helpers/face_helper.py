@@ -21,17 +21,18 @@ def load_known_faces(data_path):
             if image_name.lower().endswith(('.png', '.jpg', '.jpeg')):
                 image_path = os.path.join(person_dir, image_name)
                 try:
-                    bgr_image = cv2.imread(image_path)
-                    if bgr_image is None:
-                        continue
-                    image = cv2.cvtColor(bgr_image, cv2.COLOR_BGR2RGB)
+                    # ใช้ face_recognition.load_image_file โดยตรง (ใช้ PIL โหลด)
+                    image = face_recognition.load_image_file(image_path)
+                    
+                    # บังคับเป็น uint8 และ contiguous อีกครั้งเพื่อความชัวร์ (แก้ปัญหา dlib บน Python 3.12)
                     image = np.ascontiguousarray(image, dtype=np.uint8)
+                    
                     encodings = face_recognition.face_encodings(image)
                     if len(encodings) > 0:
                         known_face_encodings.append(encodings[0])
                         known_face_names.append(person_name)
                 except Exception as e:
-                    print(f"Error loading {image_name}: {e}")
+                    print(f"❌ Error loading {image_name} from {person_name}: {e}")
     print(f"Loaded {len(known_face_encodings)} face(s) from {data_path}")
     return np.array(known_face_encodings), known_face_names
 

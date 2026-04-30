@@ -86,7 +86,14 @@ def main():
         small_frame = cv2.resize(frame, (0, 0),
                                  fx=config.FRAME_RESIZE_FACTOR,
                                  fy=config.FRAME_RESIZE_FACTOR)
-        rgb_small_frame = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
+        # Robust conversion to 8-bit RGB for AI processing
+        if len(small_frame.shape) == 2:  # Grayscale
+            rgb_small_frame = cv2.cvtColor(small_frame, cv2.COLOR_GRAY2RGB)
+        elif small_frame.shape[2] == 4:  # BGRA
+            rgb_small_frame = cv2.cvtColor(small_frame, cv2.COLOR_BGRA2RGB)
+        else:  # BGR
+            rgb_small_frame = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
+
         rgb_small_frame = np.ascontiguousarray(rgb_small_frame, dtype=np.uint8)
 
         if process_this_frame:
@@ -107,28 +114,32 @@ def main():
             # --- Face Recognition ---
             face_names = []
             if len(face_locations) > 0:
-                face_encodings = face_recognition.face_encodings(rgb_small_frame, face_locations)
-                for face_encoding in face_encodings:
-                    name = "Unknown"
-                    if len(known_face_encodings) > 0:
-                        face_distances = face_recognition.face_distance(known_face_encodings, face_encoding)
-                        best_match_index = np.argmin(face_distances)
-                        if face_distances[best_match_index] <= config.FACE_DISTANCE_THRESHOLD:
-                            name = known_face_names[best_match_index]
+                try:
+                    face_encodings = face_recognition.face_encodings(rgb_small_frame, face_locations)
+                    for face_encoding in face_encodings:
+                        name = "Unknown"
+                        if len(known_face_encodings) > 0:
+                            face_distances = face_recognition.face_distance(known_face_encodings, face_encoding)
+                            best_match_index = np.argmin(face_distances)
+                            if face_distances[best_match_index] <= config.FACE_DISTANCE_THRESHOLD:
+                                name = known_face_names[best_match_index]
 
-                            # บันทึกเวลาเมื่อเจอคนรู้จัก
-                            now = time.time()
-                            if name not in session_cooldowns or (now - session_cooldowns[name]) > config.COOLDOWN_SECONDS:
-                                # Bug 2 fix: wrap sender in try/except
-                                if config.MODE == "client":
-                                    try:
-                                        client_sender.send_checkpoint(name, config.CHECKPOINT_ID)
-                                    except Exception as e:
-                                        print(f"⚠️ Could not reach server: {e}")
-                                else:
-                                    record_checkpoint(name, config.CHECKPOINT_ID)
-                                session_cooldowns[name] = now
-                    face_names.append(name)
+                                # บันทึกเวลาเมื่อเจอคนรู้จัก
+                                now = time.time()
+                                if name not in session_cooldowns or (now - session_cooldowns[name]) > config.COOLDOWN_SECONDS:
+                                    # Bug 2 fix: wrap sender in try/except
+                                    if config.MODE == "client":
+                                        try:
+                                            client_sender.send_checkpoint(name, config.CHECKPOINT_ID)
+                                        except Exception as e:
+                                            print(f"⚠️ Could not reach server: {e}")
+                                    else:
+                                        record_checkpoint(name, config.CHECKPOINT_ID)
+                                    session_cooldowns[name] = now
+                        face_names.append(name)
+                except Exception as e:
+                    print(f"❌ Face recognition error: {e}")
+                    face_names = ["Error"] * len(face_locations)
             # Issue 6 fix: removed redundant `else: face_names = []` (dead code)
 
         process_this_frame = not process_this_frame
@@ -238,8 +249,18 @@ def main():
         cv2.putText(frame, f"FPS: {fps:.1f} | {mode_label}",
                     (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
 
-        cv2.imshow('Runner Timing System', frame)
-        if cv2.waitKey(1) & 0xFF == ord('q'):
+        try:
+            cv2.imshow('Runner Timing System', frame)
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+        except cv2.error as e:
+            if "not implemented" in str(e):
+                print("❌ OpenCV GUI Error: It seems 'opencv-python-headless' is installed instead of 'opencv-python'.")
+                print("💡 To fix this, run:")
+                print("   pip uninstall opencv-python-headless")
+                print("   pip install opencv-python")
+            else:
+                print(f"❌ OpenCV Error: {e}")
             break
 
     video_capture.release()
