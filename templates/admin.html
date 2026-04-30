@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Staff Portal | RunnerTrack</title>
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&display=swap" rel="stylesheet">
+<style>
+:root{--primary:#00f2fe;--secondary:#4facfe;--danger:#ff4b2b;--success:#22c55e;--bg:#0f172a;--card:rgba(30,41,59,0.8);--text:#f8fafc;--muted:#94a3b8;--border:rgba(255,255,255,0.1);}
+*{margin:0;padding:0;box-sizing:border-box;font-family:'Outfit',sans-serif;}
+body{background:linear-gradient(135deg,#0f172a 0%,#1e293b 100%);color:var(--text);min-height:100vh;overflow-x:hidden;}
+/* LOGIN */
+#login-screen{display:flex;align-items:center;justify-content:center;min-height:100vh;padding:2rem;}
+.login-card{background:var(--card);backdrop-filter:blur(20px);border:1px solid var(--border);border-radius:28px;padding:3rem 2.5rem;width:100%;max-width:420px;text-align:center;animation:fadeInUp .6s ease;}
+.login-logo{font-size:2rem;font-weight:800;background:linear-gradient(to right,var(--primary),var(--secondary));-webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:.5rem;}
+.login-sub{color:var(--muted);margin-bottom:2rem;font-size:.95rem;}
+.input-group{position:relative;margin-bottom:1.2rem;}
+.input-group input{width:100%;padding:1rem 1.2rem;background:rgba(255,255,255,0.06);border:1px solid var(--border);border-radius:14px;color:var(--text);font-size:1rem;outline:none;transition:border .2s;}
+.input-group input:focus{border-color:var(--primary);}
+.btn-primary{width:100%;padding:1rem;background:linear-gradient(to right,var(--primary),var(--secondary));border:none;border-radius:14px;color:#0f172a;font-weight:700;font-size:1rem;cursor:pointer;transition:opacity .2s;margin-bottom:1rem;}
+.btn-primary:hover{opacity:.85;}
+.error-msg{color:var(--danger);font-size:.88rem;min-height:1.2rem;}
+.shake{animation:shake .4s ease;}
+/* DASHBOARD */
+#dashboard{display:none;}
+.topbar{background:rgba(15,23,42,.95);backdrop-filter:blur(12px);border-bottom:1px solid var(--border);padding:1rem 2rem;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:100;}
+.topbar-title{font-size:1.3rem;font-weight:700;background:linear-gradient(to right,var(--primary),var(--secondary));-webkit-background-clip:text;-webkit-text-fill-color:transparent;}
+.topbar-status{display:flex;align-items:center;gap:.5rem;font-size:.85rem;color:#4ade80;}
+.dot{width:8px;height:8px;background:#22c55e;border-radius:50%;box-shadow:0 0 8px #22c55e;animation:pulse 2s infinite;}
+.btn-logout{padding:.5rem 1.2rem;background:rgba(255,75,43,.15);border:1px solid var(--danger);border-radius:50px;color:var(--danger);cursor:pointer;font-size:.85rem;transition:background .2s;}
+.btn-logout:hover{background:rgba(255,75,43,.3);}
+.main-content{padding:2rem;max-width:1300px;margin:0 auto;}
+.section-card{background:var(--card);backdrop-filter:blur(12px);border:1px solid var(--border);border-radius:24px;padding:1.8rem;margin-bottom:2rem;}
+.section-hdr{display:flex;align-items:center;justify-content:space-between;margin-bottom:1.5rem;flex-wrap:gap;}
+.section-hdr h2{font-size:1.2rem;font-weight:700;}
+.search-box{padding:.6rem 1rem;background:rgba(255,255,255,.06);border:1px solid var(--border);border-radius:12px;color:var(--text);font-size:.9rem;outline:none;width:220px;}
+.search-box:focus{border-color:var(--primary);}
+.btn-add{padding:.6rem 1.2rem;background:rgba(0,242,254,.15);border:1px solid var(--primary);border-radius:12px;color:var(--primary);cursor:pointer;font-size:.9rem;font-weight:600;transition:background .2s;}
+.btn-add:hover{background:rgba(0,242,254,.25);}
+table{width:100%;border-collapse:collapse;}
+th{padding:1rem;color:var(--muted);font-weight:400;text-transform:uppercase;font-size:.75rem;letter-spacing:1px;text-align:left;background:rgba(255,255,255,.03);}
+td{padding:.9rem 1rem;border-bottom:1px solid rgba(255,255,255,.05);font-size:.95rem;vertical-align:middle;}
+tr:last-child td{border-bottom:none;}
+tr:hover td{background:rgba(255,255,255,.02);}
+.time-badge{color:var(--primary);font-weight:600;}
+.btn-icon{padding:.4rem .8rem;border-radius:10px;cursor:pointer;font-size:.8rem;border:none;transition:all .2s;}
+.btn-edit{background:rgba(79,172,254,.15);color:var(--secondary);border:1px solid var(--secondary);}
+.btn-edit:hover{background:rgba(79,172,254,.3);}
+.btn-del{background:rgba(255,75,43,.12);color:var(--danger);border:1px solid var(--danger);}
+.btn-del:hover{background:rgba(255,75,43,.25);}
+.btn-save{background:rgba(34,197,94,.15);color:#4ade80;border:1px solid var(--success);}
+.btn-save:hover{background:rgba(34,197,94,.3);}
+.btn-cancel{background:rgba(255,255,255,.08);color:var(--muted);border:1px solid var(--border);}
+.time-input{padding:.3rem .6rem;background:rgba(255,255,255,.08);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.85rem;width:100px;outline:none;}
+.time-input:focus{border-color:var(--primary);}
+/* Violations */
+.v-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:1.2rem;}
+.v-card{background:rgba(255,75,43,.07);border:1px solid rgba(255,75,43,.3);border-radius:16px;overflow:hidden;display:flex;align-items:center;gap:1rem;padding:1rem;}
+.v-thumb{width:90px;height:68px;object-fit:cover;border-radius:10px;cursor:pointer;flex-shrink:0;}
+.v-info{flex:1;min-width:0;}
+.v-name{font-weight:700;color:var(--danger);font-size:.95rem;}
+.v-msg{font-size:.78rem;color:var(--muted);margin:.2rem 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.v-ts{font-size:.72rem;color:#475569;}
+/* Modal */
+.modal-bg{display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:200;align-items:center;justify-content:center;}
+.modal-bg.active{display:flex;}
+.modal{background:#1e293b;border:1px solid var(--border);border-radius:24px;padding:2rem;width:100%;max-width:420px;animation:fadeInUp .3s ease;}
+.modal h3{margin-bottom:1.5rem;font-size:1.1rem;}
+.form-group{margin-bottom:1.2rem;}
+.form-group label{display:block;color:var(--muted);font-size:.85rem;margin-bottom:.4rem;}
+.form-group input{width:100%;padding:.8rem 1rem;background:rgba(255,255,255,.06);border:1px solid var(--border);border-radius:12px;color:var(--text);font-size:.95rem;outline:none;}
+.form-group input:focus{border-color:var(--primary);}
+.modal-actions{display:flex;gap:.8rem;margin-top:1.5rem;}
+.modal-actions button{flex:1;padding:.8rem;border-radius:12px;cursor:pointer;font-size:.95rem;font-weight:600;border:none;}
+/* Lightbox */
+.lightbox{display:none;position:fixed;inset:0;background:rgba(0,0,0,.88);z-index:300;align-items:center;justify-content:center;cursor:pointer;}
+.lightbox.active{display:flex;}
+.lightbox img{max-width:92%;max-height:90%;border-radius:16px;}
+/* Animations */
+@keyframes fadeInUp{from{opacity:0;transform:translateY(20px)}to{opacity:1;transform:translateY(0)}}
+@keyframes pulse{0%,100%{transform:scale(.95);opacity:.7}70%{transform:scale(1.1);opacity:1}}
+@keyframes shake{0%,100%{transform:translateX(0)}25%{transform:translateX(-8px)}75%{transform:translateX(8px)}}
+.empty-state{text-align:center;padding:3rem;color:var(--muted);}
+@media(max-width:768px){.main-content{padding:1rem;}.search-box{width:140px;}td,th{padding:.7rem .5rem;font-size:.82rem;}.v-grid{grid-template-columns:1fr;}}
+</style>
+</head>
+<body>
+
+<!-- LOGIN SCREEN -->
+<div id="login-screen">
+  <div class="login-card" id="login-card">
+    <div class="login-logo">🔐 RunnerTrack</div>
+    <div class="login-sub">Staff Portal — กรุณาเข้าสู่ระบบ</div>
+    <div class="input-group">
+      <input type="password" id="pw-input" placeholder="รหัสผ่าน" onkeydown="if(event.key==='Enter')doLogin()">
+    </div>
+    <button class="btn-primary" onclick="doLogin()">เข้าสู่ระบบ</button>
+    <div class="error-msg" id="login-err"></div>
+  </div>
+</div>
+
+<!-- DASHBOARD -->
+<div id="dashboard">
+  <div class="topbar">
+    <div class="topbar-title">🏃 RunnerTrack Staff Portal</div>
+    <div class="topbar-status"><div class="dot"></div> เชื่อมต่อแล้ว</div>
+    <button class="btn-logout" onclick="doLogout()">🚪 ออกจากระบบ</button>
+  </div>
+
+  <div class="main-content">
+
+    <!-- SECTION A: RUNNERS -->
+    <div class="section-card">
+      <div class="section-hdr">
+        <h2>📋 ข้อมูลนักวิ่ง</h2>
+        <div style="display:flex;gap:.7rem;align-items:center;flex-wrap:wrap;">
+          <input class="search-box" id="runner-search" placeholder="🔍 ค้นหาชื่อ / BIB" oninput="filterRunners()">
+          <button class="btn-add" onclick="openAddModal()">➕ เพิ่มนักวิ่ง</button>
+        </div>
+      </div>
+      <div style="overflow-x:auto;">
+        <table id="runners-table">
+          <thead><tr><th>ชื่อ</th><th>BIB</th><th>CP1</th><th>CP2</th><th>เวลารวม</th><th>จัดการ</th></tr></thead>
+          <tbody id="runners-body"></tbody>
+        </table>
+      </div>
+      <div class="empty-state" id="runners-empty" style="display:none;">ยังไม่มีข้อมูลนักวิ่ง</div>
+    </div>
+
+    <!-- SECTION B: VIOLATIONS -->
+    <div class="section-card">
+      <div class="section-hdr"><h2>🚨 ประวัติการแจ้งเตือน</h2></div>
+      <div class="v-grid" id="v-grid"></div>
+      <div class="empty-state" id="v-empty" style="display:none;">ไม่มีประวัติการแจ้งเตือน</div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ADD RUNNER MODAL -->
+<div class="modal-bg" id="add-modal">
+  <div class="modal">
+    <h3>➕ เพิ่มนักวิ่งใหม่</h3>
+    <div class="form-group"><label>ชื่อ-นามสกุล</label><input id="new-name" placeholder="เช่น kawin"></div>
+    <div class="form-group"><label>หมายเลข BIB</label><input id="new-bib" placeholder="เช่น 42"></div>
+    <div class="modal-actions">
+      <button onclick="closeAddModal()" style="background:rgba(255,255,255,.08);color:var(--muted);">ยกเลิก</button>
+      <button onclick="submitAddRunner()" style="background:linear-gradient(to right,var(--primary),var(--secondary));color:#0f172a;">บันทึก</button>
+    </div>
+  </div>
+</div>
+
+<!-- CONFIRM DELETE MODAL -->
+<div class="modal-bg" id="confirm-modal">
+  <div class="modal" style="max-width:360px;text-align:center;">
+    <div style="font-size:2.5rem;margin-bottom:1rem;">🗑️</div>
+    <h3 id="confirm-msg">ต้องการลบรายการนี้?</h3>
+    <div class="modal-actions" style="margin-top:1.5rem;">
+      <button onclick="closeConfirm()" style="background:rgba(255,255,255,.08);color:var(--muted);">ยกเลิก</button>
+      <button id="confirm-ok-btn" style="background:var(--danger);color:#fff;">ลบ</button>
+    </div>
+  </div>
+</div>
+
+<!-- LIGHTBOX -->
+<div class="lightbox" id="lightbox" onclick="this.classList.remove('active')">
+  <img id="lb-img" src="" alt="">
+</div>
+
+<script>
+let allRunners = [];
+let allViolations = [];
+
+// ===== AUTH =====
+async function doLogin() {
+  const pw = document.getElementById('pw-input').value;
+  const errEl = document.getElementById('login-err');
+  const card = document.getElementById('login-card');
+  try {
+    const res = await fetch('/admin/login', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({password: pw})});
+    if (res.ok) {
+      card.style.animation = 'none';
+      card.style.opacity = '0';
+      card.style.transform = 'scale(.95)';
+      card.style.transition = 'all .4s';
+      setTimeout(() => {
+        document.getElementById('login-screen').style.display = 'none';
+        document.getElementById('dashboard').style.display = 'block';
+        loadAll();
+      }, 400);
+    } else {
+      errEl.innerText = 'รหัสผ่านไม่ถูกต้อง';
+      card.classList.remove('shake');
+      void card.offsetWidth;
+      card.classList.add('shake');
+    }
+  } catch(e) { errEl.innerText = 'เชื่อมต่อไม่ได้'; }
+}
+
+async function doLogout() {
+  await fetch('/admin/logout', {method:'POST'});
+  location.reload();
+}
+
+// Check session on load
+(async () => {
+  const res = await fetch('/admin/check');
+  const d = await res.json();
+  if (d.logged_in) {
+    document.getElementById('login-screen').style.display = 'none';
+    document.getElementById('dashboard').style.display = 'block';
+    loadAll();
+  }
+})();
+
+// ===== LOAD ALL =====
+function loadAll() { loadRunners(); loadViolations(); }
+setInterval(() => { if(document.getElementById('dashboard').style.display !== 'none') loadAll(); }, 5000);
+
+// ===== RUNNERS =====
+async function loadRunners() {
+  try {
+    const res = await fetch('/admin/runners');
+    allRunners = await res.json();
+    renderRunners(allRunners);
+  } catch(e) {}
+}
+
+function filterRunners() {
+  const q = document.getElementById('runner-search').value.toLowerCase();
+  const filtered = allRunners.filter(r => r.Name.toLowerCase().includes(q) || String(r.Bib||'').includes(q));
+  renderRunners(filtered);
+}
+
+function renderRunners(data) {
+  const tbody = document.getElementById('runners-body');
+  const empty = document.getElementById('runners-empty');
+  tbody.innerHTML = '';
+  if (!data || data.length === 0) { empty.style.display = ''; return; }
+  empty.style.display = 'none';
+  data.forEach(r => {
+    const tr = document.createElement('tr');
+    tr.id = `row-${r.Name}`;
+    tr.innerHTML = `
+      <td style="font-weight:600">${r.Name}</td>
+      <td>${r.Bib||'-'}</td>
+      <td class="time-badge">${r.CP1_Time||'-'}</td>
+      <td class="time-badge">${r.CP2_Time||'-'}</td>
+      <td class="time-badge">${r.Total_Time||'-'}</td>
+      <td>
+        <div style="display:flex;gap:.4rem">
+          <button class="btn-icon btn-del" onclick="confirmDelete('runner','${r.Name}')">🗑️</button>
+        </div>
+      </td>`;
+    tbody.appendChild(tr);
+  });
+}
+
+function startEdit(name, cp1, cp2) {
+  const tr = document.getElementById(`row-${name}`);
+  if (!tr) return;
+  const c1 = cp1 === '-' ? '' : cp1;
+  const c2 = cp2 === '-' ? '' : cp2;
+  tr.innerHTML = `
+    <td style="font-weight:600">${name}</td>
+    <td></td>
+    <td><input class="time-input" id="edit-cp1-${name}" value="${c1}" placeholder="HH:MM:SS" oninput="calcPreview('${name}')"></td>
+    <td><input class="time-input" id="edit-cp2-${name}" value="${c2}" placeholder="HH:MM:SS" oninput="calcPreview('${name}')"></td>
+    <td class="time-badge" id="edit-preview-${name}">-</td>
+    <td>
+      <div style="display:flex;gap:.4rem">
+        <button class="btn-icon btn-save" onclick="saveEdit('${name}')">💾 บันทึก</button>
+        <button class="btn-icon btn-cancel" onclick="loadRunners()">❌</button>
+      </div>
+    </td>`;
+  calcPreview(name);
+}
+
+function calcPreview(name) {
+  const c1 = document.getElementById(`edit-cp1-${name}`)?.value;
+  const c2 = document.getElementById(`edit-cp2-${name}`)?.value;
+  const el = document.getElementById(`edit-preview-${name}`);
+  if (!el) return;
+  if (c1 && c2 && /\d{2}:\d{2}:\d{2}/.test(c1) && /\d{2}:\d{2}:\d{2}/.test(c2)) {
+    try {
+      const t1 = new Date(`2000-01-01T${c1}`), t2 = new Date(`2000-01-01T${c2}`);
+      let d = (t2 - t1) / 1000;
+      if (d < 0) d += 86400;
+      el.innerText = `${Math.floor(d/60)}:${String(Math.floor(d%60)).padStart(2,'0')}`;
+    } catch { el.innerText = '-'; }
+  } else el.innerText = '-';
+}
+
+async function saveEdit(name) {
+  const cp1 = document.getElementById(`edit-cp1-${name}`)?.value;
+  const cp2 = document.getElementById(`edit-cp2-${name}`)?.value;
+  await fetch(`/admin/runner/${encodeURIComponent(name)}`, {
+    method:'PUT', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({CP1_Time: cp1, CP2_Time: cp2})
+  });
+  loadRunners();
+}
+
+// ===== ADD RUNNER MODAL =====
+function openAddModal() { document.getElementById('add-modal').classList.add('active'); }
+function closeAddModal() {
+  document.getElementById('add-modal').classList.remove('active');
+  document.getElementById('new-name').value = '';
+  document.getElementById('new-bib').value = '';
+}
+
+async function submitAddRunner() {
+  const name = document.getElementById('new-name').value.trim();
+  const bib = document.getElementById('new-bib').value.trim();
+  if (!name) return;
+  await fetch('/admin/runner', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({name, bib})});
+  closeAddModal();
+  loadRunners();
+}
+
+// ===== CONFIRM DELETE =====
+let pendingDelete = null;
+function confirmDelete(type, id) {
+  const msg = type === 'runner' ? `ต้องการลบ "${id}" ออกจากระบบ?` : `ต้องการลบ violation นี้?`;
+  document.getElementById('confirm-msg').innerText = msg;
+  document.getElementById('confirm-modal').classList.add('active');
+  document.getElementById('confirm-ok-btn').onclick = async () => {
+    closeConfirm();
+    if (type === 'runner') {
+      await fetch(`/admin/runner/${encodeURIComponent(id)}`, {method:'DELETE'});
+      loadRunners();
+    } else {
+      await fetch(`/admin/violation/${encodeURIComponent(id)}`, {method:'DELETE'});
+      loadViolations();
+    }
+  };
+}
+function closeConfirm() { document.getElementById('confirm-modal').classList.remove('active'); }
+
+// ===== VIOLATIONS =====
+async function loadViolations() {
+  try {
+    const res = await fetch('/api/violations');
+    allViolations = await res.json();
+    renderViolations(allViolations);
+  } catch(e) {}
+}
+
+function renderViolations(data) {
+  const grid = document.getElementById('v-grid');
+  const empty = document.getElementById('v-empty');
+  grid.innerHTML = '';
+  if (!data || data.length === 0) { empty.style.display = ''; return; }
+  empty.style.display = 'none';
+  data.forEach(v => {
+    const d = document.createElement('div');
+    d.className = 'v-card';
+    const imgHtml = v.image_url
+      ? `<img src="${v.image_url}" class="v-thumb" onclick="openLb('${v.image_url}')" alt="violation">`
+      : `<div style="width:90px;height:68px;background:rgba(255,75,43,.2);border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:1.5rem;">🚫</div>`;
+    const fname = v.image_url ? v.image_url.split('/').pop() : '';
+    d.innerHTML = `${imgHtml}
+      <div class="v-info">
+        <div class="v-name">🔴 ${v.name} ${v.verified ? '<span style="color:#22c55e;font-size:0.8rem;margin-left:5px;">(ยืนยันแล้ว)</span>' : ''}</div>
+        <div class="v-msg" title="${v.message}">${v.message||'Violation'}</div>
+        <div class="v-ts">${fmtTs(v.timestamp)}</div>
+      </div>
+      <div style="display:flex;gap:0.4rem;flex-direction:column;">
+        ${!v.verified ? `<button class="btn-icon btn-save" onclick="verifyViolation('${fname}')" title="ยืนยัน">✅ ยืนยัน</button>` : ''}
+        <button class="btn-icon btn-del" onclick="confirmDelete('violation','${fname}')" title="ลบ">🗑️ ลบ</button>
+      </div>`;
+    grid.appendChild(d);
+  });
+}
+
+function fmtTs(ts) {
+  if (!ts || ts.length < 15) return ts;
+  return `${ts.slice(0,4)}/${ts.slice(4,6)}/${ts.slice(6,8)} ${ts.slice(9,11)}:${ts.slice(11,13)}:${ts.slice(13,15)}`;
+}
+
+function openLb(src) {
+  document.getElementById('lb-img').src = src;
+  document.getElementById('lightbox').classList.add('active');
+}
+
+async function verifyViolation(fname) {
+  if (!fname) return;
+  try {
+    await fetch(`/admin/violation/${encodeURIComponent(fname)}/verify`, { method: 'PUT' });
+    loadViolations();
+  } catch(e) {}
+}
+</script>
+</body>
+</html>

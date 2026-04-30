@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="th">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -10,9 +11,11 @@
             --primary: #00f2fe;
             --secondary: #4facfe;
             --danger: #ff4b2b;
+            --danger-glow: rgba(255, 75, 43, 0.4);
             --bg: #0f172a;
             --card-bg: rgba(30, 41, 59, 0.7);
             --text: #f8fafc;
+            --success: #22c55e;
         }
 
         * {
@@ -74,7 +77,6 @@
             animation: pulse 2s infinite;
         }
 
-        /* Dashboard Grid */
         .dashboard-grid {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
@@ -106,7 +108,6 @@
             font-weight: 700;
         }
 
-        /* Leaderboard Table */
         .results-container {
             background: var(--card-bg);
             backdrop-filter: blur(12px);
@@ -151,63 +152,153 @@
             font-weight: 600;
         }
 
-        @keyframes pulse {
-            0% { transform: scale(0.95); opacity: 0.7; }
-            70% { transform: scale(1.1); opacity: 1; }
-            100% { transform: scale(0.95); opacity: 0.7; }
-        }
-
-        @keyframes fadeInDown {
-            from { opacity: 0; transform: translateY(-20px); }
-            to { opacity: 1; transform: translateY(0); }
-        }
-
-        @keyframes fadeInUp {
-            from { opacity: 0; transform: translateY(20px); }
-            to { opacity: 1; transform: translateY(0); }
-        }
-
-        /* Violations Section */
-        .violations-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-            gap: 1.5rem;
+        /* ===== REFEREE ALERT PANEL ===== */
+        .referee-section {
             margin-bottom: 3rem;
+            animation: fadeInUp 0.6s ease-out;
         }
 
-        .violation-card {
-            background: rgba(255, 75, 43, 0.1);
-            border: 1px solid var(--danger);
-            border-radius: 16px;
+        .referee-header {
+            font-size: 1.5rem;
+            font-weight: 600;
+            margin-bottom: 1.5rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            color: var(--danger);
+        }
+
+        .badge {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            background: var(--danger);
+            color: white;
+            font-size: 0.85rem;
+            font-weight: 700;
+            min-width: 28px;
+            height: 28px;
+            border-radius: 14px;
+            padding: 0 8px;
+            animation: badgePulse 1.5s infinite;
+        }
+
+        .alert-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+            gap: 1.5rem;
+        }
+
+        .alert-card {
+            background: rgba(255, 75, 43, 0.08);
+            border: 2px solid var(--danger);
+            border-radius: 20px;
             overflow: hidden;
-            animation: shake 0.5s ease-in-out;
+            position: relative;
+            animation: alertSlideIn 0.5s ease-out;
+            box-shadow: 0 0 20px var(--danger-glow);
         }
 
-        .violation-img {
-            width: 100%;
-            height: 150px;
-            object-fit: cover;
+        .alert-card.new-alert {
+            animation: alertSlideIn 0.5s ease-out, alertPulseBorder 1.5s ease-in-out 3;
         }
 
-        .violation-info {
+        .alert-card-body {
+            display: flex;
+            gap: 1rem;
             padding: 1rem;
         }
 
-        .violation-name {
+        .alert-thumb {
+            width: 120px;
+            height: 90px;
+            border-radius: 12px;
+            object-fit: cover;
+            cursor: pointer;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            transition: transform 0.2s;
+        }
+
+        .alert-thumb:hover {
+            transform: scale(1.05);
+        }
+
+        .alert-details {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+        }
+
+        .alert-name {
+            font-size: 1.2rem;
             font-weight: 800;
             color: var(--danger);
-            font-size: 0.9rem;
+            margin-bottom: 0.3rem;
         }
 
-        .violation-time {
+        .alert-msg {
+            font-size: 0.85rem;
+            color: #cbd5e1;
+            margin-bottom: 0.4rem;
+            line-height: 1.3;
+        }
+
+        .alert-time {
             font-size: 0.75rem;
-            color: #94a3b8;
+            color: #64748b;
         }
 
-        @keyframes shake {
-            0%, 100% { transform: translateX(0); }
-            25% { transform: translateX(-5px); }
-            75% { transform: translateX(5px); }
+        .alert-actions {
+            padding: 0 1rem 1rem;
+        }
+
+        .btn-ack {
+            width: 100%;
+            padding: 0.6rem;
+            border: 1px solid var(--success);
+            background: rgba(34, 197, 94, 0.15);
+            color: #4ade80;
+            border-radius: 12px;
+            cursor: pointer;
+            font-family: 'Outfit', sans-serif;
+            font-size: 0.9rem;
+            font-weight: 600;
+            transition: all 0.2s;
+        }
+
+        .btn-ack:hover {
+            background: rgba(34, 197, 94, 0.3);
+            transform: translateY(-1px);
+        }
+
+        .alert-card.dismissed {
+            animation: fadeOutCard 0.4s ease-out forwards;
+        }
+
+        /* Lightbox */
+        .lightbox {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.85);
+            z-index: 1000;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+        }
+
+        .lightbox.active {
+            display: flex;
+        }
+
+        .lightbox img {
+            max-width: 90%;
+            max-height: 90%;
+            border-radius: 16px;
         }
 
         .section-title {
@@ -219,21 +310,143 @@
             gap: 0.5rem;
         }
 
-        /* Mobile Responsive */
+        @keyframes pulse {
+            0% {
+                transform: scale(0.95);
+                opacity: 0.7;
+            }
+
+            70% {
+                transform: scale(1.1);
+                opacity: 1;
+            }
+
+            100% {
+                transform: scale(0.95);
+                opacity: 0.7;
+            }
+        }
+
+        @keyframes fadeInDown {
+            from {
+                opacity: 0;
+                transform: translateY(-20px);
+            }
+
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        @keyframes fadeInUp {
+            from {
+                opacity: 0;
+                transform: translateY(20px);
+            }
+
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        @keyframes alertSlideIn {
+            from {
+                opacity: 0;
+                transform: translateX(-30px) scale(0.95);
+            }
+
+            to {
+                opacity: 1;
+                transform: translateX(0) scale(1);
+            }
+        }
+
+        @keyframes alertPulseBorder {
+
+            0%,
+            100% {
+                box-shadow: 0 0 20px var(--danger-glow);
+            }
+
+            50% {
+                box-shadow: 0 0 40px var(--danger-glow), 0 0 60px rgba(255, 75, 43, 0.2);
+            }
+        }
+
+        @keyframes badgePulse {
+
+            0%,
+            100% {
+                transform: scale(1);
+            }
+
+            50% {
+                transform: scale(1.15);
+            }
+        }
+
+        @keyframes fadeOutCard {
+            to {
+                opacity: 0;
+                transform: scale(0.9) translateY(-10px);
+                height: 0;
+                margin: 0;
+                padding: 0;
+                overflow: hidden;
+            }
+        }
+
+        @keyframes shake {
+
+            0%,
+            100% {
+                transform: translateX(0);
+            }
+
+            25% {
+                transform: translateX(-5px);
+            }
+
+            75% {
+                transform: translateX(5px);
+            }
+        }
+
         @media (max-width: 768px) {
-            body { padding: 1rem; }
-            .stat-value { font-size: 1.8rem; }
-            td, th { padding: 1rem; font-size: 0.9rem; }
+            body {
+                padding: 1rem;
+            }
+
+            .stat-value {
+                font-size: 1.8rem;
+            }
+
+            td,
+            th {
+                padding: 1rem;
+                font-size: 0.9rem;
+            }
+
+            .alert-card-body {
+                flex-direction: column;
+            }
+
+            .alert-thumb {
+                width: 100%;
+                height: 140px;
+            }
         }
     </style>
 </head>
+
 <body>
     <div class="container">
         <header>
             <div class="logo">RunnerTrack Demo</div>
             <div class="status">
-                <div class="pulse"></div>
-                Live Monitoring
+                <div class="pulse"></div> Live Monitoring
             </div>
         </header>
 
@@ -252,19 +465,15 @@
             </div>
         </div>
 
-        <div id="violation-section" style="display: none;">
-            <div class="section-title">
-                <span style="color: var(--danger);">⚠️ รายงานความผิดปกติ (Real-time)</span>
+        <!-- REFEREE ALERT PANEL -->
+        <div class="referee-section" id="referee-section" style="display: none;">
+            <div class="referee-header">
+                🚨 แจ้งเตือนกรรมการ <span class="badge" id="alert-badge">0</span>
             </div>
-            <div class="violations-grid" id="violations-container">
-                <!-- Violation cards will be injected here -->
-            </div>
+            <div class="alert-grid" id="alert-container"></div>
         </div>
 
-        <div class="section-title">
-            <span>🏁 ตารางอันดับนักวิ่ง</span>
-        </div>
-
+        <div class="section-title"><span>🏁 ตารางอันดับนักวิ่ง</span></div>
         <div class="results-container">
             <table>
                 <thead>
@@ -276,86 +485,145 @@
                         <th>เวลารวม</th>
                     </tr>
                 </thead>
-                <tbody id="runners-table">
-                    <!-- ข้อมูลจะถูกเติมโดย JS -->
-                </tbody>
+                <tbody id="runners-table"></tbody>
             </table>
         </div>
     </div>
 
+    <!-- LIGHTBOX -->
+    <div class="lightbox" id="lightbox" onclick="this.classList.remove('active')">
+        <img id="lightbox-img" src="" alt="violation">
+    </div>
+
     <script>
-        async function updateData() {
+        // ===== STATE =====
+        const seenTimestamps = new Set();
+        const dismissedTimestamps = new Set();
+        let audioCtx = null;
+
+        // ===== BEEP SOUND (Web Audio API) =====
+        function playBeep() {
             try {
-                const response = await fetch('/api/data');
-                const data = await response.json();
-                
-                const tableBody = document.getElementById('runners-table');
-                const totalRunnersEl = document.getElementById('total-runners');
-                const finishedCountEl = document.getElementById('finished-count');
-
-                tableBody.innerHTML = '';
-                let finishedCount = 0;
-
-                data.forEach((runner, index) => {
-                    const row = document.createElement('tr');
-                    
-                    if (runner.Total_Time !== "-") finishedCount++;
-
-                    row.innerHTML = `
-                        <td>#${index + 1}</td>
-                        <td style="font-weight: 600;">${runner.Name}</td>
-                        <td>${runner.CP1_Time}</td>
-                        <td>${runner.CP2_Time}</td>
-                        <td class="lap-time">${runner.Total_Time}</td>
-                    `;
-                    tableBody.appendChild(row);
+                if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                // Two-tone alert beep
+                [660, 880].forEach((freq, i) => {
+                    const osc = audioCtx.createOscillator();
+                    const gain = audioCtx.createGain();
+                    osc.connect(gain);
+                    gain.connect(audioCtx.destination);
+                    osc.type = 'square';
+                    osc.frequency.value = freq;
+                    gain.gain.setValueAtTime(0.15, audioCtx.currentTime + i * 0.15);
+                    gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + i * 0.15 + 0.14);
+                    osc.start(audioCtx.currentTime + i * 0.15);
+                    osc.stop(audioCtx.currentTime + i * 0.15 + 0.14);
                 });
-
-                totalRunnersEl.innerText = data.length;
-                finishedCountEl.innerText = finishedCount;
-
-            } catch (error) {
-                console.error("Failed to fetch data:", error);
-            }
+            } catch (e) { console.warn('Audio not available:', e); }
         }
 
+        // ===== LIGHTBOX =====
+        function openLightbox(src) {
+            document.getElementById('lightbox-img').src = src;
+            document.getElementById('lightbox').classList.add('active');
+        }
+
+        // ===== ACKNOWLEDGE =====
+        function dismissAlert(ts, cardEl) {
+            dismissedTimestamps.add(ts);
+            cardEl.classList.add('dismissed');
+            setTimeout(() => { cardEl.remove(); updateBadge(); }, 400);
+        }
+
+        function updateBadge() {
+            const visible = document.querySelectorAll('.alert-card:not(.dismissed)').length;
+            document.getElementById('alert-badge').innerText = visible;
+            document.getElementById('referee-section').style.display = visible > 0 ? 'block' : 'none';
+        }
+
+        // ===== FORMAT TIMESTAMP =====
+        function fmtTs(ts) {
+            if (!ts || ts.length < 15) return ts;
+            return ts.slice(0, 4) + '/' + ts.slice(4, 6) + '/' + ts.slice(6, 8) + ' ' + ts.slice(9, 11) + ':' + ts.slice(11, 13) + ':' + ts.slice(13, 15);
+        }
+
+        // ===== UPDATE RUNNERS TABLE =====
+        async function updateData() {
+            try {
+                const res = await fetch('/api/data');
+                const data = await res.json();
+                const tb = document.getElementById('runners-table');
+                const totalEl = document.getElementById('total-runners');
+                const finEl = document.getElementById('finished-count');
+                tb.innerHTML = '';
+                let fin = 0;
+                data.forEach((r, i) => {
+                    if (r.Total_Time !== "-") fin++;
+                    const tr = document.createElement('tr');
+                    tr.innerHTML = `<td>#${i + 1}</td><td style="font-weight:600">${r.Name}</td><td>${r.CP1_Time}</td><td>${r.CP2_Time}</td><td class="lap-time">${r.Total_Time}</td>`;
+                    tb.appendChild(tr);
+                });
+                totalEl.innerText = data.length;
+                finEl.innerText = fin;
+            } catch (e) { console.error(e); }
+        }
+
+        // ===== UPDATE VIOLATIONS (REFEREE PANEL) =====
         async function updateViolations() {
             try {
-                const response = await fetch('/api/violations');
-                const data = await response.json();
-                
-                const container = document.getElementById('violations-container');
-                const section = document.getElementById('violation-section');
+                const res = await fetch('/api/violations');
+                const data = await res.json();
+                const container = document.getElementById('alert-container');
                 const countEl = document.getElementById('violation-count');
 
                 countEl.innerText = data.length;
 
-                if (data.length > 0) {
-                    section.style.display = 'block';
-                    container.innerHTML = '';
-                    data.slice(0, 4).forEach(v => {
-                        const card = document.createElement('div');
-                        card.className = 'violation-card';
-                        card.innerHTML = `
-                            <img src="${v.image_url}" class="violation-img" alt="violation">
-                            <div class="violation-info">
-                                <div class="violation-name">${v.name}</div>
-                                <div class="violation-time">${v.timestamp}</div>
+                let hasNew = false;
+
+                data.forEach(v => {
+                    // Only show verified violations
+                    if (!v.verified) return;
+
+                    const key = v.timestamp + '_' + v.name;
+
+                    // Skip dismissed or already rendered
+                    if (dismissedTimestamps.has(key)) return;
+                    if (seenTimestamps.has(key)) return;
+
+                    // NEW violation!
+                    seenTimestamps.add(key);
+                    hasNew = true;
+
+                    const card = document.createElement('div');
+                    card.className = 'alert-card new-alert';
+                    card.setAttribute('data-ts', key);
+                    card.innerHTML = `
+                        <div class="alert-card-body">
+                            ${v.image_url ? `<img src="${v.image_url}" class="alert-thumb" onclick="openLightbox('${v.image_url}')" alt="violation">` : ''}
+                            <div class="alert-details">
+                                <div class="alert-name">🔴 ${v.name}</div>
+                                <div class="alert-msg">${v.message || 'Violation detected'}</div>
+                                <div class="alert-time">🕐 ${fmtTs(v.timestamp)}</div>
                             </div>
-                        `;
-                        container.appendChild(card);
-                    });
-                } else {
-                    section.style.display = 'none';
-                }
+                        </div>
+                        <div class="alert-actions">
+                            <button class="btn-ack" onclick="dismissAlert('${key}', this.closest('.alert-card'))">✅ รับทราบ</button>
+                        </div>
+                    `;
+                    container.prepend(card);
+                });
+
+                if (hasNew) playBeep();
+                updateBadge();
+
             } catch (e) { console.error(e); }
         }
 
-        // อัปเดตข้อมูลทุกๆ 1 วินาที
+        // ===== AUTO REFRESH =====
         setInterval(updateData, 1000);
         setInterval(updateViolations, 2000);
         updateData();
         updateViolations();
     </script>
 </body>
+
 </html>
