@@ -99,7 +99,7 @@ body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--txt);min-
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/tesseract.js@4/dist/tesseract.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 <script>
 const API="https://script.google.com/macros/s/AKfycbyI4vNBRqjO5f00DN7VDCTaMKUoDqN2L10JHtQtM4tW5A-Uca_btGkOW1ei6OTBcf8g0g/exec";
 const MODEL_URL="https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js@master/weights/";
@@ -115,6 +115,7 @@ let consecutiveFrames={};// name→count (for smart OCR)
 let ocrCache={};// name→last bib result
 let ocrBusy=false;
 let tesseractWorker=null;
+let ocrReady=false;
 const CP_BUTTONS=['start',1,2,3,4,'finish'];
 
 // ── CP SELECTOR ──
@@ -175,7 +176,11 @@ async function init(){
   markStep("step-camera","done");
 
   // 4) Init Tesseract
-  tesseractWorker=await Tesseract.createWorker("eng");
+  try{
+   tesseractWorker=await Tesseract.createWorker("eng");
+   ocrReady=true;
+   console.log("Tesseract OCR ready");
+  }catch(e){console.warn("Tesseract init failed, OCR disabled:",e);ocrReady=false;}
 
   setStatus("ok","🟢 Connected");
   document.getElementById("init-screen").classList.add("hidden");
@@ -290,7 +295,7 @@ async function processLoop(){
 
 // ── SMART OCR ──
 async function runSmartOCR(video,detection,name){
- if(ocrBusy)return;
+ if(ocrBusy||!ocrReady||!tesseractWorker)return;
  ocrBusy=true;
  try{
   const box=detection.detection.box;
@@ -328,9 +333,11 @@ async function recordCP(name){
  addSidebarItem(name,`${checkpointId==='start'?'Start':checkpointId==='finish'?'Finish':'CP'+checkpointId} @ ${timeStr}`,false);
 
  try{
-  await fetch(API,{method:"POST",headers:{"Content-Type":"text/plain"},body:JSON.stringify({
+  const resp=await fetch(API,{method:"POST",headers:{"Content-Type":"text/plain"},body:JSON.stringify({
    action:"recordCheckpoint",name,checkpoint_id:checkpointId,timestamp:timeStr,bib
-  })});
+  }),redirect:"follow"});
+  const result=await resp.json();
+  console.log("CP record result:",result);
  }catch(e){console.warn("Failed to send CP:",e)}
 }
 
