@@ -38,7 +38,7 @@ function getSheet(name) {
           "FolderUrl", "Embeddings"]);
         break;
       case "Results":
-        sheet.appendRow(["Name", "BibNumber", "CP1_Time", "CP2_Time", "Lap1_Duration", "UpdatedAt"]);
+        sheet.appendRow(["Name", "BibNumber", "Start_Time", "CP1_Time", "CP2_Time", "CP3_Time", "CP4_Time", "Finish_Time", "Total_Duration", "UpdatedAt"]);
         break;
       case "Violations":
         sheet.appendRow(["ID", "Name", "BibNumber", "Message", "ImageUrl", "Timestamp", "Verified", "VerifiedAt"]);
@@ -255,43 +255,55 @@ function doPost(e) {
       // ── Record Checkpoint ────────────────────────────────
       case "recordCheckpoint": {
         const name = body.name;
-        const cpId = parseInt(body.checkpoint_id);
+        const cpId = body.checkpoint_id; // 'start', 1, 2, 3, 4, 'finish'
         const timestamp = body.timestamp;
         const bib = body.bib || "";
 
-        if (!name || !cpId || !timestamp) {
+        if (!name || cpId === undefined || !timestamp) {
           return jsonResponse({ status: "error", message: "Missing fields" });
         }
 
         const sheet = getSheet("Results");
-        const row = findRowByName(sheet, name);
+        const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+        
+        // Map checkpoint_id to column name
+        let colName;
+        if (cpId === 'start') colName = 'Start_Time';
+        else if (cpId === 'finish') colName = 'Finish_Time';
+        else colName = 'CP' + cpId + '_Time';
+        
+        const colIdx = headers.indexOf(colName);
+        if (colIdx < 0) return jsonResponse({ status: "error", message: "Column not found: " + colName });
+
+        let row = findRowByName(sheet, name);
 
         if (row < 0) {
-          // New runner entry
-          if (cpId === 1) {
-            sheet.appendRow([name, bib, timestamp, "", "", new Date().toISOString()]);
-          } else {
-            sheet.appendRow([name, bib, "", timestamp, "", new Date().toISOString()]);
-          }
+          // New runner entry — create empty row
+          const newRow = new Array(headers.length).fill("");
+          newRow[0] = name;  // Name
+          newRow[1] = bib;   // BibNumber
+          newRow[colIdx] = timestamp;
+          newRow[headers.indexOf('UpdatedAt')] = new Date().toISOString();
+          sheet.appendRow(newRow);
         } else {
-          if (cpId === 1) {
-            sheet.getRange(row, 3).setValue(timestamp); // CP1_Time
-            sheet.getRange(row, 6).setValue(new Date().toISOString()); // UpdatedAt
-          } else if (cpId === 2) {
-            sheet.getRange(row, 4).setValue(timestamp); // CP2_Time
-            // Calculate duration
-            const cp1 = sheet.getRange(row, 3).getValue();
-            if (cp1) {
-              const dur = calcDuration(String(cp1), timestamp);
-              sheet.getRange(row, 5).setValue(dur); // Lap1_Duration
-            }
-            sheet.getRange(row, 6).setValue(new Date().toISOString());
-          }
-          // Update bib if provided
+          sheet.getRange(row, colIdx + 1).setValue(timestamp);
           if (bib) sheet.getRange(row, 2).setValue(bib);
+          
+          // Calculate Total_Duration (Start → Finish)
+          const startCol = headers.indexOf('Start_Time');
+          const finishCol = headers.indexOf('Finish_Time');
+          const durCol = headers.indexOf('Total_Duration');
+          if (startCol >= 0 && finishCol >= 0 && durCol >= 0) {
+            const startTime = String(sheet.getRange(row, startCol + 1).getValue());
+            const finishTime = String(sheet.getRange(row, finishCol + 1).getValue());
+            if (startTime && finishTime && startTime !== '' && finishTime !== '') {
+              sheet.getRange(row, durCol + 1).setValue(calcDuration(startTime, finishTime));
+            }
+          }
+          sheet.getRange(row, headers.indexOf('UpdatedAt') + 1).setValue(new Date().toISOString());
         }
 
-        return jsonResponse({ status: "success", message: name + " CP" + cpId + " recorded" });
+        return jsonResponse({ status: "success", message: name + " " + colName + " recorded" });
       }
 
       // ── Report Violation ─────────────────────────────────
@@ -370,24 +382,39 @@ function doPost(e) {
         if (!name) return jsonResponse({ status: "error", message: "Name required" });
 
         const sheet = getSheet("Results");
+        const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
         let row = findRowByName(sheet, name);
 
         if (row < 0) {
-          // Create row if doesn't exist
-          sheet.appendRow([name, body.bib || "", "", "", "", new Date().toISOString()]);
+          const newRow = new Array(headers.length).fill("");
+          newRow[0] = name;
+          newRow[1] = body.bib || "";
+          sheet.appendRow(newRow);
           row = sheet.getLastRow();
         }
 
-        if (body.CP1_Time !== undefined) sheet.getRange(row, 3).setValue(body.CP1_Time);
-        if (body.CP2_Time !== undefined) sheet.getRange(row, 4).setValue(body.CP2_Time);
-
-        // Recalculate duration
-        const cp1 = String(sheet.getRange(row, 3).getValue());
-        const cp2 = String(sheet.getRange(row, 4).getValue());
-        if (cp1 && cp2 && cp1 !== "" && cp2 !== "") {
-          sheet.getRange(row, 5).setValue(calcDuration(cp1, cp2));
+        // Update any provided time columns
+        const timeFields = ['Start_Time', 'CP1_Time', 'CP2_Time', 'CP3_Time', 'CP4_Time', 'Finish_Time'];
+        for (const field of timeFields) {
+          if (body[field] !== undefined) {
+            const col = headers.indexOf(field);
+            if (col >= 0) sheet.getRange(row, col + 1).setValue(body[field]);
+          }
         }
-        sheet.getRange(row, 6).setValue(new Date().toISOString());
+
+        // Recalculate Total_Duration
+        const startCol = headers.indexOf('Start_Time');
+        const finishCol = headers.indexOf('Finish_Time');
+        const durCol = headers.indexOf('Total_Duration');
+        if (startCol >= 0 && finishCol >= 0 && durCol >= 0) {
+          const s = String(sheet.getRange(row, startCol + 1).getValue());
+          const f = String(sheet.getRange(row, finishCol + 1).getValue());
+          if (s && f && s !== '' && f !== '') {
+            sheet.getRange(row, durCol + 1).setValue(calcDuration(s, f));
+          }
+        }
+        const updCol = headers.indexOf('UpdatedAt');
+        if (updCol >= 0) sheet.getRange(row, updCol + 1).setValue(new Date().toISOString());
 
         return jsonResponse({ status: "success", message: "Runner " + name + " updated" });
       }

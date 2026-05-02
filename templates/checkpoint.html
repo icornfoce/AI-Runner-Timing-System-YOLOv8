@@ -12,8 +12,8 @@ body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--txt);min-
 .bar{background:rgba(11,15,20,.95);backdrop-filter:blur(18px);border-bottom:1px solid var(--bdr);padding:.7rem 1.5rem;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:50}
 .bar-l{display:flex;align-items:center;gap:1rem}
 .bar h1{font-family:'Bebas Neue',sans-serif;font-size:1.4rem;letter-spacing:2px;background:linear-gradient(135deg,var(--pri),#2dd4a8);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
-.cp-sel{display:flex;gap:0}
-.cp-btn{padding:.4rem 1rem;font-family:'Bebas Neue',sans-serif;font-size:1rem;letter-spacing:1px;cursor:pointer;border:1px solid var(--bdr);background:rgba(255,255,255,.03);color:var(--mut);transition:all .2s}
+.cp-sel{display:flex;gap:0;flex-wrap:wrap}
+.cp-btn{padding:.4rem .7rem;font-family:'Bebas Neue',sans-serif;font-size:.85rem;letter-spacing:1px;cursor:pointer;border:1px solid var(--bdr);background:rgba(255,255,255,.03);color:var(--mut);transition:all .2s}
 .cp-btn:first-child{border-radius:8px 0 0 8px}.cp-btn:last-child{border-radius:0 8px 8px 0}
 .cp-btn.on{background:rgba(29,158,117,.2);border-color:var(--pri);color:var(--pri)}
 .bar-r{display:flex;align-items:center;gap:1rem}
@@ -59,8 +59,12 @@ body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--txt);min-
  <div class="bar-l">
   <h1>📷 CHECKPOINT</h1>
   <div class="cp-sel">
-   <button class="cp-btn on" id="cp1-btn" onclick="setCP(1)">CP1 START</button>
-   <button class="cp-btn" id="cp2-btn" onclick="setCP(2)">CP2 FINISH</button>
+   <button class="cp-btn on" id="cp-start-btn" onclick="setCP('start')">🟢 START</button>
+   <button class="cp-btn" id="cp-1-btn" onclick="setCP(1)">CP1</button>
+   <button class="cp-btn" id="cp-2-btn" onclick="setCP(2)">CP2</button>
+   <button class="cp-btn" id="cp-3-btn" onclick="setCP(3)">CP3</button>
+   <button class="cp-btn" id="cp-4-btn" onclick="setCP(4)">CP4</button>
+   <button class="cp-btn" id="cp-finish-btn" onclick="setCP('finish')">🏁 FINISH</button>
   </div>
  </div>
  <div class="bar-r">
@@ -100,7 +104,7 @@ body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--txt);min-
 const API="https://script.google.com/macros/s/AKfycbxBPX099pS7Iuz8ukWvWu3SbbrSidbRvMkq55kYicOQ8f9TGuyf7GsD_ALaYJAfOjLcvA/exec";
 const MODEL_URL="https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js@master/weights/";
 
-let checkpointId=1;
+let checkpointId='start';
 let faceMatcher=null;
 let runnerRegistry={};// name→bib
 let cooldowns={};// name→timestamp
@@ -111,12 +115,16 @@ let consecutiveFrames={};// name→count (for smart OCR)
 let ocrCache={};// name→last bib result
 let ocrBusy=false;
 let tesseractWorker=null;
+const CP_BUTTONS=['start',1,2,3,4,'finish'];
 
 // ── CP SELECTOR ──
 function setCP(id){
  checkpointId=id;
- document.getElementById("cp1-btn").classList.toggle("on",id===1);
- document.getElementById("cp2-btn").classList.toggle("on",id===2);
+ CP_BUTTONS.forEach(b=>{
+  const btnId=typeof b==='string'?'cp-'+b+'-btn':'cp-'+b+'-btn';
+  const el=document.getElementById(btnId);
+  if(el)el.classList.toggle('on',b===id);
+ });
 }
 
 // ── INIT ──
@@ -140,12 +148,18 @@ async function init(){
   for(const r of runners){
    if(!r.Embeddings)continue;
    try{
-    const emb=JSON.parse(r.Embeddings);
+    let emb=JSON.parse(r.Embeddings);
+    // Handle nested array [[...]] from multi-angle
+    if(Array.isArray(emb) && emb.length>0 && Array.isArray(emb[0])){
+     emb=emb[0];
+    }
+    if(!Array.isArray(emb)||emb.length!==128){console.warn('Bad embedding size for',r.Name,emb.length);continue}
     const desc=new Float32Array(emb);
     labeled.push(new faceapi.LabeledFaceDescriptors(r.Name,[desc]));
     runnerRegistry[r.Name]=String(r.BibNumber||"");
    }catch(e){console.warn("Bad embedding for",r.Name,e)}
   }
+  console.log('Labeled descriptors:',labeled.length,'/',runners.length);
   if(labeled.length>0)faceMatcher=new faceapi.FaceMatcher(labeled,0.5);
   markStep("step-runners","done");
 
@@ -311,7 +325,7 @@ async function recordCP(name){
  const timeStr=ts.toTimeString().split(" ")[0];// HH:MM:SS
  const bib=runnerRegistry[name]||"";
 
- addSidebarItem(name,`CP${checkpointId} @ ${timeStr}`,false);
+ addSidebarItem(name,`${checkpointId==='start'?'Start':checkpointId==='finish'?'Finish':'CP'+checkpointId} @ ${timeStr}`,false);
 
  try{
   await fetch(API,{method:"POST",headers:{"Content-Type":"text/plain"},body:JSON.stringify({

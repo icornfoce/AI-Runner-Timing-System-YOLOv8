@@ -640,8 +640,12 @@
                         <th>อันดับ</th>
                         <th>ชื่อ</th>
                         <th>BIB</th>
+                        <th>Start</th>
                         <th>CP1</th>
                         <th>CP2</th>
+                        <th>CP3</th>
+                        <th>CP4</th>
+                        <th>Finish</th>
                         <th>เวลารวม</th>
                     </tr>
                 </thead>
@@ -742,11 +746,10 @@
             const emp = document.getElementById("lb-empty");
             if (!results.length) { tb.innerHTML = ""; emp.style.display = ""; return }
             emp.style.display = "none";
-            // Sort: finished first by duration, then unfinished
-            const fin = results.filter(r => r.Lap1_Duration).sort((a, b) => {
-                const da = parseDur(a.Lap1_Duration), db = parseDur(b.Lap1_Duration); return da - db;
+            const fin = results.filter(r => r.Total_Duration).sort((a, b) => {
+                const da = parseDur(a.Total_Duration), db = parseDur(b.Total_Duration); return da - db;
             });
-            const unfin = results.filter(r => !r.Lap1_Duration);
+            const unfin = results.filter(r => !r.Total_Duration);
             const sorted = [...fin, ...unfin];
             let finCount = fin.length;
             document.getElementById("s-total").textContent = results.length;
@@ -754,7 +757,7 @@
             tb.innerHTML = sorted.map((r, i) => {
                 const rank = i + 1;
                 const rc = rank === 1 ? "rank-1" : rank === 2 ? "rank-2" : rank === 3 ? "rank-3" : "";
-                return `<tr><td class="${rc}" style="font-weight:700">#${rank}</td><td style="font-weight:600">${r.Name || "-"}</td><td>${r.BibNumber || "-"}</td><td>${r.CP1_Time || "-"}</td><td>${r.CP2_Time || "-"}</td><td class="tt">${r.Lap1_Duration || "-"}</td></tr>`;
+                return `<tr><td class="${rc}" style="font-weight:700">#${rank}</td><td style="font-weight:600">${r.Name || "-"}</td><td>${r.BibNumber || "-"}</td><td>${r.Start_Time || "-"}</td><td>${r.CP1_Time || "-"}</td><td>${r.CP2_Time || "-"}</td><td>${r.CP3_Time || "-"}</td><td>${r.CP4_Time || "-"}</td><td>${r.Finish_Time || "-"}</td><td class="tt">${r.Total_Duration || "-"}</td></tr>`;
             }).join("");
         }
         function parseDur(s) { if (!s) return 99999; const p = String(s).split(":"); return (parseInt(p[0]) || 0) * 60 + (parseInt(p[1]) || 0) }
@@ -811,10 +814,10 @@
                 // Merge runners + results
                 const merged = runners.map(rn => {
                     const res = results.find(r => r.Name === rn.Name) || {};
-                    return { ...rn, CP1_Time: res.CP1_Time || "-", CP2_Time: res.CP2_Time || "-", Lap1_Duration: res.Lap1_Duration || "-" };
+                    return { ...rn, Start_Time: res.Start_Time || "-", CP1_Time: res.CP1_Time || "-", CP2_Time: res.CP2_Time || "-", CP3_Time: res.CP3_Time || "-", CP4_Time: res.CP4_Time || "-", Finish_Time: res.Finish_Time || "-", Total_Duration: res.Total_Duration || "-" };
                 }).filter(r => r.Name.toLowerCase().includes(q) || String(r.BibNumber).includes(q));
                 if (!merged.length) { body.innerHTML = `<div class="empty">ไม่พบข้อมูลนักวิ่ง</div>`; return }
-                body.innerHTML = `<table><thead><tr><th>ชื่อ</th><th>BIB</th><th>Email</th><th>CP1</th><th>CP2</th><th>เวลา</th><th>Drive</th><th>จัดการ</th></tr></thead><tbody>${merged.map(r => `<tr><td style="font-weight:600">${r.Name}</td><td>${r.BibNumber || "-"}</td><td style="font-size:.8rem;color:var(--mut)">${r.Email || "-"}</td><td class="tt">${r.CP1_Time}</td><td class="tt">${r.CP2_Time}</td><td class="tt">${r.Lap1_Duration}</td><td>${r.FolderUrl ? `<a href="${r.FolderUrl}" target="_blank" style="color:var(--pri);font-size:.8rem">📂</a>` : "-"}</td><td><button class="btn-sm btn-dl" onclick="confirmDel('runner','${r.Name}')">🗑️</button></td></tr>`).join("")
+                body.innerHTML = `<table><thead><tr><th>ชื่อ</th><th>BIB</th><th>Email</th><th>Start</th><th>CP1</th><th>CP2</th><th>CP3</th><th>CP4</th><th>Finish</th><th>เวลา</th><th>Drive</th><th>จัดการ</th></tr></thead><tbody>${merged.map(r => `<tr><td style="font-weight:600">${r.Name}</td><td>${r.BibNumber || "-"}</td><td style="font-size:.8rem;color:var(--mut)">${r.Email || "-"}</td><td class="tt">${r.Start_Time}</td><td class="tt">${r.CP1_Time}</td><td class="tt">${r.CP2_Time}</td><td class="tt">${r.CP3_Time}</td><td class="tt">${r.CP4_Time}</td><td class="tt">${r.Finish_Time}</td><td class="tt">${r.Total_Duration}</td><td>${r.FolderUrl ? `<a href="${r.FolderUrl}" target="_blank" style="color:var(--pri);font-size:.8rem">📂</a>` : "-"}</td><td><button class="btn-sm btn-dl" onclick="confirmDel('runner','${r.Name}')">🗑️</button></td></tr>`).join("")
                     }</tbody></table>`;
             } else {
                 const filtered = violations.filter(v => (v.Name || "").toLowerCase().includes(q));
