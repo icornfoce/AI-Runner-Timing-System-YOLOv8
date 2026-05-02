@@ -1,309 +1,854 @@
 <!DOCTYPE html>
 <html lang="th">
+
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Dashboard | RunnerTrack AI</title>
-<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-<style>
-:root{--pri:#1D9E75;--pri-g:rgba(29,158,117,.35);--bg:#0b0f14;--sf:#141a22;--card:rgba(22,30,40,.85);--bdr:rgba(255,255,255,.08);--txt:#f0f2f5;--mut:#7a8594;--red:#e53e3e;--grn:#38c172;--red-g:rgba(229,62,62,.3)}
-*{margin:0;padding:0;box-sizing:border-box}
-body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--txt);min-height:100vh}
-.bar{background:rgba(11,15,20,.92);backdrop-filter:blur(18px);border-bottom:1px solid var(--bdr);padding:1rem 2rem;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:50}
-.bar h1{font-family:'Bebas Neue',sans-serif;font-size:1.8rem;letter-spacing:2px;background:linear-gradient(135deg,var(--pri),#2dd4a8);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
-.bar-r{display:flex;align-items:center;gap:1rem}
-.live{display:flex;align-items:center;gap:.4rem;font-size:.85rem;color:#4ade80}
-.dot{width:8px;height:8px;background:#22c55e;border-radius:50%;animation:pulse 2s infinite}
-.nav-link{color:var(--mut);text-decoration:none;font-size:.85rem}.nav-link:hover{color:var(--pri)}
-.btn-admin{padding:.4rem 1rem;background:rgba(255,255,255,.06);border:1px solid var(--bdr);border-radius:10px;color:var(--mut);cursor:pointer;font-size:.8rem;font-family:'DM Sans',sans-serif}
-.page{padding:2rem;max-width:1200px;margin:0 auto}
-.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:1.2rem;margin-bottom:2rem}
-.sc{background:var(--card);backdrop-filter:blur(12px);border:1px solid var(--bdr);padding:1.5rem;border-radius:20px;transition:transform .3s}.sc:hover{transform:translateY(-4px)}
-.sc-l{color:var(--mut);font-size:.82rem;margin-bottom:.3rem}
-.sc-v{font-size:2.2rem;font-weight:700;font-family:'Bebas Neue',sans-serif;letter-spacing:1px}
-.section{background:var(--card);backdrop-filter:blur(12px);border:1px solid var(--bdr);border-radius:20px;margin-bottom:2rem;overflow:hidden}
-.sh{padding:1.2rem 1.5rem;font-family:'Bebas Neue',sans-serif;font-size:1.3rem;letter-spacing:1px;display:flex;align-items:center;gap:.5rem}
-table{width:100%;border-collapse:collapse}
-th{padding:1rem 1.2rem;color:var(--mut);font-weight:400;text-transform:uppercase;font-size:.72rem;letter-spacing:1px;text-align:left;background:rgba(255,255,255,.03)}
-td{padding:1rem 1.2rem;border-bottom:1px solid rgba(255,255,255,.04);font-size:.95rem}
-tr:last-child td{border-bottom:none}tr:hover td{background:rgba(255,255,255,.02)}
-.tt{color:var(--pri);font-weight:600}
-.rank-1{color:gold}.rank-2{color:silver}.rank-3{color:#cd7f32}
-/* Alerts */
-.ref-sec{display:none;margin-bottom:2rem}
-.ref-h{font-family:'Bebas Neue',sans-serif;font-size:1.3rem;color:var(--red);display:flex;align-items:center;gap:.5rem;margin-bottom:1rem}
-.badge{background:var(--red);color:#fff;font-size:.8rem;font-weight:700;min-width:24px;height:24px;border-radius:12px;display:inline-flex;align-items:center;justify-content:center;padding:0 7px;animation:badgePulse 1.5s infinite}
-.ag{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:1.2rem}
-.ac{background:rgba(229,62,62,.07);border:2px solid var(--red);border-radius:18px;overflow:hidden;box-shadow:0 0 16px var(--red-g);animation:slideIn .4s ease}
-.ac-b{display:flex;gap:1rem;padding:1rem}
-.ac-img{width:110px;height:82px;border-radius:10px;object-fit:cover;cursor:pointer;border:1px solid rgba(255,255,255,.1)}
-.ac-d{flex:1;display:flex;flex-direction:column;justify-content:center}
-.ac-n{font-size:1.1rem;font-weight:700;color:var(--red)}
-.ac-m{font-size:.8rem;color:#cbd5e1;margin:.2rem 0}
-.ac-t{font-size:.7rem;color:#64748b}
-.ac-a{padding:0 1rem 1rem}
-.btn-ack{width:100%;padding:.5rem;border:1px solid var(--grn);background:rgba(56,193,114,.12);color:#4ade80;border-radius:10px;cursor:pointer;font-family:'DM Sans',sans-serif;font-size:.85rem;font-weight:600;transition:background .2s}
-.btn-ack:hover{background:rgba(56,193,114,.25)}
-.ac.gone{animation:fadeOut .4s forwards}
-/* Lightbox */
-.lb{display:none;position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:500;align-items:center;justify-content:center;cursor:pointer}.lb.on{display:flex}
-.lb img{max-width:90%;max-height:90%;border-radius:14px}
-/* Admin */
-#admin-panel{display:none}
-.admin-bar{padding:1rem 1.5rem;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--bdr)}
-.tabs{display:flex;gap:.5rem}
-.tab{padding:.5rem 1.2rem;border-radius:10px;cursor:pointer;font-size:.85rem;background:rgba(255,255,255,.04);border:1px solid var(--bdr);color:var(--mut);font-family:'DM Sans',sans-serif;transition:all .2s}
-.tab.on{background:rgba(29,158,117,.15);border-color:var(--pri);color:var(--pri)}
-.btn-out{padding:.4rem 1rem;background:rgba(229,62,62,.12);border:1px solid var(--red);border-radius:10px;color:var(--red);cursor:pointer;font-size:.8rem;font-family:'DM Sans',sans-serif}
-.admin-body{padding:1.5rem}
-.search{padding:.5rem .8rem;background:rgba(255,255,255,.04);border:1px solid var(--bdr);border-radius:10px;color:var(--txt);font-size:.85rem;outline:none;width:200px}.search:focus{border-color:var(--pri)}
-.btn-sm{padding:.3rem .7rem;border-radius:8px;cursor:pointer;font-size:.75rem;border:none;transition:all .2s;font-family:'DM Sans',sans-serif}
-.btn-vf{background:rgba(56,193,114,.12);color:#4ade80;border:1px solid var(--grn)}.btn-vf:hover{background:rgba(56,193,114,.25)}
-.btn-dl{background:rgba(229,62,62,.1);color:var(--red);border:1px solid var(--red)}.btn-dl:hover{background:rgba(229,62,62,.2)}
-/* Login Modal */
-.modal-bg{display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:300;align-items:center;justify-content:center}.modal-bg.on{display:flex}
-.modal{background:var(--sf);border:1px solid var(--bdr);border-radius:20px;padding:2.5rem;width:100%;max-width:380px;text-align:center}
-.modal h3{font-family:'Bebas Neue',sans-serif;font-size:1.4rem;margin-bottom:.3rem;color:var(--pri)}
-.modal p{color:var(--mut);font-size:.85rem;margin-bottom:1.5rem}
-.modal input{width:100%;padding:.8rem 1rem;background:rgba(255,255,255,.04);border:1px solid var(--bdr);border-radius:12px;color:var(--txt);font-size:1rem;outline:none;margin-bottom:1rem;text-align:center}
-.modal input:focus{border-color:var(--pri)}
-.modal .btn-go{width:100%;padding:.8rem;background:linear-gradient(135deg,var(--pri),#2dd4a8);border:none;border-radius:12px;color:#0b0f14;font-weight:700;cursor:pointer;font-size:1rem;font-family:'DM Sans',sans-serif}
-.modal .err{color:var(--red);font-size:.82rem;min-height:1.2rem;margin-bottom:.5rem}
-.empty{text-align:center;padding:2.5rem;color:var(--mut);font-size:.9rem}
-@keyframes pulse{0%,100%{transform:scale(.95);opacity:.7}70%{transform:scale(1.1);opacity:1}}
-@keyframes badgePulse{0%,100%{transform:scale(1)}50%{transform:scale(1.15)}}
-@keyframes slideIn{from{opacity:0;transform:translateX(-20px)}to{opacity:1;transform:translateX(0)}}
-@keyframes fadeOut{to{opacity:0;transform:scale(.9);height:0;margin:0;padding:0;overflow:hidden}}
-@media(max-width:768px){.page{padding:1rem}.sc-v{font-size:1.6rem}td,th{padding:.7rem .5rem;font-size:.8rem}.ag{grid-template-columns:1fr}.ac-b{flex-direction:column}.ac-img{width:100%;height:120px}}
-</style>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dashboard | RunnerTrack AI</title>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@300;400;500;600;700&display=swap"
+        rel="stylesheet">
+    <style>
+        :root {
+            --pri: #1D9E75;
+            --pri-g: rgba(29, 158, 117, .35);
+            --bg: #0b0f14;
+            --sf: #141a22;
+            --card: rgba(22, 30, 40, .85);
+            --bdr: rgba(255, 255, 255, .08);
+            --txt: #f0f2f5;
+            --mut: #7a8594;
+            --red: #e53e3e;
+            --grn: #38c172;
+            --red-g: rgba(229, 62, 62, .3)
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box
+        }
+
+        body {
+            font-family: 'DM Sans', sans-serif;
+            background: var(--bg);
+            color: var(--txt);
+            min-height: 100vh
+        }
+
+        .bar {
+            background: rgba(11, 15, 20, .92);
+            backdrop-filter: blur(18px);
+            border-bottom: 1px solid var(--bdr);
+            padding: 1rem 2rem;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            position: sticky;
+            top: 0;
+            z-index: 50
+        }
+
+        .bar h1 {
+            font-family: 'Bebas Neue', sans-serif;
+            font-size: 1.8rem;
+            letter-spacing: 2px;
+            background: linear-gradient(135deg, var(--pri), #2dd4a8);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent
+        }
+
+        .bar-r {
+            display: flex;
+            align-items: center;
+            gap: 1rem
+        }
+
+        .live {
+            display: flex;
+            align-items: center;
+            gap: .4rem;
+            font-size: .85rem;
+            color: #4ade80
+        }
+
+        .dot {
+            width: 8px;
+            height: 8px;
+            background: #22c55e;
+            border-radius: 50%;
+            animation: pulse 2s infinite
+        }
+
+        .nav-link {
+            color: var(--mut);
+            text-decoration: none;
+            font-size: .85rem
+        }
+
+        .nav-link:hover {
+            color: var(--pri)
+        }
+
+        .btn-admin {
+            padding: .4rem 1rem;
+            background: rgba(255, 255, 255, .06);
+            border: 1px solid var(--bdr);
+            border-radius: 10px;
+            color: var(--mut);
+            cursor: pointer;
+            font-size: .8rem;
+            font-family: 'DM Sans', sans-serif
+        }
+
+        .page {
+            padding: 2rem;
+            max-width: 1200px;
+            margin: 0 auto
+        }
+
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1.2rem;
+            margin-bottom: 2rem
+        }
+
+        .sc {
+            background: var(--card);
+            backdrop-filter: blur(12px);
+            border: 1px solid var(--bdr);
+            padding: 1.5rem;
+            border-radius: 20px;
+            transition: transform .3s
+        }
+
+        .sc:hover {
+            transform: translateY(-4px)
+        }
+
+        .sc-l {
+            color: var(--mut);
+            font-size: .82rem;
+            margin-bottom: .3rem
+        }
+
+        .sc-v {
+            font-size: 2.2rem;
+            font-weight: 700;
+            font-family: 'Bebas Neue', sans-serif;
+            letter-spacing: 1px
+        }
+
+        .section {
+            background: var(--card);
+            backdrop-filter: blur(12px);
+            border: 1px solid var(--bdr);
+            border-radius: 20px;
+            margin-bottom: 2rem;
+            overflow: hidden
+        }
+
+        .sh {
+            padding: 1.2rem 1.5rem;
+            font-family: 'Bebas Neue', sans-serif;
+            font-size: 1.3rem;
+            letter-spacing: 1px;
+            display: flex;
+            align-items: center;
+            gap: .5rem
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse
+        }
+
+        th {
+            padding: 1rem 1.2rem;
+            color: var(--mut);
+            font-weight: 400;
+            text-transform: uppercase;
+            font-size: .72rem;
+            letter-spacing: 1px;
+            text-align: left;
+            background: rgba(255, 255, 255, .03)
+        }
+
+        td {
+            padding: 1rem 1.2rem;
+            border-bottom: 1px solid rgba(255, 255, 255, .04);
+            font-size: .95rem
+        }
+
+        tr:last-child td {
+            border-bottom: none
+        }
+
+        tr:hover td {
+            background: rgba(255, 255, 255, .02)
+        }
+
+        .tt {
+            color: var(--pri);
+            font-weight: 600
+        }
+
+        .rank-1 {
+            color: gold
+        }
+
+        .rank-2 {
+            color: silver
+        }
+
+        .rank-3 {
+            color: #cd7f32
+        }
+
+        /* Alerts */
+        .ref-sec {
+            display: none;
+            margin-bottom: 2rem
+        }
+
+        .ref-h {
+            font-family: 'Bebas Neue', sans-serif;
+            font-size: 1.3rem;
+            color: var(--red);
+            display: flex;
+            align-items: center;
+            gap: .5rem;
+            margin-bottom: 1rem
+        }
+
+        .badge {
+            background: var(--red);
+            color: #fff;
+            font-size: .8rem;
+            font-weight: 700;
+            min-width: 24px;
+            height: 24px;
+            border-radius: 12px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            padding: 0 7px;
+            animation: badgePulse 1.5s infinite
+        }
+
+        .ag {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+            gap: 1.2rem
+        }
+
+        .ac {
+            background: rgba(229, 62, 62, .07);
+            border: 2px solid var(--red);
+            border-radius: 18px;
+            overflow: hidden;
+            box-shadow: 0 0 16px var(--red-g);
+            animation: slideIn .4s ease
+        }
+
+        .ac-b {
+            display: flex;
+            gap: 1rem;
+            padding: 1rem
+        }
+
+        .ac-img {
+            width: 110px;
+            height: 82px;
+            border-radius: 10px;
+            object-fit: cover;
+            cursor: pointer;
+            border: 1px solid rgba(255, 255, 255, .1)
+        }
+
+        .ac-d {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            justify-content: center
+        }
+
+        .ac-n {
+            font-size: 1.1rem;
+            font-weight: 700;
+            color: var(--red)
+        }
+
+        .ac-m {
+            font-size: .8rem;
+            color: #cbd5e1;
+            margin: .2rem 0
+        }
+
+        .ac-t {
+            font-size: .7rem;
+            color: #64748b
+        }
+
+        .ac-a {
+            padding: 0 1rem 1rem
+        }
+
+        .btn-ack {
+            width: 100%;
+            padding: .5rem;
+            border: 1px solid var(--grn);
+            background: rgba(56, 193, 114, .12);
+            color: #4ade80;
+            border-radius: 10px;
+            cursor: pointer;
+            font-family: 'DM Sans', sans-serif;
+            font-size: .85rem;
+            font-weight: 600;
+            transition: background .2s
+        }
+
+        .btn-ack:hover {
+            background: rgba(56, 193, 114, .25)
+        }
+
+        .ac.gone {
+            animation: fadeOut .4s forwards
+        }
+
+        /* Lightbox */
+        .lb {
+            display: none;
+            position: fixed;
+            inset: 0;
+            background: rgba(0, 0, 0, .85);
+            z-index: 500;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer
+        }
+
+        .lb.on {
+            display: flex
+        }
+
+        .lb img {
+            max-width: 90%;
+            max-height: 90%;
+            border-radius: 14px
+        }
+
+        /* Admin */
+        #admin-panel {
+            display: none
+        }
+
+        .admin-bar {
+            padding: 1rem 1.5rem;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            border-bottom: 1px solid var(--bdr)
+        }
+
+        .tabs {
+            display: flex;
+            gap: .5rem
+        }
+
+        .tab {
+            padding: .5rem 1.2rem;
+            border-radius: 10px;
+            cursor: pointer;
+            font-size: .85rem;
+            background: rgba(255, 255, 255, .04);
+            border: 1px solid var(--bdr);
+            color: var(--mut);
+            font-family: 'DM Sans', sans-serif;
+            transition: all .2s
+        }
+
+        .tab.on {
+            background: rgba(29, 158, 117, .15);
+            border-color: var(--pri);
+            color: var(--pri)
+        }
+
+        .btn-out {
+            padding: .4rem 1rem;
+            background: rgba(229, 62, 62, .12);
+            border: 1px solid var(--red);
+            border-radius: 10px;
+            color: var(--red);
+            cursor: pointer;
+            font-size: .8rem;
+            font-family: 'DM Sans', sans-serif
+        }
+
+        .admin-body {
+            padding: 1.5rem
+        }
+
+        .search {
+            padding: .5rem .8rem;
+            background: rgba(255, 255, 255, .04);
+            border: 1px solid var(--bdr);
+            border-radius: 10px;
+            color: var(--txt);
+            font-size: .85rem;
+            outline: none;
+            width: 200px
+        }
+
+        .search:focus {
+            border-color: var(--pri)
+        }
+
+        .btn-sm {
+            padding: .3rem .7rem;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: .75rem;
+            border: none;
+            transition: all .2s;
+            font-family: 'DM Sans', sans-serif
+        }
+
+        .btn-vf {
+            background: rgba(56, 193, 114, .12);
+            color: #4ade80;
+            border: 1px solid var(--grn)
+        }
+
+        .btn-vf:hover {
+            background: rgba(56, 193, 114, .25)
+        }
+
+        .btn-dl {
+            background: rgba(229, 62, 62, .1);
+            color: var(--red);
+            border: 1px solid var(--red)
+        }
+
+        .btn-dl:hover {
+            background: rgba(229, 62, 62, .2)
+        }
+
+        /* Login Modal */
+        .modal-bg {
+            display: none;
+            position: fixed;
+            inset: 0;
+            background: rgba(0, 0, 0, .7);
+            z-index: 300;
+            align-items: center;
+            justify-content: center
+        }
+
+        .modal-bg.on {
+            display: flex
+        }
+
+        .modal {
+            background: var(--sf);
+            border: 1px solid var(--bdr);
+            border-radius: 20px;
+            padding: 2.5rem;
+            width: 100%;
+            max-width: 380px;
+            text-align: center
+        }
+
+        .modal h3 {
+            font-family: 'Bebas Neue', sans-serif;
+            font-size: 1.4rem;
+            margin-bottom: .3rem;
+            color: var(--pri)
+        }
+
+        .modal p {
+            color: var(--mut);
+            font-size: .85rem;
+            margin-bottom: 1.5rem
+        }
+
+        .modal input {
+            width: 100%;
+            padding: .8rem 1rem;
+            background: rgba(255, 255, 255, .04);
+            border: 1px solid var(--bdr);
+            border-radius: 12px;
+            color: var(--txt);
+            font-size: 1rem;
+            outline: none;
+            margin-bottom: 1rem;
+            text-align: center
+        }
+
+        .modal input:focus {
+            border-color: var(--pri)
+        }
+
+        .modal .btn-go {
+            width: 100%;
+            padding: .8rem;
+            background: linear-gradient(135deg, var(--pri), #2dd4a8);
+            border: none;
+            border-radius: 12px;
+            color: #0b0f14;
+            font-weight: 700;
+            cursor: pointer;
+            font-size: 1rem;
+            font-family: 'DM Sans', sans-serif
+        }
+
+        .modal .err {
+            color: var(--red);
+            font-size: .82rem;
+            min-height: 1.2rem;
+            margin-bottom: .5rem
+        }
+
+        .empty {
+            text-align: center;
+            padding: 2.5rem;
+            color: var(--mut);
+            font-size: .9rem
+        }
+
+        @keyframes pulse {
+
+            0%,
+            100% {
+                transform: scale(.95);
+                opacity: .7
+            }
+
+            70% {
+                transform: scale(1.1);
+                opacity: 1
+            }
+        }
+
+        @keyframes badgePulse {
+
+            0%,
+            100% {
+                transform: scale(1)
+            }
+
+            50% {
+                transform: scale(1.15)
+            }
+        }
+
+        @keyframes slideIn {
+            from {
+                opacity: 0;
+                transform: translateX(-20px)
+            }
+
+            to {
+                opacity: 1;
+                transform: translateX(0)
+            }
+        }
+
+        @keyframes fadeOut {
+            to {
+                opacity: 0;
+                transform: scale(.9);
+                height: 0;
+                margin: 0;
+                padding: 0;
+                overflow: hidden
+            }
+        }
+
+        @media(max-width:768px) {
+            .page {
+                padding: 1rem
+            }
+
+            .sc-v {
+                font-size: 1.6rem
+            }
+
+            td,
+            th {
+                padding: .7rem .5rem;
+                font-size: .8rem
+            }
+
+            .ag {
+                grid-template-columns: 1fr
+            }
+
+            .ac-b {
+                flex-direction: column
+            }
+
+            .ac-img {
+                width: 100%;
+                height: 120px
+            }
+        }
+    </style>
 </head>
+
 <body>
-<div class="bar">
- <h1>🏃 RUNNERTRACK</h1>
- <div class="bar-r">
-  <div class="live"><div class="dot"></div>Live</div>
-  <a href="register.html" class="nav-link">📋 Register</a>
-  <a href="checkpoint.html" class="nav-link">📷 Checkpoint</a>
-  <button class="btn-admin" id="btn-admin-toggle" onclick="showLogin()">🔐 Admin</button>
- </div>
-</div>
-
-<!-- PUBLIC DASHBOARD -->
-<div class="page" id="public-view">
- <div class="stats">
-  <div class="sc"><div class="sc-l">นักวิ่งทั้งหมด</div><div class="sc-v" id="s-total">0</div></div>
-  <div class="sc"><div class="sc-l">เข้าเส้นชัยแล้ว</div><div class="sc-v" id="s-fin" style="color:#4ade80">0</div></div>
-  <div class="sc" style="border-color:var(--red)"><div class="sc-l">ความผิดปกติ</div><div class="sc-v" id="s-viol" style="color:var(--red)">0</div></div>
- </div>
-
- <div class="ref-sec" id="ref-sec">
-  <div class="ref-h">🚨 แจ้งเตือนกรรมการ <span class="badge" id="alert-badge">0</span></div>
-  <div class="ag" id="alert-grid"></div>
- </div>
-
- <div class="section">
-  <div class="sh">🏁 LEADERBOARD</div>
-  <table><thead><tr><th>อันดับ</th><th>ชื่อ</th><th>BIB</th><th>CP1</th><th>CP2</th><th>เวลารวม</th></tr></thead>
-  <tbody id="lb-body"></tbody></table>
-  <div class="empty" id="lb-empty" style="display:none">ยังไม่มีข้อมูล</div>
- </div>
-</div>
-
-<!-- ADMIN PANEL -->
-<div id="admin-panel">
- <div class="page">
-  <div class="section">
-   <div class="admin-bar">
-    <div class="tabs">
-     <button class="tab on" onclick="switchTab('runners',this)">📋 นักวิ่ง</button>
-     <button class="tab" onclick="switchTab('violations',this)">🚨 Violations</button>
+    <div class="bar">
+        <h1>🏃 RUNNERTRACK</h1>
+        <div class="bar-r">
+            <div class="live">
+                <div class="dot"></div>Live
+            </div>
+            <a href="/register" class="nav-link">📋 Register</a>
+            <a href="/checkpoint" class="nav-link">📷 Checkpoint</a>
+            <button class="btn-admin" id="btn-admin-toggle" onclick="showLogin()">🔐 Admin</button>
+        </div>
     </div>
-    <div style="display:flex;gap:.5rem;align-items:center">
-     <input class="search" id="admin-search" placeholder="🔍 ค้นหา" oninput="renderAdminTab()">
-     <button class="btn-out" onclick="doLogout()">🚪 ออก</button>
+
+    <!-- PUBLIC DASHBOARD -->
+    <div class="page" id="public-view">
+        <div class="stats">
+            <div class="sc">
+                <div class="sc-l">นักวิ่งทั้งหมด</div>
+                <div class="sc-v" id="s-total">0</div>
+            </div>
+            <div class="sc">
+                <div class="sc-l">เข้าเส้นชัยแล้ว</div>
+                <div class="sc-v" id="s-fin" style="color:#4ade80">0</div>
+            </div>
+            <div class="sc" style="border-color:var(--red)">
+                <div class="sc-l">ความผิดปกติ</div>
+                <div class="sc-v" id="s-viol" style="color:var(--red)">0</div>
+            </div>
+        </div>
+
+        <div class="ref-sec" id="ref-sec">
+            <div class="ref-h">🚨 แจ้งเตือนกรรมการ <span class="badge" id="alert-badge">0</span></div>
+            <div class="ag" id="alert-grid"></div>
+        </div>
+
+        <div class="section">
+            <div class="sh">🏁 LEADERBOARD</div>
+            <table>
+                <thead>
+                    <tr>
+                        <th>อันดับ</th>
+                        <th>ชื่อ</th>
+                        <th>BIB</th>
+                        <th>CP1</th>
+                        <th>CP2</th>
+                        <th>เวลารวม</th>
+                    </tr>
+                </thead>
+                <tbody id="lb-body"></tbody>
+            </table>
+            <div class="empty" id="lb-empty" style="display:none">ยังไม่มีข้อมูล</div>
+        </div>
     </div>
-   </div>
-   <div class="admin-body" id="admin-body"></div>
-  </div>
- </div>
-</div>
 
-<!-- LOGIN MODAL -->
-<div class="modal-bg" id="login-modal">
- <div class="modal">
-  <h3>🔐 STAFF LOGIN</h3>
-  <p>กรุณาใส่รหัสผ่าน</p>
-  <div class="err" id="login-err"></div>
-  <input type="password" id="pw" placeholder="รหัสผ่าน" onkeydown="if(event.key==='Enter')doLogin()">
-  <button class="btn-go" onclick="doLogin()">เข้าสู่ระบบ</button>
- </div>
-</div>
+    <!-- ADMIN PANEL -->
+    <div id="admin-panel">
+        <div class="page">
+            <div class="section">
+                <div class="admin-bar">
+                    <div class="tabs">
+                        <button class="tab on" onclick="switchTab('runners',this)">📋 นักวิ่ง</button>
+                        <button class="tab" onclick="switchTab('violations',this)">🚨 Violations</button>
+                    </div>
+                    <div style="display:flex;gap:.5rem;align-items:center">
+                        <input class="search" id="admin-search" placeholder="🔍 ค้นหา" oninput="renderAdminTab()">
+                        <button class="btn-out" onclick="doLogout()">🚪 ออก</button>
+                    </div>
+                </div>
+                <div class="admin-body" id="admin-body"></div>
+            </div>
+        </div>
+    </div>
 
-<!-- LIGHTBOX -->
-<div class="lb" id="lb" onclick="this.classList.remove('on')"><img id="lb-img" src=""></div>
+    <!-- LOGIN MODAL -->
+    <div class="modal-bg" id="login-modal">
+        <div class="modal">
+            <h3>🔐 STAFF LOGIN</h3>
+            <p>กรุณาใส่รหัสผ่าน</p>
+            <div class="err" id="login-err"></div>
+            <input type="password" id="pw" placeholder="รหัสผ่าน" onkeydown="if(event.key==='Enter')doLogin()">
+            <button class="btn-go" onclick="doLogin()">เข้าสู่ระบบ</button>
+        </div>
+    </div>
 
-<!-- CONFIRM MODAL -->
-<div class="modal-bg" id="confirm-modal">
- <div class="modal">
-  <div style="font-size:2.5rem;margin-bottom:.8rem">⚠️</div>
-  <h3 id="confirm-msg">ยืนยันการลบ?</h3>
-  <div style="display:flex;gap:.8rem;margin-top:1.5rem">
-   <button onclick="closeConfirm()" style="flex:1;padding:.7rem;background:rgba(255,255,255,.06);border:1px solid var(--bdr);border-radius:12px;color:var(--mut);cursor:pointer;font-family:'DM Sans',sans-serif">ยกเลิก</button>
-   <button id="confirm-ok" style="flex:1;padding:.7rem;background:var(--red);border:none;border-radius:12px;color:#fff;cursor:pointer;font-weight:700;font-family:'DM Sans',sans-serif">ลบ</button>
-  </div>
- </div>
-</div>
+    <!-- LIGHTBOX -->
+    <div class="lb" id="lb" onclick="this.classList.remove('on')"><img id="lb-img" src=""></div>
 
-<script>
-const API="https://script.google.com/macros/s/AKfycbyKbEr4GNKg_Roe0CJEshgs7j9pe7whvO_u5SMQSgYxE0zZGlaZy3E9KwuoHl5MWW81Aw/exec";
-const ADMIN_PW="muto67";
-let results=[],violations=[],runners=[];
-const seen=new Set(),dismissed=new Set();
-let audioCtx=null,adminTab="runners";
+    <!-- CONFIRM MODAL -->
+    <div class="modal-bg" id="confirm-modal">
+        <div class="modal">
+            <div style="font-size:2.5rem;margin-bottom:.8rem">⚠️</div>
+            <h3 id="confirm-msg">ยืนยันการลบ?</h3>
+            <div style="display:flex;gap:.8rem;margin-top:1.5rem">
+                <button onclick="closeConfirm()"
+                    style="flex:1;padding:.7rem;background:rgba(255,255,255,.06);border:1px solid var(--bdr);border-radius:12px;color:var(--mut);cursor:pointer;font-family:'DM Sans',sans-serif">ยกเลิก</button>
+                <button id="confirm-ok"
+                    style="flex:1;padding:.7rem;background:var(--red);border:none;border-radius:12px;color:#fff;cursor:pointer;font-weight:700;font-family:'DM Sans',sans-serif">ลบ</button>
+            </div>
+        </div>
+    </div>
 
-// ── AUTH ──
-function showLogin(){document.getElementById("login-modal").classList.add("on")}
-function doLogin(){
- const pw=document.getElementById("pw").value;
- if(pw===ADMIN_PW){
-  sessionStorage.setItem("admin","1");
-  document.getElementById("login-modal").classList.remove("on");
-  enterAdmin();
- } else {
-  document.getElementById("login-err").textContent="รหัสผ่านไม่ถูกต้อง";
- }
-}
-function doLogout(){sessionStorage.removeItem("admin");location.reload()}
-function enterAdmin(){
- document.getElementById("public-view").style.display="none";
- document.getElementById("admin-panel").style.display="block";
- document.getElementById("btn-admin-toggle").style.display="none";
- loadAdminData();
-}
-// Auto-check session
-if(sessionStorage.getItem("admin")==="1"||new URLSearchParams(location.search).get("admin")==="true"){
- if(sessionStorage.getItem("admin")==="1")enterAdmin();
- else showLogin();
-}
+    <script>
+        const API = "https://script.google.com/macros/s/AKfycbxBPX099pS7Iuz8ukWvWu3SbbrSidbRvMkq55kYicOQ8f9TGuyf7GsD_ALaYJAfOjLcvA/exec";
+        const ADMIN_PW = "muto67";
+        let results = [], violations = [], runners = [];
+        const seen = new Set(), dismissed = new Set();
+        let audioCtx = null, adminTab = "runners";
 
-// ── PUBLIC DATA ──
-async function fetchResults(){
- try{const r=await fetch(API+"?action=getResults");const d=await r.json();if(d.status==="success")results=d.data||[];renderLeaderboard();}catch(e){console.error(e)}
-}
-async function fetchViolations(){
- try{const r=await fetch(API+"?action=getVerifiedViolations");const d=await r.json();if(d.status==="success"){violations=d.data||[];document.getElementById("s-viol").textContent=violations.length;renderAlerts();}}catch(e){console.error(e)}
-}
-function renderLeaderboard(){
- const tb=document.getElementById("lb-body");
- const emp=document.getElementById("lb-empty");
- if(!results.length){tb.innerHTML="";emp.style.display="";return}
- emp.style.display="none";
- // Sort: finished first by duration, then unfinished
- const fin=results.filter(r=>r.Lap1_Duration).sort((a,b)=>{
-  const da=parseDur(a.Lap1_Duration),db=parseDur(b.Lap1_Duration);return da-db;
- });
- const unfin=results.filter(r=>!r.Lap1_Duration);
- const sorted=[...fin,...unfin];
- let finCount=fin.length;
- document.getElementById("s-total").textContent=results.length;
- document.getElementById("s-fin").textContent=finCount;
- tb.innerHTML=sorted.map((r,i)=>{
-  const rank=i+1;
-  const rc=rank===1?"rank-1":rank===2?"rank-2":rank===3?"rank-3":"";
-  return `<tr><td class="${rc}" style="font-weight:700">#${rank}</td><td style="font-weight:600">${r.Name||"-"}</td><td>${r.BibNumber||"-"}</td><td>${r.CP1_Time||"-"}</td><td>${r.CP2_Time||"-"}</td><td class="tt">${r.Lap1_Duration||"-"}</td></tr>`;
- }).join("");
-}
-function parseDur(s){if(!s)return 99999;const p=String(s).split(":");return(parseInt(p[0])||0)*60+(parseInt(p[1])||0)}
+        // ── AUTH ──
+        function showLogin() { document.getElementById("login-modal").classList.add("on") }
+        function doLogin() {
+            const pw = document.getElementById("pw").value;
+            if (pw === ADMIN_PW) {
+                sessionStorage.setItem("admin", "1");
+                document.getElementById("login-modal").classList.remove("on");
+                enterAdmin();
+            } else {
+                document.getElementById("login-err").textContent = "รหัสผ่านไม่ถูกต้อง";
+            }
+        }
+        function doLogout() { sessionStorage.removeItem("admin"); location.reload() }
+        function enterAdmin() {
+            document.getElementById("public-view").style.display = "none";
+            document.getElementById("admin-panel").style.display = "block";
+            document.getElementById("btn-admin-toggle").style.display = "none";
+            loadAdminData();
+        }
+        // Auto-check session
+        if (sessionStorage.getItem("admin") === "1" || new URLSearchParams(location.search).get("admin") === "true") {
+            if (sessionStorage.getItem("admin") === "1") enterAdmin();
+            else showLogin();
+        }
 
-// ── ALERTS ──
-function renderAlerts(){
- const grid=document.getElementById("alert-grid");
- let hasNew=false;
- violations.forEach(v=>{
-  const key=v.ID||v.Timestamp+"_"+v.Name;
-  if(dismissed.has(key)||seen.has(key))return;
-  seen.add(key);hasNew=true;
-  const card=document.createElement("div");card.className="ac";card.setAttribute("data-k",key);
-  card.innerHTML=`<div class="ac-b">${v.ImageUrl?`<img src="${v.ImageUrl}" class="ac-img" onclick="openLb('${v.ImageUrl}')">`:""}
-   <div class="ac-d"><div class="ac-n">🔴 ${v.Name||"Unknown"}</div><div class="ac-m">${v.Message||"Violation"}</div><div class="ac-t">🕐 ${v.Timestamp||""}</div></div>
+        // ── PUBLIC DATA ──
+        async function fetchResults() {
+            try { const r = await fetch(API + "?action=getResults"); const d = await r.json(); if (d.status === "success") results = d.data || []; renderLeaderboard(); } catch (e) { console.error(e) }
+        }
+        async function fetchViolations() {
+            try { const r = await fetch(API + "?action=getVerifiedViolations"); const d = await r.json(); if (d.status === "success") { violations = d.data || []; document.getElementById("s-viol").textContent = violations.length; renderAlerts(); } } catch (e) { console.error(e) }
+        }
+        function renderLeaderboard() {
+            const tb = document.getElementById("lb-body");
+            const emp = document.getElementById("lb-empty");
+            if (!results.length) { tb.innerHTML = ""; emp.style.display = ""; return }
+            emp.style.display = "none";
+            // Sort: finished first by duration, then unfinished
+            const fin = results.filter(r => r.Lap1_Duration).sort((a, b) => {
+                const da = parseDur(a.Lap1_Duration), db = parseDur(b.Lap1_Duration); return da - db;
+            });
+            const unfin = results.filter(r => !r.Lap1_Duration);
+            const sorted = [...fin, ...unfin];
+            let finCount = fin.length;
+            document.getElementById("s-total").textContent = results.length;
+            document.getElementById("s-fin").textContent = finCount;
+            tb.innerHTML = sorted.map((r, i) => {
+                const rank = i + 1;
+                const rc = rank === 1 ? "rank-1" : rank === 2 ? "rank-2" : rank === 3 ? "rank-3" : "";
+                return `<tr><td class="${rc}" style="font-weight:700">#${rank}</td><td style="font-weight:600">${r.Name || "-"}</td><td>${r.BibNumber || "-"}</td><td>${r.CP1_Time || "-"}</td><td>${r.CP2_Time || "-"}</td><td class="tt">${r.Lap1_Duration || "-"}</td></tr>`;
+            }).join("");
+        }
+        function parseDur(s) { if (!s) return 99999; const p = String(s).split(":"); return (parseInt(p[0]) || 0) * 60 + (parseInt(p[1]) || 0) }
+
+        // ── ALERTS ──
+        function renderAlerts() {
+            const grid = document.getElementById("alert-grid");
+            let hasNew = false;
+            violations.forEach(v => {
+                const key = v.ID || v.Timestamp + "_" + v.Name;
+                if (dismissed.has(key) || seen.has(key)) return;
+                seen.add(key); hasNew = true;
+                const card = document.createElement("div"); card.className = "ac"; card.setAttribute("data-k", key);
+                card.innerHTML = `<div class="ac-b">${v.ImageUrl ? `<img src="${v.ImageUrl}" class="ac-img" onclick="openLb('${v.ImageUrl}')">` : ""}
+   <div class="ac-d"><div class="ac-n">🔴 ${v.Name || "Unknown"}</div><div class="ac-m">${v.Message || "Violation"}</div><div class="ac-t">🕐 ${v.Timestamp || ""}</div></div>
   </div><div class="ac-a"><button class="btn-ack" onclick="dismissA('${key}',this.closest('.ac'))">✅ รับทราบ</button></div>`;
-  grid.prepend(card);
- });
- if(hasNew)playBeep();
- updateBadge();
-}
-function dismissA(k,el){dismissed.add(k);el.classList.add("gone");setTimeout(()=>{el.remove();updateBadge()},400)}
-function updateBadge(){
- const n=document.querySelectorAll(".ac:not(.gone)").length;
- document.getElementById("alert-badge").textContent=n;
- document.getElementById("ref-sec").style.display=n>0?"block":"none";
-}
-function openLb(s){document.getElementById("lb-img").src=s;document.getElementById("lb").classList.add("on")}
-function playBeep(){
- try{if(!audioCtx)audioCtx=new(window.AudioContext||window.webkitAudioContext)();
- [660,880].forEach((f,i)=>{const o=audioCtx.createOscillator(),g=audioCtx.createGain();o.connect(g);g.connect(audioCtx.destination);o.type="square";o.frequency.value=f;g.gain.setValueAtTime(.12,audioCtx.currentTime+i*.15);g.gain.exponentialRampToValueAtTime(.001,audioCtx.currentTime+i*.15+.14);o.start(audioCtx.currentTime+i*.15);o.stop(audioCtx.currentTime+i*.15+.14)});}catch(e){}
-}
+                grid.prepend(card);
+            });
+            if (hasNew) playBeep();
+            updateBadge();
+        }
+        function dismissA(k, el) { dismissed.add(k); el.classList.add("gone"); setTimeout(() => { el.remove(); updateBadge() }, 400) }
+        function updateBadge() {
+            const n = document.querySelectorAll(".ac:not(.gone)").length;
+            document.getElementById("alert-badge").textContent = n;
+            document.getElementById("ref-sec").style.display = n > 0 ? "block" : "none";
+        }
+        function openLb(s) { document.getElementById("lb-img").src = s; document.getElementById("lb").classList.add("on") }
+        function playBeep() {
+            try {
+                if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                [660, 880].forEach((f, i) => { const o = audioCtx.createOscillator(), g = audioCtx.createGain(); o.connect(g); g.connect(audioCtx.destination); o.type = "square"; o.frequency.value = f; g.gain.setValueAtTime(.12, audioCtx.currentTime + i * .15); g.gain.exponentialRampToValueAtTime(.001, audioCtx.currentTime + i * .15 + .14); o.start(audioCtx.currentTime + i * .15); o.stop(audioCtx.currentTime + i * .15 + .14) });
+            } catch (e) { }
+        }
 
-// ── ADMIN ──
-async function loadAdminData(){
- try{
-  const[rr,vr,resr]=await Promise.all([
-   fetch(API+"?action=getRunners").then(r=>r.json()),
-   fetch(API+"?action=getViolations").then(r=>r.json()),
-   fetch(API+"?action=getResults").then(r=>r.json())
-  ]);
-  runners=rr.data||[];violations=vr.data||[];results=resr.data||[];
-  renderAdminTab();
- }catch(e){console.error(e)}
-}
-function switchTab(t,el){adminTab=t;document.querySelectorAll(".tab").forEach(b=>b.classList.remove("on"));el.classList.add("on");renderAdminTab()}
+        // ── ADMIN ──
+        async function loadAdminData() {
+            try {
+                const [rr, vr, resr] = await Promise.all([
+                    fetch(API + "?action=getRunners").then(r => r.json()),
+                    fetch(API + "?action=getViolations").then(r => r.json()),
+                    fetch(API + "?action=getResults").then(r => r.json())
+                ]);
+                runners = rr.data || []; violations = vr.data || []; results = resr.data || [];
+                renderAdminTab();
+            } catch (e) { console.error(e) }
+        }
+        function switchTab(t, el) { adminTab = t; document.querySelectorAll(".tab").forEach(b => b.classList.remove("on")); el.classList.add("on"); renderAdminTab() }
 
-function renderAdminTab(){
- const body=document.getElementById("admin-body");
- const q=document.getElementById("admin-search").value.toLowerCase();
- if(adminTab==="runners"){
-  // Merge runners + results
-  const merged=runners.map(rn=>{
-   const res=results.find(r=>r.Name===rn.Name)||{};
-   return{...rn,CP1_Time:res.CP1_Time||"-",CP2_Time:res.CP2_Time||"-",Lap1_Duration:res.Lap1_Duration||"-"};
-  }).filter(r=>r.Name.toLowerCase().includes(q)||String(r.BibNumber).includes(q));
-  if(!merged.length){body.innerHTML=`<div class="empty">ไม่พบข้อมูลนักวิ่ง</div>`;return}
-  body.innerHTML=`<table><thead><tr><th>ชื่อ</th><th>BIB</th><th>Email</th><th>CP1</th><th>CP2</th><th>เวลา</th><th>Drive</th><th>จัดการ</th></tr></thead><tbody>${
-   merged.map(r=>`<tr><td style="font-weight:600">${r.Name}</td><td>${r.BibNumber||"-"}</td><td style="font-size:.8rem;color:var(--mut)">${r.Email||"-"}</td><td class="tt">${r.CP1_Time}</td><td class="tt">${r.CP2_Time}</td><td class="tt">${r.Lap1_Duration}</td><td>${r.FolderUrl?`<a href="${r.FolderUrl}" target="_blank" style="color:var(--pri);font-size:.8rem">📂</a>`:"-"}</td><td><button class="btn-sm btn-dl" onclick="confirmDel('runner','${r.Name}')">🗑️</button></td></tr>`).join("")
-  }</tbody></table>`;
- } else {
-  const filtered=violations.filter(v=>(v.Name||"").toLowerCase().includes(q));
-  if(!filtered.length){body.innerHTML=`<div class="empty">ไม่มี violations</div>`;return}
-  body.innerHTML=`<table><thead><tr><th>ID</th><th>ชื่อ</th><th>BIB</th><th>ข้อความ</th><th>หลักฐาน</th><th>เวลา</th><th>สถานะ</th><th>จัดการ</th></tr></thead><tbody>${
-   filtered.map(v=>{
-    const verified=String(v.Verified).toLowerCase()==="true";
-    return`<tr><td style="font-size:.75rem;color:var(--mut)">${v.ID||""}</td><td style="font-weight:600">${v.Name}</td><td>${v.BibNumber||"-"}</td><td style="font-size:.82rem;max-width:200px;overflow:hidden;text-overflow:ellipsis">${v.Message||""}</td><td>${v.ImageUrl?`<img src="${v.ImageUrl}" style="width:60px;height:40px;object-fit:cover;border-radius:6px;cursor:pointer" onclick="openLb('${v.ImageUrl}')">`:"-"}</td><td style="font-size:.8rem">${v.Timestamp||""}</td><td>${verified?'<span style="color:var(--grn);font-size:.8rem">✅ ยืนยันแล้ว</span>':'<span style="color:var(--mut);font-size:.8rem">⏳ รอตรวจ</span>'}</td><td><div style="display:flex;gap:.3rem">${!verified?`<button class="btn-sm btn-vf" onclick="verifyV('${v.ID}')">✅</button>`:""}<button class="btn-sm btn-dl" onclick="confirmDel('violation','${v.ID}')">🗑️</button></div></td></tr>`;
-   }).join("")
-  }</tbody></table>`;
- }
-}
+        function renderAdminTab() {
+            const body = document.getElementById("admin-body");
+            const q = document.getElementById("admin-search").value.toLowerCase();
+            if (adminTab === "runners") {
+                // Merge runners + results
+                const merged = runners.map(rn => {
+                    const res = results.find(r => r.Name === rn.Name) || {};
+                    return { ...rn, CP1_Time: res.CP1_Time || "-", CP2_Time: res.CP2_Time || "-", Lap1_Duration: res.Lap1_Duration || "-" };
+                }).filter(r => r.Name.toLowerCase().includes(q) || String(r.BibNumber).includes(q));
+                if (!merged.length) { body.innerHTML = `<div class="empty">ไม่พบข้อมูลนักวิ่ง</div>`; return }
+                body.innerHTML = `<table><thead><tr><th>ชื่อ</th><th>BIB</th><th>Email</th><th>CP1</th><th>CP2</th><th>เวลา</th><th>Drive</th><th>จัดการ</th></tr></thead><tbody>${merged.map(r => `<tr><td style="font-weight:600">${r.Name}</td><td>${r.BibNumber || "-"}</td><td style="font-size:.8rem;color:var(--mut)">${r.Email || "-"}</td><td class="tt">${r.CP1_Time}</td><td class="tt">${r.CP2_Time}</td><td class="tt">${r.Lap1_Duration}</td><td>${r.FolderUrl ? `<a href="${r.FolderUrl}" target="_blank" style="color:var(--pri);font-size:.8rem">📂</a>` : "-"}</td><td><button class="btn-sm btn-dl" onclick="confirmDel('runner','${r.Name}')">🗑️</button></td></tr>`).join("")
+                    }</tbody></table>`;
+            } else {
+                const filtered = violations.filter(v => (v.Name || "").toLowerCase().includes(q));
+                if (!filtered.length) { body.innerHTML = `<div class="empty">ไม่มี violations</div>`; return }
+                body.innerHTML = `<table><thead><tr><th>ID</th><th>ชื่อ</th><th>BIB</th><th>ข้อความ</th><th>หลักฐาน</th><th>เวลา</th><th>สถานะ</th><th>จัดการ</th></tr></thead><tbody>${filtered.map(v => {
+                    const verified = String(v.Verified).toLowerCase() === "true";
+                    return `<tr><td style="font-size:.75rem;color:var(--mut)">${v.ID || ""}</td><td style="font-weight:600">${v.Name}</td><td>${v.BibNumber || "-"}</td><td style="font-size:.82rem;max-width:200px;overflow:hidden;text-overflow:ellipsis">${v.Message || ""}</td><td>${v.ImageUrl ? `<img src="${v.ImageUrl}" style="width:60px;height:40px;object-fit:cover;border-radius:6px;cursor:pointer" onclick="openLb('${v.ImageUrl}')">` : "-"}</td><td style="font-size:.8rem">${v.Timestamp || ""}</td><td>${verified ? '<span style="color:var(--grn);font-size:.8rem">✅ ยืนยันแล้ว</span>' : '<span style="color:var(--mut);font-size:.8rem">⏳ รอตรวจ</span>'}</td><td><div style="display:flex;gap:.3rem">${!verified ? `<button class="btn-sm btn-vf" onclick="verifyV('${v.ID}')">✅</button>` : ""}<button class="btn-sm btn-dl" onclick="confirmDel('violation','${v.ID}')">🗑️</button></div></td></tr>`;
+                }).join("")
+                    }</tbody></table>`;
+            }
+        }
 
-async function verifyV(id){
- await fetch(API,{method:"POST",headers:{"Content-Type":"text/plain"},body:JSON.stringify({action:"verifyViolation",id})});
- loadAdminData();
-}
-function confirmDel(type,id){
- document.getElementById("confirm-msg").textContent=type==="runner"?`ลบ "${id}" จากระบบ?`:"ลบ violation นี้?";
- document.getElementById("confirm-modal").classList.add("on");
- document.getElementById("confirm-ok").onclick=async()=>{
-  closeConfirm();
-  if(type==="runner")await fetch(API,{method:"POST",headers:{"Content-Type":"text/plain"},body:JSON.stringify({action:"deleteRunner",name:id})});
-  else await fetch(API,{method:"POST",headers:{"Content-Type":"text/plain"},body:JSON.stringify({action:"deleteViolation",id})});
-  loadAdminData();
- };
-}
-function closeConfirm(){document.getElementById("confirm-modal").classList.remove("on")}
+        async function verifyV(id) {
+            await fetch(API, { method: "POST", headers: { "Content-Type": "text/plain" }, body: JSON.stringify({ action: "verifyViolation", id }) });
+            loadAdminData();
+        }
+        function confirmDel(type, id) {
+            document.getElementById("confirm-msg").textContent = type === "runner" ? `ลบ "${id}" จากระบบ?` : "ลบ violation นี้?";
+            document.getElementById("confirm-modal").classList.add("on");
+            document.getElementById("confirm-ok").onclick = async () => {
+                closeConfirm();
+                if (type === "runner") await fetch(API, { method: "POST", headers: { "Content-Type": "text/plain" }, body: JSON.stringify({ action: "deleteRunner", name: id }) });
+                else await fetch(API, { method: "POST", headers: { "Content-Type": "text/plain" }, body: JSON.stringify({ action: "deleteViolation", id }) });
+                loadAdminData();
+            };
+        }
+        function closeConfirm() { document.getElementById("confirm-modal").classList.remove("on") }
 
-// ── AUTO REFRESH ──
-setInterval(fetchResults,1000);
-setInterval(fetchViolations,2000);
-setInterval(()=>{if(document.getElementById("admin-panel").style.display==="block")loadAdminData()},5000);
-fetchResults();fetchViolations();
-</script>
+        // ── AUTO REFRESH ──
+        setInterval(fetchResults, 1000);
+        setInterval(fetchViolations, 2000);
+        setInterval(() => { if (document.getElementById("admin-panel").style.display === "block") loadAdminData() }, 5000);
+        fetchResults(); fetchViolations();
+    </script>
 </body>
+
 </html>

@@ -66,8 +66,8 @@ body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--txt);min-
  <div class="bar-r">
   <div class="status" id="conn-status"><div class="dot"></div><span>Initializing</span></div>
   <span class="fps" id="fps-display">FPS: --</span>
-  <a href="dashboard.html" class="nav-link">📺 Dashboard</a>
-  <a href="register.html" class="nav-link">📋 Register</a>
+  <a href="/" class="nav-link">📺 Dashboard</a>
+  <a href="/register" class="nav-link">📋 Register</a>
  </div>
 </div>
 
@@ -97,8 +97,8 @@ body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--txt);min-
 <script src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@4/dist/tesseract.min.js"></script>
 <script>
-const API="https://script.google.com/macros/s/AKfycbyKbEr4GNKg_Roe0CJEshgs7j9pe7whvO_u5SMQSgYxE0zZGlaZy3E9KwuoHl5MWW81Aw/exec";
-const MODEL_URL="https://cdn.jsdelivr.net/gh/nicolo-ribaudo/face-api.js-models@master/";
+const API="https://script.google.com/macros/s/AKfycbxBPX099pS7Iuz8ukWvWu3SbbrSidbRvMkq55kYicOQ8f9TGuyf7GsD_ALaYJAfOjLcvA/exec";
+const MODEL_URL="https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js@master/weights/";
 
 let checkpointId=1;
 let faceMatcher=null;
