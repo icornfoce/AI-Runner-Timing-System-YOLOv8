@@ -205,12 +205,25 @@
             border-radius:14px;
             font-size:.9rem; font-weight:600;
             z-index:999;
-            transform:translateY(120%);
-            transition:transform .4s ease;
+            transform:translateY(200%);
+            opacity:0;
+            pointer-events:none;
+            transition:transform .4s ease, opacity .4s ease;
         }
-        .toast.show { transform:translateY(0); }
+        .toast.show { transform:translateY(0); opacity:1; pointer-events:auto; }
         .toast.success { background:var(--success); color:#fff; }
         .toast.error { background:var(--danger); color:#fff; }
+
+        /* ── MODEL STATUS ── */
+        .model-status {
+            text-align:center; padding:.6rem;
+            font-size:.8rem; color:var(--muted);
+            border-top:1px solid var(--border);
+            margin-top:.8rem;
+        }
+        .model-status.loading { color:var(--primary); }
+        .model-status.ready { color:var(--success); }
+        .model-status.fail { color:var(--danger); }
 
         /* ── LOADING OVERLAY ── */
         .loading-overlay {
@@ -332,6 +345,7 @@
                 <button class="btn-capture" id="btn-capture" disabled onclick="capturePhoto()">
                     📸 ถ่ายภาพ
                 </button>
+                <div class="model-status loading" id="model-status">⏳ กำลังโหลดโมเดล AI...</div>
             </div>
         </div>
     </div>
@@ -368,8 +382,8 @@
 // ═══════════════════════════════════════════════════════
 // CONFIG
 // ═══════════════════════════════════════════════════════
-const API_URL = "https://script.google.com/macros/s/AKfycbyZOObk6ey4jDepF-Ulw0VocD-3hmk3BpKRESLyrFCoT8GGSRW0X2UwDB2Y12cRXIEd/exec";
-const MODEL_URL = "https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model/";
+const API_URL = "https://script.google.com/macros/s/AKfycbyKbEr4GNKg_Roe0CJEshgs7j9pe7whvO_u5SMQSgYxE0zZGlaZy3E9KwuoHl5MWW81Aw/exec";
+const MODEL_URL = "https://cdn.jsdelivr.net/gh/nicolo-ribaudo/face-api.js-models@master/";
 
 const ANGLES = [
     { id: "front",  label: "หน้าตรง",  icon: "😐" },
@@ -424,15 +438,24 @@ async function startCamera() {
 }
 
 async function loadModels() {
+    const statusEl = document.getElementById("model-status");
     try {
+        statusEl.textContent = "⏳ โหลด SSD MobileNet...";
         await faceapi.nets.ssdMobilenetv1.loadFromUri(MODEL_URL);
+        statusEl.textContent = "⏳ โหลด Face Landmarks...";
         await faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL);
+        statusEl.textContent = "⏳ โหลด Face Recognition...";
         await faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL);
         modelsLoaded = true;
         document.getElementById("btn-capture").disabled = false;
+        statusEl.textContent = "✅ โมเดล AI พร้อมใช้งาน";
+        statusEl.className = "model-status ready";
         showToast("โมเดล AI โหลดสำเร็จ ✓", "success");
     } catch (e) {
+        statusEl.textContent = "❌ โหลดโมเดลไม่สำเร็จ: " + e.message;
+        statusEl.className = "model-status fail";
         showToast("โหลดโมเดลไม่สำเร็จ: " + e.message, "error");
+        console.error("Model load error:", e);
     }
 }
 
