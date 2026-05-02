@@ -1,75 +1,157 @@
-# 🏃‍♂️ AI Runner Timing System (YOLOv8 + Face Recognition)
+# 🏃‍♂️ AI Runner Timing System
 
-ระบบจับเวลาวิ่งอัตโนมัติด้วย AI โดยใช้ **YOLOv8** สำหรับการตรวจจับใบหน้าที่แม่นยำสูง และ **Face Recognition** สำหรับระบุตัวตนบุคคล รองรับการทำงานแบบหลายจุดเพื่อคำนวณเวลา Pace หรือสถิติการวิ่ง
-
-## ✨ ฟีเจอร์หลัก
-- **YOLOv8 Face Detection:** ตรวจจับใบหน้าได้รวดเร็วและแม่นยำกว่าการใช้ Haar Cascade แบบเดิม
-- **Checkpoint System:** รองรับการตั้งค่า Checkpoint (CP1, CP2) เพื่อคำนวณระยะเวลาการวิ่งระหว่างจุด
-- **CSV Logging:** บันทึกเวลาลงในไฟล์ `running_results.csv` โดยอัตโนมัติ
-- **Web Dashboard:** แสดงผลสถิติแบบ Real-time ผ่านเว็บเบราว์เซอร์ด้วย Flask
-- **Anti-Duplicate Logic:** ระบบ Cooldown ป้องกันการบันทึกซ้ำซ้อนในเวลาที่ใกล้กันเกินไป
+ระบบจับเวลาวิ่งอัตโนมัติด้วย AI ที่ทำงาน **100% บนเว็บเบราว์เซอร์** — ตรวจจับใบหน้า, ระบุตัวตนนักวิ่ง, อ่านหมายเลข BIB ด้วย OCR และบันทึกเวลาแบบ Real-time ไม่ต้องใช้ชิป RFID หรืออุปกรณ์ติดตัวใดๆ
 
 ---
 
-## 📁 โครงสร้างโปรเจกต์
-- `main.py`: โปรแกรมหลักสำหรับตรวจจับใบหน้าและบันทึกเวลา
-- `web_app.py`: เว็บแอปสำหรับแสดงผลคะแนนและสถิติ
-- `capture_faces.py`: สคริปต์สำหรับถ่ายภาพและจัดเก็บใบหน้าคนใหม่ลงในฐานข้อมูล
-- `Data/`: โฟลเดอร์เก็บรูปภาพใบหน้า (แบ่งตามชื่อโฟลเดอร์)
+## ✨ Features
+
+- **🧠 AI Face Recognition** — จดจำใบหน้านักวิ่งด้วย face-api.js (SSD MobileNet + FaceRecognitionNet)
+- **🔢 Bib OCR** — อ่านหมายเลขวิ่งจากเสื้อด้วย Tesseract.js แบบ Smart (ทำงานเมื่อจำเป็นเท่านั้น)
+- **⏱️ Multi-Checkpoint** — รองรับ CP1 (สตาร์ท) และ CP2 (เส้นชัย) คำนวณเวลาอัตโนมัติ
+- **🚨 Violation Detection** — ตรวจจับ BIB ไม่ตรง, สวม BIB คนอื่น, นักวิ่งไม่ลงทะเบียน
+- **📺 Live Dashboard** — ตารางอันดับ + แจ้งเตือนกรรมการแบบ Real-time
+- **🔐 Admin Portal** — จัดการนักวิ่ง, ยืนยัน/ลบ violation, แก้ไขเวลา
+- **☁️ Cloud Backend** — Google Apps Script + Google Sheets + Google Drive
 
 ---
 
-## 🚀 ขั้นตอนการติดตั้ง
+## 🛠️ Tech Stack
 
-1. **ติดตั้ง Dependencies:**
-   แนะนำให้ใช้ Python 3.8+ แล้วติดตั้งไลบรารีผ่าน `requirements.txt`:
-   ```bash
-   pip install -r requirements.txt
-   ```
-   *(หมายเหตุ: บน Windows คุณอาจต้องติดตั้ง Visual Studio C++ Build Tools เพื่อให้ติดตั้ง `dlib` ได้สำเร็จ)*
-
-2. **ดาวน์โหลด YOLOv8 Model:**
-   โปรแกรมจะดาวน์โหลดไฟล์ `yolov8n-face.pt` ให้โดยอัตโนมัติเมื่อรันครั้งแรก
+| Component | Technology |
+|---|---|
+| Face Detection & Recognition | [face-api.js](https://github.com/justadudewhohacks/face-api.js) |
+| Bib OCR | [Tesseract.js](https://github.com/naptha/tesseract.js) |
+| Camera | HTML5 `getUserMedia` API |
+| Backend / Database | Google Apps Script + Google Sheets |
+| Photo Storage | Google Drive |
+| Real-time Updates | Polling via `fetch()` |
+| Fonts | Bebas Neue + DM Sans + JetBrains Mono |
 
 ---
 
-## 📸 วิธีใช้งาน
+## 📁 Project Structure
 
-### 1. การเก็บข้อมูลใบหน้า (Registration)
-รันไฟล์ `capture_faces.py` เพื่อเพิ่มคนใหม่เข้าสู่ระบบ:
-```bash
-python capture_faces.py
 ```
-- พิมพ์ชื่อ-นามสกุล
-- กด **'s'** เพื่อบันทึกภาพ (แนะนำให้ถ่าย 5-10 ภาพ ในมุมที่ต่างกัน)
-- กด **'q'** เพื่อออก
-
-### 2. การรันระบบจับเวลา (Timing System)
-รันโปรแกรมหลักบนคอมพิวเตอร์ที่วางไว้ตามจุดต่างๆ:
-```bash
-python main.py
+AI-Runner-Timing-System-YOLOv8/
+├── templates/
+│   ├── register.html       📋 ลงทะเบียนนักวิ่ง (ถ่ายหน้า 5 มุม)
+│   ├── checkpoint.html      📷 จุด Checkpoint (ตรวจจับ + จับเวลา)
+│   └── dashboard.html       📺 Dashboard + Admin Portal
+├── apps_script/
+│   └── Code.gs              ☁️ Google Apps Script Backend
+├── legacy_v1/               📦 ระบบเดิม (Python/OpenCV) สำรองไว้
+│   ├── main.py
+│   ├── web_app.py
+│   ├── config.py
+│   └── capture_faces.py
+└── Data/                    🖼️ ฐานข้อมูลรูปหน้า (legacy)
 ```
-*การตั้งค่าใน `main.py`:* 
-- ปรับ `CHECKPOINT_ID = 1` สำหรับจุดสตาร์ท
-- ปรับ `CHECKPOINT_ID = 2` สำหรับจุดเส้นชัย
-
-### 3. การดูผลลัพธ์ (Web Dashboard)
-รันเว็บเซิร์ฟเวอร์เพื่อดูตารางเวลาแบบ Real-time:
-```bash
-python web_app.py
-```
-- เข้าไปที่: `http://localhost:5000`
 
 ---
 
-## ⚙️ การตั้งค่าเพิ่มเติม (Configuration)
-ในไฟล์ `main.py` คุณสามารถปรับแต่งค่าต่างๆ ได้ดังนี้:
-- `COOLDOWN_SECONDS`: ตั้งค่าเวลาที่จะล็อคการบันทึกซ้ำ (ค่าเริ่มต้น 30 วินาที)
-- `confidence > 0.6`: ความแม่นยำในการตรวจจับคน (YOLOv8)
-- `face_distances <= 0.5`: ความเข้มงวดในการระบุตัวตน (ยิ่งน้อยยิ่งเข้มงวด)
+## 🚀 Getting Started
+
+### 1. Deploy Google Apps Script
+
+1. สร้าง Google Sheets ใหม่
+2. ไปที่ **Extensions → Apps Script**
+3. คัดลอกเนื้อหาจาก `apps_script/Code.gs` ไปวาง
+4. กด **Deploy → New Deployment → Web app**
+   - Execute as: **Me**
+   - Who has access: **Anyone**
+5. คัดลอก URL ที่ได้
+
+### 2. อัปเดต API URL
+
+แก้ไขค่า `API_URL` หรือ `API` ในไฟล์ทั้ง 3:
+- `templates/register.html` → บรรทัด `const API_URL = "..."`
+- `templates/checkpoint.html` → บรรทัด `const API = "..."`
+- `templates/dashboard.html` → บรรทัด `const API = "..."`
+
+### 3. เปิดใช้งาน
+
+เปิดไฟล์ HTML ตรงในเบราว์เซอร์ หรือ host บน GitHub Pages / static server:
+
+```bash
+# ตัวเลือก: ใช้ Live Server
+npx serve templates/
+```
 
 ---
 
-## 🛠️ การแก้ไขปัญหา
-- **กล้องไม่ขึ้น:** ตรวจสอบไดรเวอร์กล้อง หรือเปลี่ยนค่าใน `cv2.VideoCapture(0)` เป็น 1 หรือ 2
-- **โปรแกรมหน่วง (Lag):** ปรับลดขนาดภาพในโค้ด `cv2.resize` หรือตรวจสอบว่ารันบน GPU (หากมีการติดตั้ง CUDA)
+## 📖 How to Use
+
+### Step 1: ลงทะเบียนนักวิ่ง
+
+เปิด **`register.html`** → กรอกชื่อ + BIB → ถ่ายหน้า 5 มุม → Submit
+
+| มุม | คำอธิบาย |
+|---|---|
+| 😐 Front | หน้าตรง |
+| 🙇 Top | ก้มหน้าเล็กน้อย |
+| 🙄 Bottom | เงยหน้าเล็กน้อย |
+| 👈 Left | หันซ้าย |
+| 👉 Right | หันขวา |
+
+### Step 2: ตั้งจุด Checkpoint
+
+เปิด **`checkpoint.html`** → เลือก CP1 หรือ CP2 → ระบบจะเริ่มตรวจจับอัตโนมัติ
+
+- **CP1** = จุดสตาร์ท (บันทึกเวลาเริ่ม)
+- **CP2** = เส้นชัย (บันทึกเวลาจบ + คำนวณ Duration)
+
+### Step 3: ดูผลแบบ Real-time
+
+เปิด **`dashboard.html`** → ดูตารางอันดับ + การแจ้งเตือน violation
+
+- 📊 Leaderboard อัปเดตทุก 1 วินาที
+- 🚨 Violation alerts อัปเดตทุก 2 วินาที (เฉพาะที่ Admin ยืนยันแล้ว)
+
+### Step 4: จัดการระบบ (Admin)
+
+ที่หน้า Dashboard กด **🔐 Admin** → ใส่รหัส → จัดการข้อมูลทั้งหมด
+
+---
+
+## ⚙️ Configuration
+
+| ค่า | ตำแหน่ง | ค่าเริ่มต้น | คำอธิบาย |
+|---|---|---|---|
+| `COOLDOWN_SEC` | checkpoint.html | `30` | ป้องกันบันทึกซ้ำ (วินาที) |
+| `ADMIN_PW` | dashboard.html | `muto67` | รหัสผ่าน Admin |
+| Face Distance | checkpoint.html | `0.5` | เกณฑ์จำหน้า (ยิ่งน้อย = ยิ่งเข้มงวด) |
+| Smart OCR | checkpoint.html | `10 frames` | เรียก OCR หลังเจอหน้าต่อเนื่อง 10 เฟรม |
+
+---
+
+## 🧪 Google Sheets Structure
+
+ระบบจะสร้าง 3 Sheets อัตโนมัติ:
+
+**Runners** — ข้อมูลนักวิ่ง
+```
+Name | BibNumber | Email | RegisteredAt | Photo_Front | ... | FolderUrl | Embeddings
+```
+
+**Results** — ผลเวลาวิ่ง
+```
+Name | BibNumber | CP1_Time | CP2_Time | Lap1_Duration | UpdatedAt
+```
+
+**Violations** — ประวัติความผิดปกติ
+```
+ID | Name | BibNumber | Message | ImageUrl | Timestamp | Verified | VerifiedAt
+```
+
+---
+
+## 📦 Legacy System
+
+ระบบเดิม (Python + OpenCV + YOLOv8) ถูกเก็บไว้ใน `legacy_v1/` สำหรับใช้งาน Offline เมื่อไม่มีอินเทอร์เน็ต — ดูรายละเอียดใน `legacy_v1/main.py`
+
+---
+
+## 📄 License
+
+MIT License

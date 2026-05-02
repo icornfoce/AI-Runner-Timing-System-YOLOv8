@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Checkpoint | RunnerTrack AI</title>
+<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>
+:root{--pri:#1D9E75;--pri-g:rgba(29,158,117,.35);--bg:#0b0f14;--sf:#141a22;--card:rgba(22,30,40,.85);--bdr:rgba(255,255,255,.08);--txt:#f0f2f5;--mut:#7a8594;--red:#e53e3e;--grn:#38c172}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--txt);min-height:100vh;overflow:hidden}
+.bar{background:rgba(11,15,20,.95);backdrop-filter:blur(18px);border-bottom:1px solid var(--bdr);padding:.7rem 1.5rem;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:50}
+.bar-l{display:flex;align-items:center;gap:1rem}
+.bar h1{font-family:'Bebas Neue',sans-serif;font-size:1.4rem;letter-spacing:2px;background:linear-gradient(135deg,var(--pri),#2dd4a8);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.cp-sel{display:flex;gap:0}
+.cp-btn{padding:.4rem 1rem;font-family:'Bebas Neue',sans-serif;font-size:1rem;letter-spacing:1px;cursor:pointer;border:1px solid var(--bdr);background:rgba(255,255,255,.03);color:var(--mut);transition:all .2s}
+.cp-btn:first-child{border-radius:8px 0 0 8px}.cp-btn:last-child{border-radius:0 8px 8px 0}
+.cp-btn.on{background:rgba(29,158,117,.2);border-color:var(--pri);color:var(--pri)}
+.bar-r{display:flex;align-items:center;gap:1rem}
+.status{display:flex;align-items:center;gap:.4rem;font-size:.8rem}
+.status.ok{color:#4ade80}.status.err{color:var(--red)}
+.dot{width:7px;height:7px;border-radius:50%;animation:pulse 2s infinite}
+.dot.ok{background:#22c55e}.dot.err{background:var(--red)}
+.fps{font-family:'JetBrains Mono',monospace;font-size:.8rem;color:var(--mut)}
+.nav-link{color:var(--mut);text-decoration:none;font-size:.8rem}.nav-link:hover{color:var(--pri)}
+/* MAIN */
+.main{display:flex;height:calc(100vh - 52px)}
+.cam-area{flex:1;position:relative;background:#000;display:flex;align-items:center;justify-content:center}
+#video{width:100%;height:100%;object-fit:cover}
+#overlay{position:absolute;top:0;left:0;width:100%;height:100%}
+/* SIDEBAR */
+.sidebar{width:280px;background:var(--sf);border-left:1px solid var(--bdr);display:flex;flex-direction:column;overflow:hidden}
+.sb-h{padding:1rem;font-family:'Bebas Neue',sans-serif;font-size:1.1rem;letter-spacing:1px;border-bottom:1px solid var(--bdr);color:var(--pri)}
+.sb-list{flex:1;overflow-y:auto;padding:.5rem}
+.sb-item{padding:.7rem .8rem;border-radius:10px;margin-bottom:.4rem;background:rgba(255,255,255,.03);border:1px solid var(--bdr);animation:slideIn .3s ease}
+.sb-item.violation{border-color:var(--red);background:rgba(229,62,62,.06)}
+.sb-name{font-weight:600;font-size:.9rem}
+.sb-name.viol{color:var(--red)}
+.sb-info{font-family:'JetBrains Mono',monospace;font-size:.75rem;color:var(--mut);margin-top:.2rem}
+.sb-status{padding:1rem;border-top:1px solid var(--bdr);font-size:.8rem;color:var(--mut)}
+.sb-status strong{color:var(--txt)}
+/* INIT SCREEN */
+.init-screen{position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:200;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:1rem}
+.init-screen.hidden{display:none}
+.spinner{width:48px;height:48px;border:4px solid rgba(255,255,255,.1);border-top-color:var(--pri);border-radius:50%;animation:spin 1s linear infinite}
+.init-text{color:var(--mut);font-size:.9rem}
+.init-steps{list-style:none;text-align:left;margin-top:.5rem}
+.init-steps li{padding:.3rem 0;font-size:.82rem;color:var(--mut)}
+.init-steps li.done{color:var(--grn)}
+.init-steps li.loading{color:var(--pri)}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes pulse{0%,100%{transform:scale(.95);opacity:.7}70%{transform:scale(1.1);opacity:1}}
+@keyframes slideIn{from{opacity:0;transform:translateX(10px)}to{opacity:1;transform:translateX(0)}}
+@media(max-width:768px){.sidebar{display:none}.bar{flex-wrap:wrap;gap:.5rem}}
+</style>
+</head>
+<body>
+<div class="bar">
+ <div class="bar-l">
+  <h1>📷 CHECKPOINT</h1>
+  <div class="cp-sel">
+   <button class="cp-btn on" id="cp1-btn" onclick="setCP(1)">CP1 START</button>
+   <button class="cp-btn" id="cp2-btn" onclick="setCP(2)">CP2 FINISH</button>
+  </div>
+ </div>
+ <div class="bar-r">
+  <div class="status" id="conn-status"><div class="dot"></div><span>Initializing</span></div>
+  <span class="fps" id="fps-display">FPS: --</span>
+  <a href="dashboard.html" class="nav-link">📺 Dashboard</a>
+  <a href="register.html" class="nav-link">📋 Register</a>
+ </div>
+</div>
+
+<div class="main">
+ <div class="cam-area">
+  <video id="video" autoplay playsinline muted></video>
+  <canvas id="overlay"></canvas>
+ </div>
+ <div class="sidebar">
+  <div class="sb-h">📋 RECENT RECORDS</div>
+  <div class="sb-list" id="sb-list"></div>
+  <div class="sb-status">Runners loaded: <strong id="runner-count">0</strong></div>
+ </div>
+</div>
+
+<!-- INIT SCREEN -->
+<div class="init-screen" id="init-screen">
+ <div class="spinner"></div>
+ <div class="init-text">กำลังเตรียมระบบ...</div>
+ <ul class="init-steps" id="init-steps">
+  <li id="step-models">⏳ โหลดโมเดล AI...</li>
+  <li id="step-runners">⏳ โหลดข้อมูลนักวิ่ง...</li>
+  <li id="step-camera">⏳ เปิดกล้อง...</li>
+ </ul>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@4/dist/tesseract.min.js"></script>
+<script>
+const API="https://script.google.com/macros/s/AKfycbyKbEr4GNKg_Roe0CJEshgs7j9pe7whvO_u5SMQSgYxE0zZGlaZy3E9KwuoHl5MWW81Aw/exec";
+const MODEL_URL="https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model/";
+
+let checkpointId=1;
+let faceMatcher=null;
+let runnerRegistry={};// name→bib
+let cooldowns={};// name→timestamp
+const COOLDOWN_SEC=30;
+let recentRecords=[];
+let fpsCounter=0,lastFpsTime=performance.now();
+let consecutiveFrames={};// name→count (for smart OCR)
+let ocrCache={};// name→last bib result
+let ocrBusy=false;
+let tesseractWorker=null;
+
+// ── CP SELECTOR ──
+function setCP(id){
+ checkpointId=id;
+ document.getElementById("cp1-btn").classList.toggle("on",id===1);
+ document.getElementById("cp2-btn").classList.toggle("on",id===2);
+}
+
+// ── INIT ──
+async function init(){
+ try{
+  // 1) Load models
+  markStep("step-models","loading");
+  await faceapi.nets.ssdMobilenetv1.loadFromUri(MODEL_URL);
+  await faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL);
+  await faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL);
+  markStep("step-models","done");
+
+  // 2) Load runners
+  markStep("step-runners","loading");
+  const res=await fetch(API+"?action=getRunners");
+  const d=await res.json();
+  const runners=d.data||[];
+  document.getElementById("runner-count").textContent=runners.length;
+
+  const labeled=[];
+  for(const r of runners){
+   if(!r.Embeddings)continue;
+   try{
+    const emb=JSON.parse(r.Embeddings);
+    const desc=new Float32Array(emb);
+    labeled.push(new faceapi.LabeledFaceDescriptors(r.Name,[desc]));
+    runnerRegistry[r.Name]=String(r.BibNumber||"");
+   }catch(e){console.warn("Bad embedding for",r.Name,e)}
+  }
+  if(labeled.length>0)faceMatcher=new faceapi.FaceMatcher(labeled,0.5);
+  markStep("step-runners","done");
+
+  // 3) Camera
+  markStep("step-camera","loading");
+  const stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:"user",width:{ideal:640},height:{ideal:480}}});
+  const video=document.getElementById("video");
+  video.srcObject=stream;
+  await new Promise(r=>video.onloadedmetadata=r);
+  const overlay=document.getElementById("overlay");
+  overlay.width=video.videoWidth;
+  overlay.height=video.videoHeight;
+  markStep("step-camera","done");
+
+  // 4) Init Tesseract
+  tesseractWorker=await Tesseract.createWorker("eng");
+
+  setStatus("ok","🟢 Connected");
+  document.getElementById("init-screen").classList.add("hidden");
+
+  // Start loop
+  processLoop();
+ }catch(e){
+  setStatus("err","❌ "+e.message);
+  console.error(e);
+ }
+}
+
+function markStep(id,state){
+ const el=document.getElementById(id);
+ el.className=state;
+ if(state==="done")el.textContent="✅ "+el.textContent.slice(2);
+ else if(state==="loading")el.textContent="🔄 "+el.textContent.slice(2);
+}
+function setStatus(type,text){
+ const el=document.getElementById("conn-status");
+ el.className="status "+type;
+ el.innerHTML=`<div class="dot ${type}"></div><span>${text}</span>`;
+}
+
+// ── MAIN LOOP ──
+async function processLoop(){
+ const video=document.getElementById("video");
+ const overlay=document.getElementById("overlay");
+ const ctx=overlay.getContext("2d");
+
+ async function frame(){
+  // FPS
+  fpsCounter++;
+  const now=performance.now();
+  if(now-lastFpsTime>=1000){
+   document.getElementById("fps-display").textContent=`FPS: ${fpsCounter}`;
+   fpsCounter=0;lastFpsTime=now;
+  }
+
+  ctx.clearRect(0,0,overlay.width,overlay.height);
+
+  if(!faceMatcher){requestAnimationFrame(frame);return}
+
+  try{
+   const detections=await faceapi.detectAllFaces(video).withFaceLandmarks().withFaceDescriptors();
+
+   const currentNames=new Set();
+
+   for(const det of detections){
+    const match=faceMatcher.findBestMatch(det.descriptor);
+    const name=match.label;
+    const dist=match.distance;
+    const box=det.detection.box;
+    const isKnown=name!=="unknown"&&dist<=0.5;
+
+    currentNames.add(isKnown?name:"unknown");
+
+    // Track consecutive frames
+    if(isKnown){
+     consecutiveFrames[name]=(consecutiveFrames[name]||0)+1;
+
+     // Record checkpoint (with cooldown)
+     const nowSec=Date.now()/1000;
+     if(!cooldowns[name]||(nowSec-cooldowns[name])>COOLDOWN_SEC){
+      cooldowns[name]=nowSec;
+      recordCP(name);
+     }
+    }
+
+    // Smart OCR: only after 10+ consecutive frames of known face
+    if(isKnown&&consecutiveFrames[name]>=10&&!ocrBusy){
+     runSmartOCR(video,det,name);
+    }
+
+    // Draw
+    const color=isKnown?"#38c172":"#e53e3e";
+    const bib=ocrCache[name]||runnerRegistry[name]||"N/A";
+    const label=isKnown?`${name} (${(1-dist).toFixed(0)*100}%)`:"Unknown";
+    const bibLabel=isKnown?`BIB: ${bib}`:"";
+    const isMismatch=isKnown&&ocrCache[name]&&runnerRegistry[name]&&ocrCache[name]!==runnerRegistry[name];
+    const drawColor=isMismatch?"#e53e3e":color;
+
+    ctx.strokeStyle=drawColor;ctx.lineWidth=2;
+    ctx.strokeRect(box.x,box.y,box.width,box.height);
+
+    // Name label
+    ctx.fillStyle=drawColor;
+    ctx.fillRect(box.x,box.y-24,box.width,24);
+    ctx.fillStyle="#fff";ctx.font="bold 13px 'DM Sans',sans-serif";
+    ctx.fillText(label,box.x+4,box.y-8);
+
+    // Bib label
+    if(bibLabel){
+     const bibText=isMismatch?bibLabel+" ⚠️ MISMATCH":bibLabel;
+     ctx.fillStyle=isMismatch?"rgba(229,62,62,.8)":"rgba(29,158,117,.7)";
+     ctx.fillRect(box.x,box.y+box.height,box.width,20);
+     ctx.fillStyle="#fff";ctx.font="11px 'JetBrains Mono',monospace";
+     ctx.fillText(bibText,box.x+4,box.y+box.height+14);
+    }
+   }
+
+   // Reset consecutive count for faces no longer visible
+   for(const n of Object.keys(consecutiveFrames)){
+    if(!currentNames.has(n))consecutiveFrames[n]=0;
+   }
+  }catch(e){console.error("Detection error:",e)}
+
+  requestAnimationFrame(frame);
+ }
+ requestAnimationFrame(frame);
+}
+
+// ── SMART OCR ──
+async function runSmartOCR(video,detection,name){
+ if(ocrBusy)return;
+ ocrBusy=true;
+ try{
+  const box=detection.detection.box;
+  const canvas=document.createElement("canvas");
+  const faceH=box.height;
+  const bx=Math.max(0,box.x-faceH*0.3);
+  const by=box.y+faceH;
+  const bw=box.width+faceH*0.6;
+  const bh=Math.min(faceH*2.5,video.videoHeight-by);
+  if(bh<=0||bw<=0){ocrBusy=false;return}
+  canvas.width=bw;canvas.height=bh;
+  const ctx=canvas.getContext("2d");
+  ctx.drawImage(video,bx,by,bw,bh,0,0,bw,bh);
+
+  const result=await tesseractWorker.recognize(canvas);
+  const text=result.data.text.replace(/[^0-9]/g,"").trim();
+  if(text){
+   ocrCache[name]=text;
+   // Check violation
+   const expectedBib=runnerRegistry[name];
+   if(expectedBib&&text!==expectedBib){
+    reportViolation(name,expectedBib,text,video);
+   }
+  }
+ }catch(e){console.warn("OCR error:",e)}
+ ocrBusy=false;
+}
+
+// ── CHECKPOINT RECORDING ──
+async function recordCP(name){
+ const ts=new Date();
+ const timeStr=ts.toTimeString().split(" ")[0];// HH:MM:SS
+ const bib=runnerRegistry[name]||"";
+
+ addSidebarItem(name,`CP${checkpointId} @ ${timeStr}`,false);
+
+ try{
+  await fetch(API,{method:"POST",headers:{"Content-Type":"text/plain"},body:JSON.stringify({
+   action:"recordCheckpoint",name,checkpoint_id:checkpointId,timestamp:timeStr,bib
+  })});
+ }catch(e){console.warn("Failed to send CP:",e)}
+}
+
+// ── VIOLATION REPORTING ──
+async function reportViolation(name,expected,found,video){
+ const msg=`Expected BIB ${expected}, Found ${found}`;
+ addSidebarItem(name,`⚠️ ${msg}`,"violation");
+
+ // Capture frame
+ const canvas=document.createElement("canvas");
+ canvas.width=video.videoWidth;canvas.height=video.videoHeight;
+ canvas.getContext("2d").drawImage(video,0,0);
+ const imageData=canvas.toDataURL("image/jpeg",0.7);
+
+ try{
+  await fetch(API,{method:"POST",headers:{"Content-Type":"text/plain"},body:JSON.stringify({
+   action:"reportViolation",name,bib:found,message:msg,
+   timestamp:new Date().toISOString(),image:imageData
+  })});
+ }catch(e){console.warn("Failed to send violation:",e)}
+}
+
+// ── SIDEBAR ──
+function addSidebarItem(name,info,isViol){
+ const list=document.getElementById("sb-list");
+ const item=document.createElement("div");
+ item.className="sb-item"+(isViol?" violation":"");
+ item.innerHTML=`<div class="sb-name${isViol?" viol":""}">${isViol?"🔴":"✅"} ${name}</div><div class="sb-info">${info}</div>`;
+ list.prepend(item);
+ // Keep max 20
+ while(list.children.length>20)list.lastChild.remove();
+ recentRecords.unshift({name,info});
+}
+
+// START
+init();
+</script>
+</body>
+</html>

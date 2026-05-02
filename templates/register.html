@@ -1,0 +1,630 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Runner Registration | RunnerTrack AI</title>
+    <meta name="description" content="ลงทะเบียนนักวิ่งใหม่ด้วยระบบจดจำใบหน้า AI">
+    <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --primary: #1D9E75;
+            --primary-glow: rgba(29,158,117,0.35);
+            --bg: #0b0f14;
+            --surface: #141a22;
+            --card: rgba(22,30,40,0.85);
+            --border: rgba(255,255,255,0.08);
+            --text: #f0f2f5;
+            --muted: #7a8594;
+            --danger: #e53e3e;
+            --success: #38c172;
+        }
+        * { margin:0; padding:0; box-sizing:border-box; }
+        body {
+            font-family:'DM Sans',sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            min-height:100vh;
+        }
+
+        /* ── HEADER ── */
+        .top-bar {
+            background: rgba(11,15,20,0.92);
+            backdrop-filter: blur(18px);
+            border-bottom:1px solid var(--border);
+            padding:1rem 2rem;
+            display:flex; align-items:center; justify-content:space-between;
+            position:sticky; top:0; z-index:50;
+        }
+        .top-bar h1 {
+            font-family:'Bebas Neue',sans-serif;
+            font-size:1.8rem; letter-spacing:2px;
+            background:linear-gradient(135deg,var(--primary),#2dd4a8);
+            -webkit-background-clip:text; -webkit-text-fill-color:transparent;
+        }
+        .nav-link {
+            color:var(--muted); text-decoration:none; font-size:.9rem;
+            transition:color .2s;
+        }
+        .nav-link:hover { color:var(--primary); }
+
+        /* ── LAYOUT ── */
+        .page { padding:2rem; max-width:1100px; margin:0 auto; }
+        .grid { display:grid; grid-template-columns:1fr 1.3fr; gap:2rem; }
+        @media(max-width:800px){ .grid{grid-template-columns:1fr;} }
+
+        /* ── CARDS ── */
+        .card {
+            background:var(--card);
+            border:1px solid var(--border);
+            border-radius:20px;
+            padding:1.8rem;
+            backdrop-filter:blur(12px);
+        }
+        .card-title {
+            font-family:'Bebas Neue',sans-serif;
+            font-size:1.4rem; letter-spacing:1px;
+            margin-bottom:1.2rem; color:var(--primary);
+        }
+
+        /* ── FORM ── */
+        .field { margin-bottom:1rem; }
+        .field label {
+            display:block; font-size:.82rem; color:var(--muted);
+            margin-bottom:.35rem; font-weight:500;
+        }
+        .field input {
+            width:100%; padding:.75rem 1rem;
+            background:rgba(255,255,255,.04);
+            border:1px solid var(--border);
+            border-radius:12px; color:var(--text);
+            font-size:.95rem; outline:none;
+            transition:border .2s;
+        }
+        .field input:focus { border-color:var(--primary); }
+
+        /* ── CAMERA ── */
+        .camera-wrap {
+            position:relative; width:100%;
+            aspect-ratio:4/3; border-radius:16px;
+            overflow:hidden; background:#000;
+            border:2px solid var(--border);
+        }
+        .camera-wrap video {
+            width:100%; height:100%; object-fit:cover;
+        }
+        .face-guide {
+            position:absolute; top:50%; left:50%;
+            transform:translate(-50%,-50%);
+            width:40%; aspect-ratio:3/4;
+            border:2px dashed rgba(29,158,117,0.6);
+            border-radius:50%; pointer-events:none;
+        }
+        .face-guide-label {
+            position:absolute; bottom:8px; left:50%;
+            transform:translateX(-50%);
+            font-size:.72rem; color:var(--primary);
+            background:rgba(0,0,0,0.6); padding:2px 10px;
+            border-radius:8px; pointer-events:none;
+        }
+
+        /* ── ANGLE SLOTS ── */
+        .angles-grid {
+            display:grid;
+            grid-template-columns:repeat(5,1fr);
+            gap:.6rem; margin-top:1rem;
+        }
+        .angle-slot {
+            position:relative;
+            aspect-ratio:1;
+            border-radius:12px;
+            border:2px solid var(--border);
+            background:rgba(255,255,255,.03);
+            cursor:pointer;
+            overflow:hidden;
+            transition:all .25s;
+            display:flex; align-items:center; justify-content:center;
+            flex-direction:column;
+        }
+        .angle-slot:hover { border-color:rgba(29,158,117,0.4); }
+        .angle-slot.active {
+            border-color:var(--primary);
+            box-shadow:0 0 16px var(--primary-glow);
+        }
+        .angle-slot.captured {
+            border-color:var(--success);
+        }
+        .angle-slot img {
+            width:100%; height:100%; object-fit:cover;
+            position:absolute; top:0; left:0;
+        }
+        .angle-slot .label {
+            font-size:.65rem; color:var(--muted);
+            text-align:center; z-index:2;
+            pointer-events:none;
+        }
+        .angle-slot .check {
+            position:absolute; top:4px; right:4px;
+            width:20px; height:20px;
+            background:var(--success);
+            border-radius:50%; display:none;
+            align-items:center; justify-content:center;
+            font-size:.7rem; color:#fff; z-index:3;
+        }
+        .angle-slot.captured .check { display:flex; }
+
+        /* ── BUTTONS ── */
+        .btn-capture {
+            width:100%; padding:.9rem;
+            background:linear-gradient(135deg,var(--primary),#2dd4a8);
+            border:none; border-radius:14px;
+            color:#0b0f14; font-weight:700;
+            font-size:1rem; cursor:pointer;
+            margin-top:1rem; transition:opacity .2s;
+            font-family:'DM Sans',sans-serif;
+        }
+        .btn-capture:hover { opacity:.85; }
+        .btn-capture:disabled {
+            opacity:.35; cursor:not-allowed;
+        }
+        .btn-submit {
+            width:100%; padding:1rem;
+            background:linear-gradient(135deg,#1D9E75,#16a085);
+            border:none; border-radius:14px;
+            color:#fff; font-weight:700;
+            font-size:1.05rem; cursor:pointer;
+            margin-top:1.2rem; transition:all .25s;
+            font-family:'DM Sans',sans-serif;
+            letter-spacing:.5px;
+        }
+        .btn-submit:hover { box-shadow:0 0 24px var(--primary-glow); transform:translateY(-2px); }
+        .btn-submit:disabled { opacity:.3; cursor:not-allowed; transform:none; box-shadow:none; }
+
+        /* ── PROGRESS ── */
+        .progress-bar {
+            width:100%; height:6px;
+            background:rgba(255,255,255,.06);
+            border-radius:3px; margin-top:1rem;
+            overflow:hidden;
+        }
+        .progress-fill {
+            height:100%; width:0%;
+            background:linear-gradient(90deg,var(--primary),#2dd4a8);
+            border-radius:3px;
+            transition:width .4s ease;
+        }
+        .progress-text {
+            font-size:.8rem; color:var(--muted);
+            margin-top:.4rem; text-align:center;
+        }
+
+        /* ── STATUS / TOAST ── */
+        .toast {
+            position:fixed; bottom:2rem; right:2rem;
+            padding:1rem 1.5rem;
+            border-radius:14px;
+            font-size:.9rem; font-weight:600;
+            z-index:999;
+            transform:translateY(120%);
+            transition:transform .4s ease;
+        }
+        .toast.show { transform:translateY(0); }
+        .toast.success { background:var(--success); color:#fff; }
+        .toast.error { background:var(--danger); color:#fff; }
+
+        /* ── LOADING OVERLAY ── */
+        .loading-overlay {
+            display:none;
+            position:fixed; inset:0;
+            background:rgba(0,0,0,0.7);
+            z-index:200;
+            align-items:center; justify-content:center;
+            flex-direction:column; gap:1rem;
+        }
+        .loading-overlay.active { display:flex; }
+        .spinner {
+            width:48px; height:48px;
+            border:4px solid rgba(255,255,255,.1);
+            border-top-color:var(--primary);
+            border-radius:50%;
+            animation:spin 1s linear infinite;
+        }
+        @keyframes spin { to{transform:rotate(360deg);} }
+        .loading-text { color:var(--muted); font-size:.9rem; }
+
+        /* ── SUCCESS PANEL ── */
+        .success-panel {
+            display:none;
+            position:fixed; inset:0;
+            background:rgba(0,0,0,0.85);
+            z-index:300;
+            align-items:center; justify-content:center;
+        }
+        .success-panel.active { display:flex; }
+        .success-card {
+            background:var(--surface);
+            border:1px solid var(--success);
+            border-radius:24px;
+            padding:3rem 2.5rem;
+            text-align:center;
+            max-width:440px;
+            animation:popIn .5s ease;
+        }
+        @keyframes popIn { from{transform:scale(.85);opacity:0;} to{transform:scale(1);opacity:1;} }
+        .success-icon { font-size:3.5rem; margin-bottom:1rem; }
+        .success-card h2 {
+            font-family:'Bebas Neue',sans-serif;
+            font-size:1.8rem; color:var(--success);
+            margin-bottom:.5rem;
+        }
+        .success-card p { color:var(--muted); font-size:.9rem; margin-bottom:1.5rem; }
+        .success-card a {
+            color:var(--primary); text-decoration:none;
+            font-weight:600;
+        }
+        .success-card a:hover { text-decoration:underline; }
+        .btn-new {
+            display:inline-block; margin-top:1rem;
+            padding:.7rem 2rem;
+            background:rgba(29,158,117,.15);
+            border:1px solid var(--primary);
+            border-radius:12px; color:var(--primary);
+            cursor:pointer; font-weight:600;
+            text-decoration:none; font-size:.9rem;
+            transition:background .2s;
+        }
+        .btn-new:hover { background:rgba(29,158,117,.25); }
+    </style>
+</head>
+<body>
+
+<div class="top-bar">
+    <h1>🏃 RUNNERTRACK</h1>
+    <div>
+        <a href="dashboard.html" class="nav-link">📺 Dashboard</a>
+        &nbsp;&nbsp;
+        <a href="checkpoint.html" class="nav-link">📷 Checkpoint</a>
+    </div>
+</div>
+
+<div class="page">
+    <div class="grid">
+        <!-- LEFT: Form + Angle Slots -->
+        <div>
+            <div class="card">
+                <div class="card-title">📋 ข้อมูลนักวิ่ง</div>
+                <div class="field">
+                    <label>ชื่อนักวิ่ง (ภาษาอังกฤษ, ไม่เว้นวรรค) *</label>
+                    <input type="text" id="runner-name" placeholder="เช่น kawin" oninput="checkReady()">
+                </div>
+                <div class="field">
+                    <label>หมายเลข BIB *</label>
+                    <input type="text" id="runner-bib" placeholder="เช่น 42" oninput="checkReady()">
+                </div>
+                <div class="field">
+                    <label>Email (ไม่บังคับ)</label>
+                    <input type="email" id="runner-email" placeholder="email@example.com">
+                </div>
+            </div>
+
+            <div class="card" style="margin-top:1rem;">
+                <div class="card-title">📸 ภาพถ่ายใบหน้า (5 มุม)</div>
+                <div class="angles-grid" id="angles-grid">
+                    <!-- Generated by JS -->
+                </div>
+                <div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
+                <div class="progress-text" id="progress-text">0 / 5 มุม</div>
+
+                <button class="btn-submit" id="btn-submit" disabled onclick="submitRegistration()">
+                    ✅ ลงทะเบียนนักวิ่ง
+                </button>
+            </div>
+        </div>
+
+        <!-- RIGHT: Camera Preview -->
+        <div>
+            <div class="card" style="padding:1rem;">
+                <div class="camera-wrap" id="camera-wrap">
+                    <video id="video" autoplay playsinline muted></video>
+                    <div class="face-guide"></div>
+                    <div class="face-guide-label" id="angle-hint">เลือกมุมด้านล่าง</div>
+                </div>
+                <button class="btn-capture" id="btn-capture" disabled onclick="capturePhoto()">
+                    📸 ถ่ายภาพ
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Hidden canvas -->
+<canvas id="capture-canvas" style="display:none;"></canvas>
+
+<!-- Loading Overlay -->
+<div class="loading-overlay" id="loading-overlay">
+    <div class="spinner"></div>
+    <div class="loading-text" id="loading-text">กำลังประมวลผลใบหน้า...</div>
+</div>
+
+<!-- Success Panel -->
+<div class="success-panel" id="success-panel">
+    <div class="success-card">
+        <div class="success-icon">🎉</div>
+        <h2>REGISTRATION COMPLETE</h2>
+        <p id="success-msg">ลงทะเบียนสำเร็จ</p>
+        <a href="#" id="success-link" target="_blank">📂 เปิดโฟลเดอร์ Google Drive</a>
+        <br>
+        <button class="btn-new" onclick="resetPage()">➕ ลงทะเบียนคนใหม่</button>
+    </div>
+</div>
+
+<!-- Toast -->
+<div class="toast" id="toast"></div>
+
+<!-- face-api.js -->
+<script src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
+
+<script>
+// ═══════════════════════════════════════════════════════
+// CONFIG
+// ═══════════════════════════════════════════════════════
+const API_URL = "https://script.google.com/macros/s/AKfycbyZOObk6ey4jDepF-Ulw0VocD-3hmk3BpKRESLyrFCoT8GGSRW0X2UwDB2Y12cRXIEd/exec";
+const MODEL_URL = "https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model/";
+
+const ANGLES = [
+    { id: "front",  label: "หน้าตรง",  icon: "😐" },
+    { id: "top",    label: "ก้มหน้า",   icon: "🙇" },
+    { id: "bottom", label: "เงยหน้า",   icon: "🙄" },
+    { id: "left",   label: "หันซ้าย",   icon: "👈" },
+    { id: "right",  label: "หันขวา",   icon: "👉" },
+];
+
+// ═══════════════════════════════════════════════════════
+// STATE
+// ═══════════════════════════════════════════════════════
+let activeAngle = null;
+const capturedData = {};  // angle_id → { dataUrl, descriptor }
+let modelsLoaded = false;
+
+// ═══════════════════════════════════════════════════════
+// INIT
+// ═══════════════════════════════════════════════════════
+document.addEventListener("DOMContentLoaded", async () => {
+    buildAngleSlots();
+    await startCamera();
+    await loadModels();
+});
+
+function buildAngleSlots() {
+    const grid = document.getElementById("angles-grid");
+    ANGLES.forEach((a, i) => {
+        const slot = document.createElement("div");
+        slot.className = "angle-slot";
+        slot.id = "slot-" + a.id;
+        slot.onclick = () => selectAngle(a.id);
+        slot.innerHTML = `
+            <span class="label">${a.icon}<br>${a.label}</span>
+            <div class="check">✓</div>
+        `;
+        grid.appendChild(slot);
+    });
+    // Auto-select first
+    selectAngle("front");
+}
+
+async function startCamera() {
+    try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: "user", width: { ideal: 640 }, height: { ideal: 480 } }
+        });
+        document.getElementById("video").srcObject = stream;
+    } catch (e) {
+        showToast("ไม่สามารถเปิดกล้องได้: " + e.message, "error");
+    }
+}
+
+async function loadModels() {
+    try {
+        await faceapi.nets.ssdMobilenetv1.loadFromUri(MODEL_URL);
+        await faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL);
+        await faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL);
+        modelsLoaded = true;
+        document.getElementById("btn-capture").disabled = false;
+        showToast("โมเดล AI โหลดสำเร็จ ✓", "success");
+    } catch (e) {
+        showToast("โหลดโมเดลไม่สำเร็จ: " + e.message, "error");
+    }
+}
+
+// ═══════════════════════════════════════════════════════
+// ANGLE SELECTION
+// ═══════════════════════════════════════════════════════
+function selectAngle(id) {
+    activeAngle = id;
+    document.querySelectorAll(".angle-slot").forEach(s => s.classList.remove("active"));
+    document.getElementById("slot-" + id).classList.add("active");
+    const a = ANGLES.find(x => x.id === id);
+    document.getElementById("angle-hint").textContent = "📷 " + a.label;
+}
+
+// ═══════════════════════════════════════════════════════
+// CAPTURE
+// ═══════════════════════════════════════════════════════
+async function capturePhoto() {
+    if (!activeAngle || !modelsLoaded) return;
+
+    const video = document.getElementById("video");
+    const canvas = document.getElementById("capture-canvas");
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(video, 0, 0);
+
+    const dataUrl = canvas.toDataURL("image/jpeg", 0.85);
+
+    // Detect face + extract descriptor
+    const img = await faceapi.bufferToImage(canvas);
+    const detection = await faceapi.detectSingleFace(img)
+        .withFaceLandmarks()
+        .withFaceDescriptor();
+
+    if (!detection) {
+        showToast("ไม่พบใบหน้า กรุณาลองใหม่", "error");
+        return;
+    }
+
+    // Store
+    capturedData[activeAngle] = {
+        dataUrl: dataUrl,
+        descriptor: Array.from(detection.descriptor)
+    };
+
+    // Update UI
+    const slot = document.getElementById("slot-" + activeAngle);
+    slot.classList.add("captured");
+    // Add thumbnail
+    let img_el = slot.querySelector("img");
+    if (!img_el) {
+        img_el = document.createElement("img");
+        slot.appendChild(img_el);
+    }
+    img_el.src = dataUrl;
+
+    updateProgress();
+    autoSelectNext();
+}
+
+function autoSelectNext() {
+    for (const a of ANGLES) {
+        if (!capturedData[a.id]) {
+            selectAngle(a.id);
+            return;
+        }
+    }
+    // All done
+    document.getElementById("angle-hint").textContent = "✅ ถ่ายครบทุกมุมแล้ว!";
+}
+
+function updateProgress() {
+    const count = Object.keys(capturedData).length;
+    document.getElementById("progress-fill").style.width = (count / 5 * 100) + "%";
+    document.getElementById("progress-text").textContent = count + " / 5 มุม";
+    checkReady();
+}
+
+function checkReady() {
+    const name = document.getElementById("runner-name").value.trim();
+    const bib = document.getElementById("runner-bib").value.trim();
+    const allCaptured = Object.keys(capturedData).length === 5;
+    document.getElementById("btn-submit").disabled = !(name && bib && allCaptured);
+}
+
+// ═══════════════════════════════════════════════════════
+// SUBMIT
+// ═══════════════════════════════════════════════════════
+async function submitRegistration() {
+    const name = document.getElementById("runner-name").value.trim().toLowerCase().replace(/\s/g, "");
+    const bib = document.getElementById("runner-bib").value.trim();
+    const email = document.getElementById("runner-email").value.trim();
+
+    if (!name || !bib || Object.keys(capturedData).length < 5) return;
+
+    showLoading("กำลังอัปโหลดภาพและ Face Embedding...");
+
+    try {
+        // 1) Average descriptors
+        const descriptors = ANGLES.map(a => capturedData[a.id].descriptor);
+        const avgDescriptor = new Array(128).fill(0);
+        for (const d of descriptors) {
+            for (let i = 0; i < 128; i++) avgDescriptor[i] += d[i];
+        }
+        for (let i = 0; i < 128; i++) avgDescriptor[i] /= descriptors.length;
+
+        // 2) POST registerRunner
+        const regPayload = {
+            action: "registerRunner",
+            name: name,
+            bib: bib,
+            email: email,
+            timestamp: new Date().toISOString(),
+            photo_front: capturedData.front.dataUrl,
+            photo_top: capturedData.top.dataUrl,
+            photo_bottom: capturedData.bottom.dataUrl,
+            photo_left: capturedData.left.dataUrl,
+            photo_right: capturedData.right.dataUrl,
+        };
+
+        const res1 = await fetch(API_URL, {
+            method: "POST",
+            headers: { "Content-Type": "text/plain" },
+            body: JSON.stringify(regPayload)
+        });
+        const data1 = await res1.json();
+
+        if (data1.status !== "success") {
+            throw new Error(data1.message || "Registration failed");
+        }
+
+        // 3) POST saveEmbeddings
+        const embPayload = {
+            action: "saveEmbeddings",
+            name: name,
+            embeddings: JSON.stringify(avgDescriptor)
+        };
+
+        const res2 = await fetch(API_URL, {
+            method: "POST",
+            headers: { "Content-Type": "text/plain" },
+            body: JSON.stringify(embPayload)
+        });
+        const data2 = await res2.json();
+
+        hideLoading();
+
+        // Show success
+        document.getElementById("success-msg").textContent =
+            `"${name}" (BIB #${bib}) ลงทะเบียนสำเร็จ!`;
+        document.getElementById("success-link").href = data1.folderUrl || "#";
+        document.getElementById("success-panel").classList.add("active");
+
+    } catch (err) {
+        hideLoading();
+        showToast("เกิดข้อผิดพลาด: " + err.message, "error");
+    }
+}
+
+// ═══════════════════════════════════════════════════════
+// UI HELPERS
+// ═══════════════════════════════════════════════════════
+function showLoading(msg) {
+    document.getElementById("loading-text").textContent = msg;
+    document.getElementById("loading-overlay").classList.add("active");
+}
+function hideLoading() {
+    document.getElementById("loading-overlay").classList.remove("active");
+}
+
+function showToast(msg, type) {
+    const t = document.getElementById("toast");
+    t.textContent = msg;
+    t.className = "toast " + type + " show";
+    setTimeout(() => t.classList.remove("show"), 3500);
+}
+
+function resetPage() {
+    document.getElementById("success-panel").classList.remove("active");
+    document.getElementById("runner-name").value = "";
+    document.getElementById("runner-bib").value = "";
+    document.getElementById("runner-email").value = "";
+    Object.keys(capturedData).forEach(k => delete capturedData[k]);
+    document.querySelectorAll(".angle-slot").forEach(s => {
+        s.classList.remove("captured");
+        const img = s.querySelector("img");
+        if (img) img.remove();
+    });
+    updateProgress();
+    selectAngle("front");
+}
+</script>
+</body>
+</html>
