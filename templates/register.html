@@ -485,9 +485,8 @@ async function capturePhoto() {
 
     const dataUrl = canvas.toDataURL("image/jpeg", 0.85);
 
-    // Detect face + extract descriptor
-    const img = await faceapi.bufferToImage(canvas);
-    const detection = await faceapi.detectSingleFace(img)
+    // Detect face + extract descriptor (use canvas directly)
+    const detection = await faceapi.detectSingleFace(canvas)
         .withFaceLandmarks()
         .withFaceDescriptor();
 
