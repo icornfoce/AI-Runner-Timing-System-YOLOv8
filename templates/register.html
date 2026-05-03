@@ -224,6 +224,7 @@
         .toast.show { transform:translateY(0); opacity:1; pointer-events:auto; }
         .toast.success { background:var(--success); color:#fff; }
         .toast.error { background:var(--danger); color:#fff; }
+        .toast.info { background:var(--surface); border:1px solid var(--border); color:var(--text); }
 
         /* ── MODEL STATUS ── */
         .model-status {
@@ -394,7 +395,8 @@
 // CONFIG
 // ═══════════════════════════════════════════════════════
 const API_URL = "https://script.google.com/macros/s/AKfycbyI4vNBRqjO5f00DN7VDCTaMKUoDqN2L10JHtQtM4tW5A-Uca_btGkOW1ei6OTBcf8g0g/exec";
-const MODEL_URL = "https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js@master/weights/";
+// Pinned to a release tag — `@master` would silently change at any time.
+const MODEL_URL = "https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js@0.22.2/weights/";
 
 const ANGLES = [
     { id: "front",  label: "หน้าตรง",  icon: "😐" },
@@ -410,6 +412,7 @@ const ANGLES = [
 let activeAngle = null;
 const capturedData = {};  // angle_id → { dataUrl, descriptor }
 let modelsLoaded = false;
+let videoStream = null;
 
 // ═══════════════════════════════════════════════════════
 // INIT
@@ -440,12 +443,25 @@ function buildAngleSlots() {
 
 async function startCamera() {
     try {
-        const stream = await navigator.mediaDevices.getUserMedia({
+        videoStream = await navigator.mediaDevices.getUserMedia({
             video: { facingMode: "user", width: { ideal: 640 }, height: { ideal: 480 } }
         });
-        document.getElementById("video").srcObject = stream;
+        const video = document.getElementById("video");
+        video.srcObject = videoStream;
+        // Wait until the video has actually produced a frame so capture
+        // doesn't draw from a 0×0 source.
+        await new Promise(r => video.addEventListener("loadeddata", r, { once: true }));
+        // Stop the camera on navigation away so the indicator light goes off.
+        window.addEventListener("pagehide", stopCamera);
     } catch (e) {
         showToast("ไม่สามารถเปิดกล้องได้: " + e.message, "error");
+    }
+}
+
+function stopCamera() {
+    if (videoStream) {
+        videoStream.getTracks().forEach(t => t.stop());
+        videoStream = null;
     }
 }
 
@@ -489,6 +505,10 @@ async function capturePhoto() {
     if (!activeAngle || !modelsLoaded) return;
 
     const video = document.getElementById("video");
+    if (!video.videoWidth || !video.videoHeight) {
+        showToast("กล้องยังไม่พร้อม กรุณารอสักครู่", "error");
+        return;
+    }
     const canvas = document.getElementById("capture-canvas");
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
@@ -536,7 +556,7 @@ function deleteCapture(angleId) {
     if (img_el) img_el.remove();
     updateProgress();
     selectAngle(angleId);
-    showToast("ลบภาพ " + ANGLES.find(a => a.id === angleId).label + " แล้ว", "error");
+    showToast("ลบภาพ " + ANGLES.find(a => a.id === angleId).label + " แล้ว", "info");
 }
 
 function autoSelectNext() {
@@ -577,7 +597,7 @@ async function submitRegistration() {
     showLoading("กำลังอัปโหลดภาพและ Face Embedding...");
 
     try {
-        // 1) Average descriptors
+        // Average the 5 descriptors so a single avg embedding represents the runner
         const descriptors = ANGLES.map(a => capturedData[a.id].descriptor);
         const avgDescriptor = new Array(128).fill(0);
         for (const d of descriptors) {
@@ -585,51 +605,35 @@ async function submitRegistration() {
         }
         for (let i = 0; i < 128; i++) avgDescriptor[i] /= descriptors.length;
 
-        // 2) POST registerRunner
-        const regPayload = {
+        // Single atomic POST — photos + embeddings together so we can't
+        // end up with a runner row that has no embeddings.
+        const payload = {
             action: "registerRunner",
-            name: name,
-            bib: bib,
-            email: email,
+            name, bib, email,
             timestamp: new Date().toISOString(),
             photo_front: capturedData.front.dataUrl,
             photo_top: capturedData.top.dataUrl,
             photo_bottom: capturedData.bottom.dataUrl,
             photo_left: capturedData.left.dataUrl,
             photo_right: capturedData.right.dataUrl,
+            embeddings: JSON.stringify(avgDescriptor),
         };
 
-        const res1 = await fetch(API_URL, {
+        const res = await fetch(API_URL, {
             method: "POST",
             headers: { "Content-Type": "text/plain" },
-            body: JSON.stringify(regPayload)
+            body: JSON.stringify(payload),
         });
-        const data1 = await res1.json();
+        const data = await res.json();
 
-        if (data1.status !== "success") {
-            throw new Error(data1.message || "Registration failed");
+        if (data.status !== "success") {
+            throw new Error(data.message || "Registration failed");
         }
 
-        // 3) POST saveEmbeddings
-        const embPayload = {
-            action: "saveEmbeddings",
-            name: name,
-            embeddings: JSON.stringify(avgDescriptor)
-        };
-
-        const res2 = await fetch(API_URL, {
-            method: "POST",
-            headers: { "Content-Type": "text/plain" },
-            body: JSON.stringify(embPayload)
-        });
-        const data2 = await res2.json();
-
         hideLoading();
-
-        // Show success
         document.getElementById("success-msg").textContent =
             `"${name}" (BIB #${bib}) ลงทะเบียนสำเร็จ!`;
-        document.getElementById("success-link").href = data1.folderUrl || "#";
+        document.getElementById("success-link").href = data.folderUrl || "#";
         document.getElementById("success-panel").classList.add("active");
 
     } catch (err) {

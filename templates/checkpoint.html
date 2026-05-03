@@ -102,28 +102,32 @@ body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--txt);min-
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 <script>
 const API="https://script.google.com/macros/s/AKfycbyI4vNBRqjO5f00DN7VDCTaMKUoDqN2L10JHtQtM4tW5A-Uca_btGkOW1ei6OTBcf8g0g/exec";
-const MODEL_URL="https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js@master/weights/";
+// Pinned to a release tag — `@master` would silently change at any time.
+const MODEL_URL="https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js@0.22.2/weights/";
 
 let checkpointId='start';
 let faceMatcher=null;
 let runnerRegistry={};// name→bib
-let cooldowns={};// name→timestamp
+let cooldowns={};// "name:cpId"→sec — per-CP so a runner can pass each station once
 const COOLDOWN_SEC=30;
-let recentRecords=[];
+const RECORD_AFTER_FRAMES=5; // require N consecutive recognitions before logging
+const OCR_AFTER_FRAMES=10;
+const OCR_CACHE_TTL_MS=15000; // stale OCR is purged so one misread isn't permanent
 let fpsCounter=0,lastFpsTime=performance.now();
-let consecutiveFrames={};// name→count (for smart OCR)
-let ocrCache={};// name→last bib result
+let consecutiveFrames={};// name→count
+let ocrCache={};// name→{bib, ts}
 let ocrBusy=false;
 let tesseractWorker=null;
 let ocrReady=false;
+let videoStream=null;
+let loopRunning=false;
 const CP_BUTTONS=['start',1,2,3,4,'finish'];
 
 // ── CP SELECTOR ──
 function setCP(id){
  checkpointId=id;
  CP_BUTTONS.forEach(b=>{
-  const btnId=typeof b==='string'?'cp-'+b+'-btn':'cp-'+b+'-btn';
-  const el=document.getElementById(btnId);
+  const el=document.getElementById('cp-'+b+'-btn');
   if(el)el.classList.toggle('on',b===id);
  });
 }
@@ -166,13 +170,18 @@ async function init(){
 
   // 3) Camera
   markStep("step-camera","loading");
-  const stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:"user",width:{ideal:640},height:{ideal:480}}});
+  videoStream=await navigator.mediaDevices.getUserMedia({video:{facingMode:"user",width:{ideal:640},height:{ideal:480}}});
   const video=document.getElementById("video");
-  video.srcObject=stream;
-  await new Promise(r=>video.onloadedmetadata=r);
+  video.srcObject=videoStream;
+  await new Promise(r=>video.addEventListener("loadedmetadata",r,{once:true}));
+  // Ensure the video has actually started producing frames
+  if(video.readyState<2){await new Promise(r=>video.addEventListener("loadeddata",r,{once:true}));}
   const overlay=document.getElementById("overlay");
   overlay.width=video.videoWidth;
   overlay.height=video.videoHeight;
+  // Stop the camera when the page is hidden/unloaded so the indicator
+  // light goes off and the OS releases the device.
+  window.addEventListener("pagehide",stopCamera);
   markStep("step-camera","done");
 
   // 4) Init Tesseract
@@ -193,6 +202,14 @@ async function init(){
  }
 }
 
+function stopCamera(){
+ if(videoStream){
+  videoStream.getTracks().forEach(t=>t.stop());
+  videoStream=null;
+ }
+ loopRunning=false;
+}
+
 function markStep(id,state){
  const el=document.getElementById(id);
  el.className=state;
@@ -207,11 +224,14 @@ function setStatus(type,text){
 
 // ── MAIN LOOP ──
 async function processLoop(){
+ if(loopRunning)return; // guard against double-start
+ loopRunning=true;
  const video=document.getElementById("video");
  const overlay=document.getElementById("overlay");
  const ctx=overlay.getContext("2d");
 
  async function frame(){
+  if(!loopRunning)return;
   // FPS
   fpsCounter++;
   const now=performance.now();
@@ -238,41 +258,47 @@ async function processLoop(){
 
     currentNames.add(isKnown?name:"unknown");
 
-    // Track consecutive frames
     if(isKnown){
      consecutiveFrames[name]=(consecutiveFrames[name]||0)+1;
 
-     // Record checkpoint (with cooldown)
-     const nowSec=Date.now()/1000;
-     if(!cooldowns[name]||(nowSec-cooldowns[name])>COOLDOWN_SEC){
-      cooldowns[name]=nowSec;
-      recordCP(name);
+     // Only record once we've seen this person for N consecutive frames —
+     // protects against single-frame false positives.
+     if(consecutiveFrames[name]>=RECORD_AFTER_FRAMES){
+      const cdKey=name+":"+checkpointId; // per-CP so each station fires once
+      const nowSec=Date.now()/1000;
+      if(!cooldowns[cdKey]||(nowSec-cooldowns[cdKey])>COOLDOWN_SEC){
+       cooldowns[cdKey]=nowSec;
+       recordCP(name);
+      }
      }
     }
 
-    // Smart OCR: only after 10+ consecutive frames of known face
-    if(isKnown&&consecutiveFrames[name]>=10&&!ocrBusy){
+    if(isKnown&&consecutiveFrames[name]>=OCR_AFTER_FRAMES&&!ocrBusy){
      runSmartOCR(video,det,name);
     }
 
+    // Expire stale OCR readings so a single misread isn't permanent
+    const cached=ocrCache[name];
+    if(cached&&Date.now()-cached.ts>OCR_CACHE_TTL_MS){delete ocrCache[name]}
+    const ocrBib=ocrCache[name]?ocrCache[name].bib:null;
+
     // Draw
     const color=isKnown?"#38c172":"#e53e3e";
-    const bib=ocrCache[name]||runnerRegistry[name]||"N/A";
-    const label=isKnown?`${name} (${(1-dist).toFixed(0)*100}%)`:"Unknown";
+    const bib=ocrBib||runnerRegistry[name]||"N/A";
+    const pct=isKnown?((1-dist)*100).toFixed(0):"0";
+    const label=isKnown?`${name} (${pct}%)`:"Unknown";
     const bibLabel=isKnown?`BIB: ${bib}`:"";
-    const isMismatch=isKnown&&ocrCache[name]&&runnerRegistry[name]&&ocrCache[name]!==runnerRegistry[name];
+    const isMismatch=isKnown&&ocrBib&&runnerRegistry[name]&&ocrBib!==runnerRegistry[name];
     const drawColor=isMismatch?"#e53e3e":color;
 
     ctx.strokeStyle=drawColor;ctx.lineWidth=2;
     ctx.strokeRect(box.x,box.y,box.width,box.height);
 
-    // Name label
     ctx.fillStyle=drawColor;
     ctx.fillRect(box.x,box.y-24,box.width,24);
     ctx.fillStyle="#fff";ctx.font="bold 13px 'DM Sans',sans-serif";
     ctx.fillText(label,box.x+4,box.y-8);
 
-    // Bib label
     if(bibLabel){
      const bibText=isMismatch?bibLabel+" ⚠️ MISMATCH":bibLabel;
      ctx.fillStyle=isMismatch?"rgba(229,62,62,.8)":"rgba(29,158,117,.7)";
@@ -282,7 +308,6 @@ async function processLoop(){
     }
    }
 
-   // Reset consecutive count for faces no longer visible
    for(const n of Object.keys(consecutiveFrames)){
     if(!currentNames.has(n))consecutiveFrames[n]=0;
    }
@@ -299,29 +324,28 @@ async function runSmartOCR(video,detection,name){
  ocrBusy=true;
  try{
   const box=detection.detection.box;
-  const canvas=document.createElement("canvas");
   const faceH=box.height;
   const bx=Math.max(0,box.x-faceH*0.3);
   const by=box.y+faceH;
-  const bw=box.width+faceH*0.6;
+  // Clamp width AND height against actual video dimensions
+  const bw=Math.min(box.width+faceH*0.6,video.videoWidth-bx);
   const bh=Math.min(faceH*2.5,video.videoHeight-by);
-  if(bh<=0||bw<=0){ocrBusy=false;return}
+  if(bh<=0||bw<=0)return;
+  const canvas=document.createElement("canvas");
   canvas.width=bw;canvas.height=bh;
-  const ctx=canvas.getContext("2d");
-  ctx.drawImage(video,bx,by,bw,bh,0,0,bw,bh);
+  canvas.getContext("2d").drawImage(video,bx,by,bw,bh,0,0,bw,bh);
 
   const result=await tesseractWorker.recognize(canvas);
   const text=result.data.text.replace(/[^0-9]/g,"").trim();
   if(text){
-   ocrCache[name]=text;
-   // Check violation
+   ocrCache[name]={bib:text,ts:Date.now()};
    const expectedBib=runnerRegistry[name];
    if(expectedBib&&text!==expectedBib){
     reportViolation(name,expectedBib,text,video);
    }
   }
  }catch(e){console.warn("OCR error:",e)}
- ocrBusy=false;
+ finally{ocrBusy=false}
 }
 
 // ── CHECKPOINT RECORDING ──

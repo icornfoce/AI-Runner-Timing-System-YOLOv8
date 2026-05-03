@@ -3,6 +3,7 @@ import face_recognition
 import os
 import numpy as np
 import time
+import threading
 import urllib.request
 import pandas as pd
 import easyocr
@@ -15,7 +16,8 @@ CHECKPOINT_ID = 1  # เปลี่ยนเป็น 1 หรือ 2 ตา�
 LOG_FILE = "running_results.csv"
 REGISTRY_FILE = "runners_registry.csv"
 VIOLATION_DIR = "violations"
-CONFIDENCE_THRESHOLD = 0.5 # ความแม่นยำขั้นต่ำ
+CONFIDENCE_THRESHOLD = 0.5  # ความแม่นยำขั้นต่ำ
+VIOLATION_COOLDOWN_SECONDS = 60  # ป้องกันสแปมรูป violation จากเหตุการณ์เดียว
 SERVER_URL = "https://Bigrock.pythonanywhere.com/api/record"  # ← เปลี่ยน YOUR_USERNAME เป็นชื่อบัญชี PythonAnywhere
 # =================================================
 
@@ -39,8 +41,7 @@ def init_log_file():
         df.to_csv(LOG_FILE, index=False)
         print(f"Created new log file: {LOG_FILE}")
 
-def send_to_server(name, checkpoint_id, timestamp):
-    """ส่งข้อมูล checkpoint ไปยังเซิร์ฟเวอร์ PythonAnywhere"""
+def _post_record(name, checkpoint_id, timestamp):
     try:
         response = requests.post(SERVER_URL, json={
             "name": name,
@@ -54,8 +55,11 @@ def send_to_server(name, checkpoint_id, timestamp):
     except requests.exceptions.RequestException as e:
         print(f"❌ Failed to send (CSV saved locally): {e}")
 
-def send_violation_to_server(name, violation_msg, image_path, timestamp):
-    """ส่งข้อมูล violation + รูปภาพไปยังเซิร์ฟเวอร์ PythonAnywhere"""
+def send_to_server(name, checkpoint_id, timestamp):
+    # Run in a background thread so the video loop doesn't freeze on slow networks.
+    threading.Thread(target=_post_record, args=(name, checkpoint_id, timestamp), daemon=True).start()
+
+def _post_violation(name, violation_msg, image_path, timestamp):
     try:
         violation_url = SERVER_URL.replace('/api/record', '/api/violation')
         with open(image_path, 'rb') as img_file:
@@ -75,6 +79,9 @@ def send_violation_to_server(name, violation_msg, image_path, timestamp):
             print(f"⚠️ Violation upload failed: {response.status_code}")
     except Exception as e:
         print(f"❌ Could not send violation: {e}")
+
+def send_violation_to_server(name, violation_msg, image_path, timestamp):
+    threading.Thread(target=_post_violation, args=(name, violation_msg, image_path, timestamp), daemon=True).start()
 
 def record_checkpoint(name):
     """ฟังก์ชันบันทึกเวลาแยกตาม Checkpoint และคำนวณผลสรุป (ไม่มี Cooldown)"""
@@ -185,6 +192,7 @@ def main():
     
     # Cooldown tracking
     runner_cooldown = {}
+    violation_cooldown = {}  # name -> last violation timestamp; throttles evidence saves
 
     while True:
         ret, frame = video_capture.read()
@@ -313,15 +321,18 @@ def main():
                     
                     if is_violation:
                         status_color = (0, 0, 255)
-                        print(f"⚠️ VIOLATION: {name} - {violation_msg}")
-                        
-                        # บันทึกหลักฐานในเครื่อง
-                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                        filename = f"{VIOLATION_DIR}/{name}_violation_{timestamp}.jpg"
-                        cv2.imwrite(filename, frame)
-                        
-                        # ส่ง violation ไปยังเซิร์ฟเวอร์ Cloud
-                        send_violation_to_server(name, violation_msg, filename, timestamp)
+                        # Always color the box red, but only save evidence
+                        # once per VIOLATION_COOLDOWN_SECONDS to avoid 60
+                        # near-identical JPGs from a single incident.
+                        now_ts = time.time()
+                        last = violation_cooldown.get(name, 0)
+                        if now_ts - last >= VIOLATION_COOLDOWN_SECONDS:
+                            violation_cooldown[name] = now_ts
+                            print(f"⚠️ VIOLATION: {name} - {violation_msg}")
+                            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                            filename = f"{VIOLATION_DIR}/{name}_violation_{timestamp}.jpg"
+                            cv2.imwrite(filename, frame)
+                            send_violation_to_server(name, violation_msg, filename, timestamp)
                 elif expected_bib is not None:
                     detected_bib = expected_bib
             

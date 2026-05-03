@@ -704,63 +704,149 @@
 
     <script>
         const API = "https://script.google.com/macros/s/AKfycbyI4vNBRqjO5f00DN7VDCTaMKUoDqN2L10JHtQtM4tW5A-Uca_btGkOW1ei6OTBcf8g0g/exec";
-        const ADMIN_PW = "muto67";
+        // Polling intervals — keep these well above 1s. Apps Script has a daily
+        // execution-time quota; aggressive polling burns it for every open tab.
+        const POLL_RESULTS_MS = 5000;
+        const POLL_VIOLATIONS_MS = 10000;
+        const POLL_ADMIN_MS = 15000;
+
         let results = [], violations = [], runners = [];
         const seen = new Set(), dismissed = new Set();
         let audioCtx = null, adminTab = "runners";
 
-        // ── AUTH ──
-        function showLogin() { document.getElementById("login-modal").classList.add("on") }
-        function doLogin() {
-            const pw = document.getElementById("pw").value;
-            if (pw === ADMIN_PW) {
-                sessionStorage.setItem("admin", "1");
-                document.getElementById("login-modal").classList.remove("on");
-                enterAdmin();
+        // ── HTML ESCAPE (anti-XSS) ──
+        // All data interpolated into innerHTML must pass through esc(). Raw
+        // template strings let an OCR-detected message or a runner name with
+        // special characters break the page or run JS.
+        function esc(s) {
+            return String(s ?? "").replace(/[&<>"']/g, c => ({
+                "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+            }[c]));
+        }
+        function attr(s) { return esc(s); } // alias for clarity at call sites
+
+        // ── POLL FAILURE TRACKING ──
+        let resultsFailures = 0, violationsFailures = 0;
+        function setLiveStatus(ok) {
+            const el = document.querySelector(".live");
+            if (!el) return;
+            if (ok) {
+                el.style.color = "#4ade80";
+                el.querySelector(".dot").style.background = "#22c55e";
+                el.lastChild.textContent = "Live";
             } else {
-                document.getElementById("login-err").textContent = "รหัสผ่านไม่ถูกต้อง";
+                el.style.color = "var(--red)";
+                el.querySelector(".dot").style.background = "var(--red)";
+                el.lastChild.textContent = "Offline";
             }
         }
-        function doLogout() { sessionStorage.removeItem("admin"); location.reload() }
+
+        // ── ADMIN AUTH ──
+        // Token is the password the user types; the backend validates it via
+        // the verifyAdmin action and the same token is sent with every
+        // destructive request. The password is no longer in source.
+        function adminToken() { return sessionStorage.getItem("adminToken") || ""; }
+        function showLogin() { document.getElementById("login-modal").classList.add("on"); }
+        async function doLogin() {
+            const pw = document.getElementById("pw").value;
+            const errEl = document.getElementById("login-err");
+            errEl.textContent = "";
+            try {
+                const r = await fetch(API, {
+                    method: "POST",
+                    headers: { "Content-Type": "text/plain" },
+                    body: JSON.stringify({ action: "verifyAdmin", password: pw }),
+                });
+                const d = await r.json();
+                if (d.status === "success") {
+                    sessionStorage.setItem("adminToken", pw);
+                    document.getElementById("login-modal").classList.remove("on");
+                    enterAdmin();
+                } else {
+                    errEl.textContent = "รหัสผ่านไม่ถูกต้อง";
+                }
+            } catch (e) {
+                errEl.textContent = "เชื่อมต่อเซิร์ฟเวอร์ไม่ได้";
+            }
+        }
+        function doLogout() { sessionStorage.removeItem("adminToken"); location.reload(); }
         function enterAdmin() {
             document.getElementById("public-view").style.display = "none";
             document.getElementById("admin-panel").style.display = "block";
             document.getElementById("btn-admin-toggle").style.display = "none";
             loadAdminData();
         }
-        // Auto-check session
-        if (sessionStorage.getItem("admin") === "1" || new URLSearchParams(location.search).get("admin") === "true") {
-            if (sessionStorage.getItem("admin") === "1") enterAdmin();
-            else showLogin();
+        if (adminToken()) enterAdmin();
+        else if (new URLSearchParams(location.search).get("admin") === "true") showLogin();
+
+        // POST helper that injects the admin token for destructive actions
+        async function adminPost(payload) {
+            return fetch(API, {
+                method: "POST",
+                headers: { "Content-Type": "text/plain" },
+                body: JSON.stringify({ ...payload, token: adminToken() }),
+            }).then(r => r.json());
         }
 
         // ── PUBLIC DATA ──
         async function fetchResults() {
-            try { const r = await fetch(API + "?action=getResults"); const d = await r.json(); if (d.status === "success") results = d.data || []; renderLeaderboard(); } catch (e) { console.error(e) }
+            try {
+                const r = await fetch(API + "?action=getResults");
+                const d = await r.json();
+                if (d.status === "success") results = d.data || [];
+                renderLeaderboard();
+                resultsFailures = 0;
+                setLiveStatus(true);
+            } catch (e) {
+                console.error("getResults failed:", e);
+                if (++resultsFailures >= 2) setLiveStatus(false);
+            }
         }
         async function fetchViolations() {
-            try { const r = await fetch(API + "?action=getVerifiedViolations"); const d = await r.json(); if (d.status === "success") { violations = d.data || []; document.getElementById("s-viol").textContent = violations.length; renderAlerts(); } } catch (e) { console.error(e) }
+            try {
+                const r = await fetch(API + "?action=getVerifiedViolations");
+                const d = await r.json();
+                if (d.status === "success") {
+                    violations = d.data || [];
+                    document.getElementById("s-viol").textContent = violations.length;
+                    renderAlerts();
+                }
+                violationsFailures = 0;
+            } catch (e) {
+                console.error("getVerifiedViolations failed:", e);
+                if (++violationsFailures >= 2) setLiveStatus(false);
+            }
         }
         function renderLeaderboard() {
             const tb = document.getElementById("lb-body");
             const emp = document.getElementById("lb-empty");
-            if (!results.length) { tb.innerHTML = ""; emp.style.display = ""; return }
+            if (!results.length) { tb.innerHTML = ""; emp.style.display = ""; return; }
             emp.style.display = "none";
-            const fin = results.filter(r => r.Total_Duration).sort((a, b) => {
-                const da = parseDur(a.Total_Duration), db = parseDur(b.Total_Duration); return da - db;
-            });
+            const fin = results.filter(r => r.Total_Duration).sort((a, b) => parseDur(a.Total_Duration) - parseDur(b.Total_Duration));
             const unfin = results.filter(r => !r.Total_Duration);
             const sorted = [...fin, ...unfin];
-            let finCount = fin.length;
             document.getElementById("s-total").textContent = results.length;
-            document.getElementById("s-fin").textContent = finCount;
+            document.getElementById("s-fin").textContent = fin.length;
             tb.innerHTML = sorted.map((r, i) => {
                 const rank = i + 1;
                 const rc = rank === 1 ? "rank-1" : rank === 2 ? "rank-2" : rank === 3 ? "rank-3" : "";
-                return `<tr><td class="${rc}" style="font-weight:700">#${rank}</td><td style="font-weight:600">${r.Name || "-"}</td><td>${r.BibNumber || "-"}</td><td>${r.Start_Time || "-"}</td><td>${r.CP1_Time || "-"}</td><td>${r.CP2_Time || "-"}</td><td>${r.CP3_Time || "-"}</td><td>${r.CP4_Time || "-"}</td><td>${r.Finish_Time || "-"}</td><td class="tt">${r.Total_Duration || "-"}</td></tr>`;
+                return `<tr><td class="${rc}" style="font-weight:700">#${rank}</td>` +
+                    `<td style="font-weight:600">${esc(r.Name || "-")}</td>` +
+                    `<td>${esc(r.BibNumber || "-")}</td>` +
+                    `<td>${esc(r.Start_Time || "-")}</td>` +
+                    `<td>${esc(r.CP1_Time || "-")}</td>` +
+                    `<td>${esc(r.CP2_Time || "-")}</td>` +
+                    `<td>${esc(r.CP3_Time || "-")}</td>` +
+                    `<td>${esc(r.CP4_Time || "-")}</td>` +
+                    `<td>${esc(r.Finish_Time || "-")}</td>` +
+                    `<td class="tt">${esc(r.Total_Duration || "-")}</td></tr>`;
             }).join("");
         }
-        function parseDur(s) { if (!s) return 99999; const p = String(s).split(":"); return (parseInt(p[0]) || 0) * 60 + (parseInt(p[1]) || 0) }
+        function parseDur(s) {
+            if (!s) return 99999;
+            const p = String(s).split(":");
+            return (parseInt(p[0], 10) || 0) * 60 + (parseInt(p[1], 10) || 0);
+        }
 
         // ── ALERTS ──
         function renderAlerts() {
@@ -770,27 +856,46 @@
                 const key = v.ID || v.Timestamp + "_" + v.Name;
                 if (dismissed.has(key) || seen.has(key)) return;
                 seen.add(key); hasNew = true;
-                const card = document.createElement("div"); card.className = "ac"; card.setAttribute("data-k", key);
-                card.innerHTML = `<div class="ac-b">${v.ImageUrl ? `<img src="${v.ImageUrl}" class="ac-img" onclick="openLb('${v.ImageUrl}')">` : ""}
-   <div class="ac-d"><div class="ac-n">🔴 ${v.Name || "Unknown"}</div><div class="ac-m">${v.Message || "Violation"}</div><div class="ac-t">🕐 ${v.Timestamp || ""}</div></div>
-  </div><div class="ac-a"><button class="btn-ack" onclick="dismissA('${key}',this.closest('.ac'))">✅ รับทราบ</button></div>`;
+                const card = document.createElement("div");
+                card.className = "ac";
+                card.setAttribute("data-k", key);
+                const imgHtml = v.ImageUrl
+                    ? `<img src="${attr(v.ImageUrl)}" class="ac-img" data-img="${attr(v.ImageUrl)}">` : "";
+                card.innerHTML =
+                    `<div class="ac-b">${imgHtml}` +
+                    `<div class="ac-d">` +
+                    `<div class="ac-n">🔴 ${esc(v.Name || "Unknown")}</div>` +
+                    `<div class="ac-m">${esc(v.Message || "Violation")}</div>` +
+                    `<div class="ac-t">🕐 ${esc(v.Timestamp || "")}</div>` +
+                    `</div></div>` +
+                    `<div class="ac-a"><button class="btn-ack" data-dismiss="${attr(key)}">✅ รับทราบ</button></div>`;
+                card.querySelectorAll("[data-img]").forEach(el => el.addEventListener("click", () => openLb(el.dataset.img)));
+                card.querySelector("[data-dismiss]").addEventListener("click", e => dismissA(key, e.target.closest(".ac")));
                 grid.prepend(card);
             });
             if (hasNew) playBeep();
             updateBadge();
         }
-        function dismissA(k, el) { dismissed.add(k); el.classList.add("gone"); setTimeout(() => { el.remove(); updateBadge() }, 400) }
+        function dismissA(k, el) { dismissed.add(k); el.classList.add("gone"); setTimeout(() => { el.remove(); updateBadge(); }, 400); }
         function updateBadge() {
             const n = document.querySelectorAll(".ac:not(.gone)").length;
             document.getElementById("alert-badge").textContent = n;
             document.getElementById("ref-sec").style.display = n > 0 ? "block" : "none";
         }
-        function openLb(s) { document.getElementById("lb-img").src = s; document.getElementById("lb").classList.add("on") }
+        function openLb(s) { document.getElementById("lb-img").src = s; document.getElementById("lb").classList.add("on"); }
         function playBeep() {
             try {
                 if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-                [660, 880].forEach((f, i) => { const o = audioCtx.createOscillator(), g = audioCtx.createGain(); o.connect(g); g.connect(audioCtx.destination); o.type = "square"; o.frequency.value = f; g.gain.setValueAtTime(.12, audioCtx.currentTime + i * .15); g.gain.exponentialRampToValueAtTime(.001, audioCtx.currentTime + i * .15 + .14); o.start(audioCtx.currentTime + i * .15); o.stop(audioCtx.currentTime + i * .15 + .14) });
-            } catch (e) { }
+                [660, 880].forEach((f, i) => {
+                    const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+                    o.connect(g); g.connect(audioCtx.destination);
+                    o.type = "square"; o.frequency.value = f;
+                    g.gain.setValueAtTime(.12, audioCtx.currentTime + i * .15);
+                    g.gain.exponentialRampToValueAtTime(.001, audioCtx.currentTime + i * .15 + .14);
+                    o.start(audioCtx.currentTime + i * .15);
+                    o.stop(audioCtx.currentTime + i * .15 + .14);
+                });
+            } catch (e) { /* AudioContext blocked until user gesture */ }
         }
 
         // ── ADMIN ──
@@ -799,39 +904,82 @@
                 const [rr, vr, resr] = await Promise.all([
                     fetch(API + "?action=getRunners").then(r => r.json()),
                     fetch(API + "?action=getViolations").then(r => r.json()),
-                    fetch(API + "?action=getResults").then(r => r.json())
+                    fetch(API + "?action=getResults").then(r => r.json()),
                 ]);
-                runners = rr.data || []; violations = vr.data || []; results = resr.data || [];
+                runners = rr.data || [];
+                violations = vr.data || [];
+                results = resr.data || [];
                 renderAdminTab();
-            } catch (e) { console.error(e) }
+            } catch (e) { console.error("loadAdminData failed:", e); }
         }
-        function switchTab(t, el) { adminTab = t; document.querySelectorAll(".tab").forEach(b => b.classList.remove("on")); el.classList.add("on"); renderAdminTab() }
+        function switchTab(t, el) { adminTab = t; document.querySelectorAll(".tab").forEach(b => b.classList.remove("on")); el.classList.add("on"); renderAdminTab(); }
 
         function renderAdminTab() {
             const body = document.getElementById("admin-body");
             const q = document.getElementById("admin-search").value.toLowerCase();
             if (adminTab === "runners") {
-                // Merge runners + results
                 const merged = runners.map(rn => {
                     const res = results.find(r => r.Name === rn.Name) || {};
-                    return { ...rn, Start_Time: res.Start_Time || "-", CP1_Time: res.CP1_Time || "-", CP2_Time: res.CP2_Time || "-", CP3_Time: res.CP3_Time || "-", CP4_Time: res.CP4_Time || "-", Finish_Time: res.Finish_Time || "-", Total_Duration: res.Total_Duration || "-" };
-                }).filter(r => r.Name.toLowerCase().includes(q) || String(r.BibNumber).includes(q));
-                if (!merged.length) { body.innerHTML = `<div class="empty">ไม่พบข้อมูลนักวิ่ง</div>`; return }
-                body.innerHTML = `<table><thead><tr><th>ชื่อ</th><th>BIB</th><th>Email</th><th>Start</th><th>CP1</th><th>CP2</th><th>CP3</th><th>CP4</th><th>Finish</th><th>เวลา</th><th>Drive</th><th>จัดการ</th></tr></thead><tbody>${merged.map(r => `<tr><td style="font-weight:600">${r.Name}</td><td>${r.BibNumber || "-"}</td><td style="font-size:.8rem;color:var(--mut)">${r.Email || "-"}</td><td class="tt">${r.Start_Time}</td><td class="tt">${r.CP1_Time}</td><td class="tt">${r.CP2_Time}</td><td class="tt">${r.CP3_Time}</td><td class="tt">${r.CP4_Time}</td><td class="tt">${r.Finish_Time}</td><td class="tt">${r.Total_Duration}</td><td>${r.FolderUrl ? `<a href="${r.FolderUrl}" target="_blank" style="color:var(--pri);font-size:.8rem">📂</a>` : "-"}</td><td><button class="btn-sm btn-dl" onclick="confirmDel('runner','${r.Name}')">🗑️</button></td></tr>`).join("")
-                    }</tbody></table>`;
+                    return {
+                        ...rn,
+                        Start_Time: res.Start_Time || "-",
+                        CP1_Time: res.CP1_Time || "-",
+                        CP2_Time: res.CP2_Time || "-",
+                        CP3_Time: res.CP3_Time || "-",
+                        CP4_Time: res.CP4_Time || "-",
+                        Finish_Time: res.Finish_Time || "-",
+                        Total_Duration: res.Total_Duration || "-",
+                    };
+                }).filter(r => (r.Name || "").toLowerCase().includes(q) || String(r.BibNumber).includes(q));
+                if (!merged.length) { body.innerHTML = `<div class="empty">ไม่พบข้อมูลนักวิ่ง</div>`; return; }
+                body.innerHTML = `<table><thead><tr><th>ชื่อ</th><th>BIB</th><th>Email</th><th>Start</th><th>CP1</th><th>CP2</th><th>CP3</th><th>CP4</th><th>Finish</th><th>เวลา</th><th>Drive</th><th>จัดการ</th></tr></thead><tbody>${merged.map(r =>
+                    `<tr>` +
+                    `<td style="font-weight:600">${esc(r.Name)}</td>` +
+                    `<td>${esc(r.BibNumber || "-")}</td>` +
+                    `<td style="font-size:.8rem;color:var(--mut)">${esc(r.Email || "-")}</td>` +
+                    `<td class="tt">${esc(r.Start_Time)}</td>` +
+                    `<td class="tt">${esc(r.CP1_Time)}</td>` +
+                    `<td class="tt">${esc(r.CP2_Time)}</td>` +
+                    `<td class="tt">${esc(r.CP3_Time)}</td>` +
+                    `<td class="tt">${esc(r.CP4_Time)}</td>` +
+                    `<td class="tt">${esc(r.Finish_Time)}</td>` +
+                    `<td class="tt">${esc(r.Total_Duration)}</td>` +
+                    `<td>${r.FolderUrl ? `<a href="${attr(r.FolderUrl)}" target="_blank" rel="noopener" style="color:var(--pri);font-size:.8rem">📂</a>` : "-"}</td>` +
+                    `<td><button class="btn-sm btn-dl" data-del-runner="${attr(r.Name)}">🗑️</button></td>` +
+                    `</tr>`
+                ).join("")}</tbody></table>`;
+                body.querySelectorAll("[data-del-runner]").forEach(b =>
+                    b.addEventListener("click", () => confirmDel("runner", b.dataset.delRunner)));
             } else {
                 const filtered = violations.filter(v => (v.Name || "").toLowerCase().includes(q));
-                if (!filtered.length) { body.innerHTML = `<div class="empty">ไม่มี violations</div>`; return }
+                if (!filtered.length) { body.innerHTML = `<div class="empty">ไม่มี violations</div>`; return; }
                 body.innerHTML = `<table><thead><tr><th>ID</th><th>ชื่อ</th><th>BIB</th><th>ข้อความ</th><th>หลักฐาน</th><th>เวลา</th><th>สถานะ</th><th>จัดการ</th></tr></thead><tbody>${filtered.map(v => {
                     const verified = String(v.Verified).toLowerCase() === "true";
-                    return `<tr><td style="font-size:.75rem;color:var(--mut)">${v.ID || ""}</td><td style="font-weight:600">${v.Name}</td><td>${v.BibNumber || "-"}</td><td style="font-size:.82rem;max-width:200px;overflow:hidden;text-overflow:ellipsis">${v.Message || ""}</td><td>${v.ImageUrl ? `<img src="${v.ImageUrl}" style="width:60px;height:40px;object-fit:cover;border-radius:6px;cursor:pointer" onclick="openLb('${v.ImageUrl}')">` : "-"}</td><td style="font-size:.8rem">${v.Timestamp || ""}</td><td>${verified ? '<span style="color:var(--grn);font-size:.8rem">✅ ยืนยันแล้ว</span>' : '<span style="color:var(--mut);font-size:.8rem">⏳ รอตรวจ</span>'}</td><td><div style="display:flex;gap:.3rem">${!verified ? `<button class="btn-sm btn-vf" onclick="verifyV('${v.ID}')">✅</button>` : ""}<button class="btn-sm btn-dl" onclick="confirmDel('violation','${v.ID}')">🗑️</button></div></td></tr>`;
-                }).join("")
-                    }</tbody></table>`;
+                    const imgHtml = v.ImageUrl
+                        ? `<img src="${attr(v.ImageUrl)}" data-img="${attr(v.ImageUrl)}" style="width:60px;height:40px;object-fit:cover;border-radius:6px;cursor:pointer">`
+                        : "-";
+                    const verifyBtn = !verified
+                        ? `<button class="btn-sm btn-vf" data-verify="${attr(v.ID)}">✅</button>` : "";
+                    return `<tr>` +
+                        `<td style="font-size:.75rem;color:var(--mut)">${esc(v.ID || "")}</td>` +
+                        `<td style="font-weight:600">${esc(v.Name)}</td>` +
+                        `<td>${esc(v.BibNumber || "-")}</td>` +
+                        `<td style="font-size:.82rem;max-width:200px;overflow:hidden;text-overflow:ellipsis">${esc(v.Message || "")}</td>` +
+                        `<td>${imgHtml}</td>` +
+                        `<td style="font-size:.8rem">${esc(v.Timestamp || "")}</td>` +
+                        `<td>${verified ? '<span style="color:var(--grn);font-size:.8rem">✅ ยืนยันแล้ว</span>' : '<span style="color:var(--mut);font-size:.8rem">⏳ รอตรวจ</span>'}</td>` +
+                        `<td><div style="display:flex;gap:.3rem">${verifyBtn}<button class="btn-sm btn-dl" data-del-violation="${attr(v.ID)}">🗑️</button></div></td>` +
+                        `</tr>`;
+                }).join("")}</tbody></table>`;
+                body.querySelectorAll("[data-img]").forEach(el => el.addEventListener("click", () => openLb(el.dataset.img)));
+                body.querySelectorAll("[data-verify]").forEach(b => b.addEventListener("click", () => verifyV(b.dataset.verify)));
+                body.querySelectorAll("[data-del-violation]").forEach(b => b.addEventListener("click", () => confirmDel("violation", b.dataset.delViolation)));
             }
         }
 
         async function verifyV(id) {
-            await fetch(API, { method: "POST", headers: { "Content-Type": "text/plain" }, body: JSON.stringify({ action: "verifyViolation", id }) });
+            const d = await adminPost({ action: "verifyViolation", id });
+            if (d.status !== "success") alert("ตรวจสอบไม่สำเร็จ: " + (d.message || "Unknown"));
             loadAdminData();
         }
         function confirmDel(type, id) {
@@ -839,18 +987,22 @@
             document.getElementById("confirm-modal").classList.add("on");
             document.getElementById("confirm-ok").onclick = async () => {
                 closeConfirm();
-                if (type === "runner") await fetch(API, { method: "POST", headers: { "Content-Type": "text/plain" }, body: JSON.stringify({ action: "deleteRunner", name: id }) });
-                else await fetch(API, { method: "POST", headers: { "Content-Type": "text/plain" }, body: JSON.stringify({ action: "deleteViolation", id }) });
+                const payload = type === "runner"
+                    ? { action: "deleteRunner", name: id }
+                    : { action: "deleteViolation", id };
+                const d = await adminPost(payload);
+                if (d.status !== "success") alert("ลบไม่สำเร็จ: " + (d.message || "Unknown"));
                 loadAdminData();
             };
         }
-        function closeConfirm() { document.getElementById("confirm-modal").classList.remove("on") }
+        function closeConfirm() { document.getElementById("confirm-modal").classList.remove("on"); }
 
         // ── AUTO REFRESH ──
-        setInterval(fetchResults, 1000);
-        setInterval(fetchViolations, 2000);
-        setInterval(() => { if (document.getElementById("admin-panel").style.display === "block") loadAdminData() }, 5000);
-        fetchResults(); fetchViolations();
+        setInterval(fetchResults, POLL_RESULTS_MS);
+        setInterval(fetchViolations, POLL_VIOLATIONS_MS);
+        setInterval(() => { if (document.getElementById("admin-panel").style.display === "block") loadAdminData(); }, POLL_ADMIN_MS);
+        fetchResults();
+        fetchViolations();
     </script>
 </body>
 

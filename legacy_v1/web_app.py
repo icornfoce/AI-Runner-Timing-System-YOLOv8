@@ -246,32 +246,39 @@ def admin_add_runner():
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
-@app.route('/admin/violation/<filename>', methods=['DELETE'])
+@app.route('/admin/violation/<path:filename>', methods=['DELETE'])
 def admin_delete_violation(filename):
     if not is_admin():
         return jsonify({"error": "Unauthorized"}), 401
     try:
-        # Delete image file
-        img_path = os.path.join(VIOLATION_DIR, filename)
+        # Sanitize: secure_filename strips any path components, so
+        # `../../etc/passwd` collapses to a flat name and can't escape
+        # VIOLATION_DIR. Reject anything that doesn't survive sanitization.
+        safe_name = secure_filename(filename)
+        if not safe_name or safe_name != os.path.basename(filename):
+            return jsonify({"status": "error", "message": "Invalid filename"}), 400
+        img_path = os.path.join(VIOLATION_DIR, safe_name)
         if os.path.exists(img_path):
             os.remove(img_path)
-        # Remove from CSV log
         if os.path.exists(VIOLATION_LOG):
             df = pd.read_csv(VIOLATION_LOG)
-            df = df[df['image_filename'] != filename]
+            df = df[df['image_filename'] != safe_name]
             df.to_csv(VIOLATION_LOG, index=False)
         return jsonify({"status": "success"})
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
-@app.route('/admin/violation/<filename>/verify', methods=['PUT'])
+@app.route('/admin/violation/<path:filename>/verify', methods=['PUT'])
 def admin_verify_violation(filename):
     if not is_admin():
         return jsonify({"error": "Unauthorized"}), 401
     try:
+        safe_name = secure_filename(filename)
+        if not safe_name or safe_name != os.path.basename(filename):
+            return jsonify({"status": "error", "message": "Invalid filename"}), 400
         if os.path.exists(VIOLATION_LOG):
             df = pd.read_csv(VIOLATION_LOG)
-            mask = df['image_filename'] == filename
+            mask = df['image_filename'] == safe_name
             if mask.any():
                 df.loc[mask, 'verified'] = True
                 df.to_csv(VIOLATION_LOG, index=False)
@@ -285,4 +292,6 @@ if __name__ == '__main__':
     init_log_file()
     init_violation_log()
     init_registry()
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    # debug=True exposes the Werkzeug debugger on errors. Off by default;
+    # set FLASK_DEBUG=1 explicitly when developing locally.
+    app.run(host='0.0.0.0', port=5000, debug=os.environ.get('FLASK_DEBUG') == '1')

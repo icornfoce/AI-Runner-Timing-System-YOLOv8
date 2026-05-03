@@ -3,26 +3,43 @@
 // ============================================================
 // Deploy: Extensions → Apps Script → Deploy → Web app
 //   Execute as: Me | Access: Anyone
+//
+// FIRST-TIME SETUP:
+//   In the Apps Script editor, select the function dropdown,
+//   pick `_setupAdminToken`, and click Run. This stores the
+//   admin password as a Script Property (not in source).
 // ============================================================
 
 // ─── CONFIG ─────────────────────────────────────────────────
-const SPREADSHEET_ID = SpreadsheetApp.getActiveSpreadsheet().getId();
 const RUNNER_FACES_FOLDER = "RunnerFaces";
 const VIOLATION_FOLDER = "ViolationEvidence";
+const DEFAULT_ADMIN_TOKEN = "muto67"; // used only if ScriptProperty unset
 
-// ─── CORS HEADERS ───────────────────────────────────────────
-function setCorsHeaders(output) {
-  return output
-    .setHeader("Access-Control-Allow-Origin", "*")
-    .setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-    .setHeader("Access-Control-Allow-Headers", "Content-Type");
+// ─── ADMIN AUTH ─────────────────────────────────────────────
+function getAdminToken() {
+  const t = PropertiesService.getScriptProperties().getProperty("ADMIN_TOKEN");
+  return t || DEFAULT_ADMIN_TOKEN;
 }
 
+function requireAdmin(body) {
+  if (!body || body.token !== getAdminToken()) {
+    throw new Error("Unauthorized");
+  }
+}
+
+/**
+ * Run ONCE from the Apps Script editor to set the admin password.
+ * Edit the string and run again to rotate.
+ */
+function _setupAdminToken() {
+  PropertiesService.getScriptProperties().setProperty("ADMIN_TOKEN", "muto67");
+}
+
+// ─── RESPONSE HELPER ────────────────────────────────────────
 function jsonResponse(data) {
-  const output = ContentService
+  return ContentService
     .createTextOutput(JSON.stringify(data))
     .setMimeType(ContentService.MimeType.JSON);
-  return output;
 }
 
 // ─── SPREADSHEET HELPERS ────────────────────────────────────
@@ -38,10 +55,15 @@ function getSheet(name) {
           "FolderUrl", "Embeddings"]);
         break;
       case "Results":
-        sheet.appendRow(["Name", "BibNumber", "Start_Time", "CP1_Time", "CP2_Time", "CP3_Time", "CP4_Time", "Finish_Time", "Total_Duration", "UpdatedAt"]);
+        sheet.appendRow(["Name", "BibNumber", "Start_Time", "CP1_Time", "CP2_Time",
+          "CP3_Time", "CP4_Time", "Finish_Time", "Total_Duration", "UpdatedAt"]);
+        // Force time columns (C-I) to plain text so HH:MM:SS isn't
+        // auto-coerced to a Date and round-trips cleanly.
+        sheet.getRange("C:I").setNumberFormat("@");
         break;
       case "Violations":
-        sheet.appendRow(["ID", "Name", "BibNumber", "Message", "ImageUrl", "Timestamp", "Verified", "VerifiedAt"]);
+        sheet.appendRow(["ID", "Name", "BibNumber", "Message", "ImageUrl",
+          "Timestamp", "Verified", "VerifiedAt"]);
         break;
     }
   }
@@ -49,7 +71,8 @@ function getSheet(name) {
 }
 
 function sheetToJson(sheet) {
-  const data = sheet.getDataRange().getValues();
+  // Use displayValues so Date-coerced cells return their formatted string.
+  const data = sheet.getDataRange().getDisplayValues();
   if (data.length <= 1) return [];
   const headers = data[0];
   const rows = [];
@@ -66,7 +89,7 @@ function sheetToJson(sheet) {
 function findRowByName(sheet, name) {
   const data = sheet.getDataRange().getValues();
   for (let i = 1; i < data.length; i++) {
-    if (data[i][0] === name) return i + 1; // 1-indexed row number
+    if (String(data[i][0]) === String(name)) return i + 1;
   }
   return -1;
 }
@@ -92,16 +115,12 @@ function getOrCreateFolder(parentFolder, name) {
 }
 
 function getRootFolder(name) {
-  const root = DriveApp.getRootFolder();
-  return getOrCreateFolder(root, name);
+  return getOrCreateFolder(DriveApp.getRootFolder(), name);
 }
 
 function saveBase64Image(folder, filename, base64Data) {
-  // Strip data URL prefix if present
   let raw = base64Data;
-  if (raw.indexOf(",") > -1) {
-    raw = raw.split(",")[1];
-  }
+  if (raw.indexOf(",") > -1) raw = raw.split(",")[1];
   const decoded = Utilities.base64Decode(raw);
   const blob = Utilities.newBlob(decoded, "image/jpeg", filename);
   const file = folder.createFile(blob);
@@ -110,50 +129,50 @@ function saveBase64Image(folder, filename, base64Data) {
 }
 
 // ─── DURATION CALCULATOR ────────────────────────────────────
-function calcDuration(cp1, cp2) {
-  try {
-    if (!cp1 || !cp2) return "";
-    const parts1 = String(cp1).split(":");
-    const parts2 = String(cp2).split(":");
-    const sec1 = parseInt(parts1[0]) * 3600 + parseInt(parts1[1]) * 60 + parseInt(parts1[2]);
-    const sec2 = parseInt(parts2[0]) * 3600 + parseInt(parts2[1]) * 60 + parseInt(parts2[2]);
-    let diff = sec2 - sec1;
-    if (diff < 0) diff += 86400;
-    const mins = Math.floor(diff / 60);
-    const secs = diff % 60;
-    return mins + ":" + String(secs).padStart(2, "0");
-  } catch (e) {
-    return "";
+// Accepts strings ("HH:MM:SS" or "HH:MM") OR Date objects (Sheets may
+// coerce time strings into time-of-day Dates on older sheets).
+function parseTimeToSeconds(v) {
+  if (v == null || v === "") return null;
+  if (v instanceof Date) {
+    return v.getHours() * 3600 + v.getMinutes() * 60 + v.getSeconds();
   }
+  const s = String(v).trim();
+  if (!s) return null;
+  const m = s.match(/^(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?$/);
+  if (!m) return null;
+  return parseInt(m[1], 10) * 3600 + parseInt(m[2], 10) * 60 + parseInt(m[3] || "0", 10);
+}
+
+function calcDuration(cp1, cp2) {
+  const sec1 = parseTimeToSeconds(cp1);
+  const sec2 = parseTimeToSeconds(cp2);
+  if (sec1 == null || sec2 == null) return "";
+  let diff = sec2 - sec1;
+  if (diff < 0) diff += 86400;
+  const mins = Math.floor(diff / 60);
+  const secs = diff % 60;
+  return mins + ":" + String(secs).padStart(2, "0");
 }
 
 // ─── GET HANDLER ────────────────────────────────────────────
 function doGet(e) {
   const action = (e.parameter && e.parameter.action) || "";
-
   try {
     switch (action) {
-      case "getResults": {
-        const sheet = getSheet("Results");
-        return jsonResponse({ status: "success", data: sheetToJson(sheet) });
-      }
+      case "getResults":
+        return jsonResponse({ status: "success", data: sheetToJson(getSheet("Results")) });
 
-      case "getRunners": {
-        const sheet = getSheet("Runners");
-        return jsonResponse({ status: "success", data: sheetToJson(sheet) });
-      }
+      case "getRunners":
+        return jsonResponse({ status: "success", data: sheetToJson(getSheet("Runners")) });
 
       case "getViolations": {
-        const sheet = getSheet("Violations");
-        const all = sheetToJson(sheet);
-        // Return last 20, sorted by timestamp descending
+        const all = sheetToJson(getSheet("Violations"));
         const sorted = all.sort((a, b) => String(b.Timestamp).localeCompare(String(a.Timestamp)));
         return jsonResponse({ status: "success", data: sorted.slice(0, 20) });
       }
 
       case "getVerifiedViolations": {
-        const sheet = getSheet("Violations");
-        const all = sheetToJson(sheet);
+        const all = sheetToJson(getSheet("Violations"));
         const verified = all.filter(v => String(v.Verified).toLowerCase() === "true");
         const sorted = verified.sort((a, b) => String(b.Timestamp).localeCompare(String(a.Timestamp)));
         return jsonResponse({ status: "success", data: sorted.slice(0, 20) });
@@ -175,20 +194,23 @@ function doPost(e) {
 
     switch (action) {
 
+      // ── Verify admin password (no destructive effect) ────
+      case "verifyAdmin": {
+        const pw = String(body.password || "");
+        return jsonResponse({ status: pw === getAdminToken() ? "success" : "error" });
+      }
+
       // ── Register Runner ──────────────────────────────────
       case "registerRunner": {
         const name = body.name;
         const bib = body.bib || "";
         const email = body.email || "";
         const timestamp = body.timestamp || new Date().toISOString();
-
         if (!name) return jsonResponse({ status: "error", message: "Name is required" });
 
-        // Create Drive folder
         const rootFolder = getRootFolder(RUNNER_FACES_FOLDER);
         const personFolder = getOrCreateFolder(rootFolder, name);
 
-        // Save 5 photos
         const angles = ["front", "top", "bottom", "left", "right"];
         const photoUrls = {};
         for (const angle of angles) {
@@ -201,19 +223,22 @@ function doPost(e) {
           }
         }
 
-        // Write to Runners sheet
+        // Optional embeddings in same call (atomic registration)
+        let embStr = "";
+        if (body.embeddings) {
+          embStr = typeof body.embeddings === "string"
+            ? body.embeddings : JSON.stringify(body.embeddings);
+        }
+
         const sheet = getSheet("Runners");
         const existingRow = findRowByName(sheet, name);
-
         const rowData = [
           name, bib, email, timestamp,
           photoUrls.front, photoUrls.top, photoUrls.bottom,
           photoUrls.left, photoUrls.right,
-          personFolder.getUrl(), ""  // Embeddings empty, set later
+          personFolder.getUrl(), embStr,
         ];
-
         if (existingRow > 0) {
-          // Update existing runner
           sheet.getRange(existingRow, 1, 1, rowData.length).setValues([rowData]);
         } else {
           sheet.appendRow(rowData);
@@ -222,85 +247,71 @@ function doPost(e) {
         return jsonResponse({
           status: "success",
           message: "Runner " + name + " registered",
-          folderUrl: personFolder.getUrl()
+          folderUrl: personFolder.getUrl(),
         });
       }
 
-      // ── Save Embeddings ──────────────────────────────────
+      // ── Save Embeddings (kept for backward compat) ───────
       case "saveEmbeddings": {
         const name = body.name;
-        const embeddings = body.embeddings; // JSON string of float array
-
+        const embeddings = body.embeddings;
         if (!name || !embeddings) {
           return jsonResponse({ status: "error", message: "Name and embeddings required" });
         }
-
         const sheet = getSheet("Runners");
         const row = findRowByName(sheet, name);
-        if (row < 0) {
-          return jsonResponse({ status: "error", message: "Runner not found: " + name });
-        }
-
+        if (row < 0) return jsonResponse({ status: "error", message: "Runner not found: " + name });
         const colIdx = getColumnIndex(sheet, "Embeddings");
-        if (colIdx < 0) {
-          return jsonResponse({ status: "error", message: "Embeddings column not found" });
-        }
-
+        if (colIdx < 0) return jsonResponse({ status: "error", message: "Embeddings column not found" });
         const embStr = typeof embeddings === "string" ? embeddings : JSON.stringify(embeddings);
         sheet.getRange(row, colIdx + 1).setValue(embStr);
-
         return jsonResponse({ status: "success", message: "Embeddings saved for " + name });
       }
 
       // ── Record Checkpoint ────────────────────────────────
       case "recordCheckpoint": {
         const name = body.name;
-        const cpId = body.checkpoint_id; // 'start', 1, 2, 3, 4, 'finish'
+        const cpId = body.checkpoint_id;
         const timestamp = body.timestamp;
         const bib = body.bib || "";
-
-        if (!name || cpId === undefined || !timestamp) {
+        if (!name || cpId === undefined || cpId === null || !timestamp) {
           return jsonResponse({ status: "error", message: "Missing fields" });
         }
 
         const sheet = getSheet("Results");
         const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
-        
-        // Map checkpoint_id to column name
+
         let colName;
-        if (cpId === 'start') colName = 'Start_Time';
-        else if (cpId === 'finish') colName = 'Finish_Time';
-        else colName = 'CP' + cpId + '_Time';
-        
+        if (cpId === "start") colName = "Start_Time";
+        else if (cpId === "finish") colName = "Finish_Time";
+        else colName = "CP" + cpId + "_Time";
+
         const colIdx = headers.indexOf(colName);
         if (colIdx < 0) return jsonResponse({ status: "error", message: "Column not found: " + colName });
 
         let row = findRowByName(sheet, name);
-
         if (row < 0) {
-          // New runner entry — create empty row
           const newRow = new Array(headers.length).fill("");
-          newRow[0] = name;  // Name
-          newRow[1] = bib;   // BibNumber
+          newRow[0] = name;
+          newRow[1] = bib;
           newRow[colIdx] = timestamp;
-          newRow[headers.indexOf('UpdatedAt')] = new Date().toISOString();
+          newRow[headers.indexOf("UpdatedAt")] = new Date().toISOString();
           sheet.appendRow(newRow);
         } else {
           sheet.getRange(row, colIdx + 1).setValue(timestamp);
           if (bib) sheet.getRange(row, 2).setValue(bib);
-          
-          // Calculate Total_Duration (Start → Finish)
-          const startCol = headers.indexOf('Start_Time');
-          const finishCol = headers.indexOf('Finish_Time');
-          const durCol = headers.indexOf('Total_Duration');
+
+          const startCol = headers.indexOf("Start_Time");
+          const finishCol = headers.indexOf("Finish_Time");
+          const durCol = headers.indexOf("Total_Duration");
           if (startCol >= 0 && finishCol >= 0 && durCol >= 0) {
-            const startTime = String(sheet.getRange(row, startCol + 1).getValue());
-            const finishTime = String(sheet.getRange(row, finishCol + 1).getValue());
-            if (startTime && finishTime && startTime !== '' && finishTime !== '') {
+            const startTime = sheet.getRange(row, startCol + 1).getValue();
+            const finishTime = sheet.getRange(row, finishCol + 1).getValue();
+            if (startTime && finishTime) {
               sheet.getRange(row, durCol + 1).setValue(calcDuration(startTime, finishTime));
             }
           }
-          sheet.getRange(row, headers.indexOf('UpdatedAt') + 1).setValue(new Date().toISOString());
+          sheet.getRange(row, headers.indexOf("UpdatedAt") + 1).setValue(new Date().toISOString());
         }
 
         return jsonResponse({ status: "success", message: name + " " + colName + " recorded" });
@@ -322,14 +333,13 @@ function doPost(e) {
         }
 
         const id = "V" + Date.now();
-        const sheet = getSheet("Violations");
-        sheet.appendRow([id, name, bib, message, imageUrl, timestamp, false, ""]);
-
+        getSheet("Violations").appendRow([id, name, bib, message, imageUrl, timestamp, false, ""]);
         return jsonResponse({ status: "success", message: "Violation reported", id: id });
       }
 
-      // ── Verify Violation ─────────────────────────────────
+      // ── Verify Violation (admin) ─────────────────────────
       case "verifyViolation": {
+        requireAdmin(body);
         const id = body.id;
         if (!id) return jsonResponse({ status: "error", message: "ID required" });
 
@@ -341,34 +351,31 @@ function doPost(e) {
         const verifiedAtCol = getColumnIndex(sheet, "VerifiedAt");
         sheet.getRange(row, verifiedCol + 1).setValue(true);
         sheet.getRange(row, verifiedAtCol + 1).setValue(new Date().toISOString());
-
         return jsonResponse({ status: "success", message: "Violation verified" });
       }
 
-      // ── Delete Violation ─────────────────────────────────
+      // ── Delete Violation (admin) ─────────────────────────
       case "deleteViolation": {
+        requireAdmin(body);
         const id = body.id;
         if (!id) return jsonResponse({ status: "error", message: "ID required" });
-
         const sheet = getSheet("Violations");
         const row = findRowById(sheet, id);
         if (row < 0) return jsonResponse({ status: "error", message: "Violation not found" });
-
         sheet.deleteRow(row);
         return jsonResponse({ status: "success", message: "Violation deleted" });
       }
 
-      // ── Delete Runner ────────────────────────────────────
+      // ── Delete Runner (admin) ────────────────────────────
       case "deleteRunner": {
+        requireAdmin(body);
         const name = body.name;
         if (!name) return jsonResponse({ status: "error", message: "Name required" });
 
-        // Delete from Runners sheet
         const rSheet = getSheet("Runners");
         const rRow = findRowByName(rSheet, name);
         if (rRow > 0) rSheet.deleteRow(rRow);
 
-        // Also delete from Results sheet
         const resSheet = getSheet("Results");
         const resRow = findRowByName(resSheet, name);
         if (resRow > 0) resSheet.deleteRow(resRow);
@@ -376,15 +383,15 @@ function doPost(e) {
         return jsonResponse({ status: "success", message: "Runner " + name + " deleted" });
       }
 
-      // ── Update Runner (edit CP times) ────────────────────
+      // ── Update Runner (admin) ────────────────────────────
       case "updateRunner": {
+        requireAdmin(body);
         const name = body.name;
         if (!name) return jsonResponse({ status: "error", message: "Name required" });
 
         const sheet = getSheet("Results");
         const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
         let row = findRowByName(sheet, name);
-
         if (row < 0) {
           const newRow = new Array(headers.length).fill("");
           newRow[0] = name;
@@ -393,8 +400,7 @@ function doPost(e) {
           row = sheet.getLastRow();
         }
 
-        // Update any provided time columns
-        const timeFields = ['Start_Time', 'CP1_Time', 'CP2_Time', 'CP3_Time', 'CP4_Time', 'Finish_Time'];
+        const timeFields = ["Start_Time", "CP1_Time", "CP2_Time", "CP3_Time", "CP4_Time", "Finish_Time"];
         for (const field of timeFields) {
           if (body[field] !== undefined) {
             const col = headers.indexOf(field);
@@ -402,18 +408,15 @@ function doPost(e) {
           }
         }
 
-        // Recalculate Total_Duration
-        const startCol = headers.indexOf('Start_Time');
-        const finishCol = headers.indexOf('Finish_Time');
-        const durCol = headers.indexOf('Total_Duration');
+        const startCol = headers.indexOf("Start_Time");
+        const finishCol = headers.indexOf("Finish_Time");
+        const durCol = headers.indexOf("Total_Duration");
         if (startCol >= 0 && finishCol >= 0 && durCol >= 0) {
-          const s = String(sheet.getRange(row, startCol + 1).getValue());
-          const f = String(sheet.getRange(row, finishCol + 1).getValue());
-          if (s && f && s !== '' && f !== '') {
-            sheet.getRange(row, durCol + 1).setValue(calcDuration(s, f));
-          }
+          const s = sheet.getRange(row, startCol + 1).getValue();
+          const f = sheet.getRange(row, finishCol + 1).getValue();
+          if (s && f) sheet.getRange(row, durCol + 1).setValue(calcDuration(s, f));
         }
-        const updCol = headers.indexOf('UpdatedAt');
+        const updCol = headers.indexOf("UpdatedAt");
         if (updCol >= 0) sheet.getRange(row, updCol + 1).setValue(new Date().toISOString());
 
         return jsonResponse({ status: "success", message: "Runner " + name + " updated" });
@@ -425,15 +428,4 @@ function doPost(e) {
   } catch (err) {
     return jsonResponse({ status: "error", message: err.toString() });
   }
-}
-
-// ─── OPTIONS HANDLER (CORS PREFLIGHT) ───────────────────────
-function doOptions(e) {
-  return ContentService
-    .createTextOutput("")
-    .setMimeType(ContentService.MimeType.TEXT)
-    .setHeader("Access-Control-Allow-Origin", "*")
-    .setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-    .setHeader("Access-Control-Allow-Headers", "Content-Type")
-    .setHeader("Access-Control-Max-Age", "86400");
 }

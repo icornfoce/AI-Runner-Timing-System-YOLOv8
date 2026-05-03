@@ -6,6 +6,8 @@
 # Project Specific
 Data/
 running_results.csv
+runners_registry.csv
+violations/
 
 # Python
 __pycache__/
