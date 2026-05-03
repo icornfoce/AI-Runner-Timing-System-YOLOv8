@@ -1,5 +1,5 @@
 // ============================================================
-// AI Runner Timing System — Google Apps Script Backend (v3)
+// AI Runner Timing System — Google Apps Script Backend (v4)
 // ============================================================
 // Deploy: Extensions → Apps Script → Deploy → Web app
 //   Execute as: Me | Access: Anyone with the link
@@ -9,6 +9,14 @@
 //   2) _consolidateDuplicateRootFolders()  — merges duplicate Drive folders
 //   3) _migrateAllImageUrls()              — rewrites old viewer URLs
 // All three are idempotent — re-running is safe.
+//
+// What's new in v4:
+//   • Read-through CacheService for getRunners/getResults/getViolations
+//     — typical response is now a single in-memory hit (sub-100 ms).
+//   • Writes invalidate the relevant cache keys so admin actions are
+//     visible to the dashboard immediately (no 12 s polling lag).
+//   • Drive folder cleanup on deleteRunner runs out-of-band via a
+//     time-driven trigger so the admin UI returns instantly.
 // ============================================================
 
 // ─── CONSTANTS ──────────────────────────────────────────────
@@ -16,6 +24,24 @@ const RUNNER_FACES_FOLDER = "RunnerFaces";
 const VIOLATION_FOLDER = "ViolationEvidence";
 const DEFAULT_ADMIN_TOKEN = "muto67";
 const LOCK_TIMEOUT_MS = 10000;
+
+// Cache settings — values must fit under CacheService's 100 KB
+// per-key limit, otherwise putCachedJson skips the write and the
+// endpoint falls through to the spreadsheet read on every call.
+const CACHE_TTL_SEC = 12;
+const CACHE_MAX_BYTES = 90 * 1024;
+const CACHE_KEYS = Object.freeze({
+  RUNNERS: "CACHE_RUNNERS",
+  RESULTS: "CACHE_RESULTS",
+  VIOLATIONS: "CACHE_VIOLATIONS",
+  VIOLATIONS_VERIFIED: "CACHE_VIOLATIONS_VERIFIED",
+});
+
+// Async Drive deletion — queue stored in ScriptProperties, drained
+// by a self-cleaning trigger so admin requests return immediately.
+const DRIVE_DELETE_QUEUE_KEY = "DRIVE_DELETE_QUEUE";
+const DRIVE_DELETE_TRIGGER = "_processDriveDeleteQueue";
+const DRIVE_DELETE_DELAY_MS = 2000;
 
 const SHEETS = Object.freeze({
   RUNNERS: "Runners",
@@ -72,6 +98,65 @@ function jsonErr(message, code) {
     }))
     .setMimeType(ContentService.MimeType.JSON);
 }
+// Returns a pre-serialized JSON payload directly. Used by the cache
+// layer so we don't double-encode.
+function rawJson(jsonStr) {
+  return ContentService
+    .createTextOutput(jsonStr)
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
+// ─── CACHE HELPERS ──────────────────────────────────────────
+function cache() { return CacheService.getScriptCache(); }
+
+function getCached(key) {
+  try { return cache().get(key); }
+  catch (e) { logErr("cache.get(" + key + ")", e); return null; }
+}
+function putCached(key, jsonStr) {
+  try {
+    if (jsonStr.length > CACHE_MAX_BYTES) {
+      logInfo("cache skip (too large)", { key: key, bytes: jsonStr.length });
+      return;
+    }
+    cache().put(key, jsonStr, CACHE_TTL_SEC);
+  } catch (e) {
+    logErr("cache.put(" + key + ")", e);
+  }
+}
+function invalidateCache(keys) {
+  if (!keys || !keys.length) return;
+  try { cache().removeAll(keys); }
+  catch (e) { logErr("cache.removeAll", e); }
+}
+function invalidateRunners()   { invalidateCache([CACHE_KEYS.RUNNERS]); }
+function invalidateResults()   { invalidateCache([CACHE_KEYS.RESULTS]); }
+function invalidateViolations() {
+  invalidateCache([CACHE_KEYS.VIOLATIONS, CACHE_KEYS.VIOLATIONS_VERIFIED]);
+}
+
+/**
+ * Read-through cache wrapper for GET endpoints.
+ *
+ *   1. If `cacheKey` is in cache → return that bytes-for-bytes.
+ *   2. Otherwise call `supplier()`, build the standard
+ *      {status:"success", data:[…]} envelope, cache & return it.
+ *
+ * `supplier` returns the array that goes under `data`. It is only
+ * invoked on cache miss — the spreadsheet is never touched on a hit.
+ */
+function cachedJson(cacheKey, supplier) {
+  const hit = getCached(cacheKey);
+  if (hit !== null) {
+    logInfo("cache hit", { key: cacheKey, bytes: hit.length });
+    return rawJson(hit);
+  }
+  const data = supplier();
+  const payload = JSON.stringify({ status: "success", data: data });
+  putCached(cacheKey, payload);
+  logInfo("cache miss → fill", { key: cacheKey, bytes: payload.length });
+  return rawJson(payload);
+}
 
 // ─── ADMIN AUTH ─────────────────────────────────────────────
 function getAdminToken() {
@@ -80,9 +165,7 @@ function getAdminToken() {
 }
 function requireAdmin(body) {
   if (!body || body.token !== getAdminToken()) {
-    const e = new Error("Unauthorized");
-    e.code = "unauthorized";
-    throw e;
+    throw httpError("Unauthorized", "unauthorized");
   }
 }
 
@@ -108,8 +191,6 @@ function httpError(msg, code) {
 }
 
 // ─── TIME / DURATION HELPERS ────────────────────────────────
-// Sheets sometimes coerces "HH:MM:SS" strings to time-of-day Dates on
-// columns that aren't text-formatted; this handles both shapes.
 function parseTimeToSeconds(v) {
   if (v == null || v === "") return null;
   if (v instanceof Date) {
@@ -131,8 +212,6 @@ function calcDuration(cp1, cp2) {
   const secs = diff % 60;
   return mins + ":" + String(secs).padStart(2, "0");
 }
-// Pre-write coercion: any Date in a time column becomes "HH:MM:SS",
-// so it round-trips through a text-formatted column without surprises.
 function normalizeTimeStr(v) {
   if (v == null || v === "") return "";
   if (v instanceof Date) {
@@ -159,8 +238,6 @@ function getSheet(name) {
       if (headers) {
         sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
         if (name === SHEETS.RESULTS) {
-          // Force time columns (C-I) to plain text — prevents Sheets from
-          // auto-coercing "HH:MM:SS" to a fraction-of-day Date.
           sheet.getRange("C:I").setNumberFormat("@");
         }
       }
@@ -173,6 +250,8 @@ function getSheet(name) {
 }
 
 // Single-read snapshot — much cheaper than re-querying for every lookup.
+// Row finders use Array.findIndex on the in-memory copy (no per-cell
+// API calls), then return the 1-indexed sheet row.
 function readWholeSheet(sheet) {
   const all = sheet.getDataRange().getValues();
   return {
@@ -186,17 +265,13 @@ function readWholeSheet(sheet) {
     },
     findRowByName: function (name) {
       const target = String(name);
-      for (let i = 0; i < this.values.length; i++) {
-        if (String(this.values[i][0]) === target) return i + 2; // +1 header, +1 1-indexed
-      }
-      return -1;
+      const i = this.values.findIndex(function (row) { return String(row[0]) === target; });
+      return i >= 0 ? i + 2 : -1; // +1 header, +1 1-indexed
     },
     findRowById: function (id) {
       const target = String(id);
-      for (let i = 0; i < this.values.length; i++) {
-        if (String(this.values[i][0]) === target) return i + 2;
-      }
-      return -1;
+      const i = this.values.findIndex(function (row) { return String(row[0]) === target; });
+      return i >= 0 ? i + 2 : -1;
     },
   };
 }
@@ -221,10 +296,6 @@ const DRIVE_EMBED_URL = function (id) {
   return "https://drive.google.com/uc?export=view&id=" + id;
 };
 
-// Idempotent + race-safe folder creation. The script-wide LockService
-// serializes concurrent registerRunner / reportViolation calls so two
-// simultaneous requests can't each create their own "RunnerFaces"
-// folder.
 function getOrCreateFolder(parentFolder, name) {
   const lock = LockService.getScriptLock();
   lock.waitLock(LOCK_TIMEOUT_MS);
@@ -242,8 +313,6 @@ function getOrCreateFolder(parentFolder, name) {
       try {
         folder.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
       } catch (e) {
-        // Workspace orgs can disable public sharing — we still want the
-        // folder, just log the limitation.
         logErr("setSharing failed for new folder '" + name + "'", e);
       }
     }
@@ -282,37 +351,137 @@ function saveBase64Image(folder, filename, base64Data) {
     file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
   } catch (e) {
     logErr("setSharing failed for file " + filename, e);
-    // Continue — the file exists; the URL will only fail to embed if
-    // the org policy blocks public sharing entirely.
   }
-  // ALWAYS the embed URL — never .../file/d/.../view, which can't be
-  // rendered inside an <img> tag.
   return DRIVE_EMBED_URL(file.getId());
 }
 
-// ─── GET HANDLER ────────────────────────────────────────────
+// ─── ASYNC DRIVE DELETION QUEUE ─────────────────────────────
+// Apps Script has no true async, but a one-shot time-based trigger
+// runs in a separate execution. We push the runner name to a
+// ScriptProperties-backed queue and schedule the trigger to drain it.
+// The original request returns immediately; cleanup happens ~2 s later.
+function queueDriveDelete(personName) {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(LOCK_TIMEOUT_MS)) {
+    // Couldn't queue — fall through to inline cleanup so we don't lose work.
+    try { trashRunnerFolder(personName); }
+    catch (e) { logErr("inline trashRunnerFolder fallback", e); }
+    return;
+  }
+  try {
+    const props = PropertiesService.getScriptProperties();
+    const raw = props.getProperty(DRIVE_DELETE_QUEUE_KEY) || "[]";
+    let queue;
+    try { queue = JSON.parse(raw); } catch (e) { queue = []; }
+    if (!Array.isArray(queue)) queue = [];
+    if (queue.indexOf(personName) < 0) queue.push(personName);
+    props.setProperty(DRIVE_DELETE_QUEUE_KEY, JSON.stringify(queue));
+
+    // Avoid stacking multiple triggers (max 20 per script).
+    const existing = ScriptApp.getProjectTriggers().some(function (t) {
+      return t.getHandlerFunction() === DRIVE_DELETE_TRIGGER;
+    });
+    if (!existing) {
+      ScriptApp.newTrigger(DRIVE_DELETE_TRIGGER).timeBased().after(DRIVE_DELETE_DELAY_MS).create();
+      logInfo("scheduled drive delete trigger", { name: personName });
+    }
+  } catch (e) {
+    logErr("queueDriveDelete", e);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/** Trigger entrypoint — drains the queue, then deletes itself. */
+function _processDriveDeleteQueue() {
+  // Loop so any entries enqueued WHILE we were processing get picked up
+  // before the trigger self-deletes (avoids losing late additions).
+  while (true) {
+    const lock = LockService.getScriptLock();
+    if (!lock.tryLock(LOCK_TIMEOUT_MS)) {
+      // Couldn't grab the lock — leave the trigger in place so the next
+      // tick (or re-scheduling) handles it.
+      return;
+    }
+    let batch;
+    try {
+      const props = PropertiesService.getScriptProperties();
+      const raw = props.getProperty(DRIVE_DELETE_QUEUE_KEY) || "[]";
+      try { batch = JSON.parse(raw); } catch (e) { batch = []; }
+      if (!Array.isArray(batch)) batch = [];
+      if (!batch.length) {
+        // Queue empty → safe to retire this trigger.
+        deleteDriveDeleteTriggers();
+        return;
+      }
+      props.setProperty(DRIVE_DELETE_QUEUE_KEY, "[]");
+    } finally {
+      lock.releaseLock();
+    }
+    // Process outside the lock so concurrent admin actions aren't blocked.
+    for (let i = 0; i < batch.length; i++) {
+      try { trashRunnerFolder(batch[i]); }
+      catch (e) { logErr("trashRunnerFolder(" + batch[i] + ")", e); }
+    }
+  }
+}
+
+function deleteDriveDeleteTriggers() {
+  const triggers = ScriptApp.getProjectTriggers();
+  for (let i = 0; i < triggers.length; i++) {
+    if (triggers[i].getHandlerFunction() === DRIVE_DELETE_TRIGGER) {
+      ScriptApp.deleteTrigger(triggers[i]);
+    }
+  }
+}
+
+function trashRunnerFolder(personName) {
+  const root = DriveApp.getRootFolder();
+  const runnerRoots = root.getFoldersByName(RUNNER_FACES_FOLDER);
+  let trashed = 0;
+  while (runnerRoots.hasNext()) {
+    const rf = runnerRoots.next();
+    const personFolders = rf.getFoldersByName(personName);
+    while (personFolders.hasNext()) {
+      const pf = personFolders.next();
+      pf.setTrashed(true);
+      trashed++;
+    }
+  }
+  logInfo("trashRunnerFolder", { name: personName, trashed: trashed });
+}
+
+// ─── GET HANDLER (cache-fronted) ────────────────────────────
 function doGet(e) {
   const action = (e && e.parameter && e.parameter.action) || "";
   try {
     switch (action) {
       case "getResults":
-        return jsonOk({ data: readSheetAsJson(getSheet(SHEETS.RESULTS)) });
+        return cachedJson(CACHE_KEYS.RESULTS, function () {
+          return readSheetAsJson(getSheet(SHEETS.RESULTS));
+        });
 
       case "getRunners":
-        return jsonOk({ data: readSheetAsJson(getSheet(SHEETS.RUNNERS)) });
+        return cachedJson(CACHE_KEYS.RUNNERS, function () {
+          return readSheetAsJson(getSheet(SHEETS.RUNNERS));
+        });
 
-      case "getViolations": {
-        const all = readSheetAsJson(getSheet(SHEETS.VIOLATIONS));
-        all.sort(function (a, b) { return String(b.Timestamp).localeCompare(String(a.Timestamp)); });
-        return jsonOk({ data: all.slice(0, 20) });
-      }
+      case "getViolations":
+        return cachedJson(CACHE_KEYS.VIOLATIONS, function () {
+          const all = readSheetAsJson(getSheet(SHEETS.VIOLATIONS));
+          all.sort(function (a, b) { return String(b.Timestamp).localeCompare(String(a.Timestamp)); });
+          return all.slice(0, 20);
+        });
 
-      case "getVerifiedViolations": {
-        const all = readSheetAsJson(getSheet(SHEETS.VIOLATIONS));
-        const verified = all.filter(function (v) { return String(v.Verified).toLowerCase() === "true"; });
-        verified.sort(function (a, b) { return String(b.Timestamp).localeCompare(String(a.Timestamp)); });
-        return jsonOk({ data: verified.slice(0, 20) });
-      }
+      case "getVerifiedViolations":
+        return cachedJson(CACHE_KEYS.VIOLATIONS_VERIFIED, function () {
+          const all = readSheetAsJson(getSheet(SHEETS.VIOLATIONS));
+          const verified = all.filter(function (v) {
+            return String(v.Verified).toLowerCase() === "true";
+          });
+          verified.sort(function (a, b) { return String(b.Timestamp).localeCompare(String(a.Timestamp)); });
+          return verified.slice(0, 20);
+        });
 
       default:
         return jsonErr("Unknown action: " + action, "bad_request");
@@ -394,13 +563,13 @@ function handleRegisterRunner(body) {
     photoUrls.left, photoUrls.right,
     personFolder.getUrl(), embStr,
   ];
-  // One write either way — append or batched setValues.
   if (rowIdx > 0) {
     sheet.getRange(rowIdx, 1, 1, rowData.length).setValues([rowData]);
   } else {
     sheet.appendRow(rowData);
   }
 
+  invalidateRunners();
   logInfo("registerRunner", { name: name, bib: bib });
   return jsonOk({ message: "Runner " + name + " registered", folderUrl: personFolder.getUrl() });
 }
@@ -429,7 +598,6 @@ function handleRecordCheckpoint(body) {
   const rowIdx = snap.findRowByName(name);
 
   if (rowIdx < 0) {
-    // New runner row — single appendRow.
     const newRow = new Array(snap.headers.length).fill("");
     newRow[0] = name;
     if (bibCol >= 0) newRow[bibCol] = bib;
@@ -438,8 +606,6 @@ function handleRecordCheckpoint(body) {
     sheet.appendRow(newRow);
     logInfo("recordCheckpoint (new)", { name: name, cp: colName });
   } else {
-    // Read full row, mutate, write once — replaces 4 separate setValue
-    // round-trips with one batched setValues.
     const range = sheet.getRange(rowIdx, 1, 1, snap.headers.length);
     const row = range.getValues()[0];
     row[colIdx] = timestamp;
@@ -452,6 +618,8 @@ function handleRecordCheckpoint(body) {
     range.setValues([row]);
     logInfo("recordCheckpoint (update)", { name: name, cp: colName });
   }
+
+  invalidateResults();
   return jsonOk({ message: name + " " + colName + " recorded" });
 }
 
@@ -471,6 +639,8 @@ function handleReportViolation(body) {
 
   const id = "V" + Date.now();
   getSheet(SHEETS.VIOLATIONS).appendRow([id, name, bib, message, imageUrl, timestamp, false, ""]);
+
+  invalidateViolations();
   logInfo("reportViolation", { id: id, name: name });
   return jsonOk({ id: id, message: "Violation reported" });
 }
@@ -487,13 +657,14 @@ function handleVerifyViolation(body) {
   const verifiedAtCol = snap.headerIndex("VerifiedAt");
   if (verifiedCol < 0 || verifiedAtCol < 0) throw httpError("Schema missing Verified columns", "schema_error");
 
-  // Verified + VerifiedAt are adjacent — one setValues call covers both.
   if (verifiedAtCol === verifiedCol + 1) {
     sheet.getRange(rowIdx, verifiedCol + 1, 1, 2).setValues([[true, new Date().toISOString()]]);
   } else {
     sheet.getRange(rowIdx, verifiedCol + 1).setValue(true);
     sheet.getRange(rowIdx, verifiedAtCol + 1).setValue(new Date().toISOString());
   }
+
+  invalidateViolations();
   logInfo("verifyViolation", { id: id });
   return jsonOk({ message: "Violation verified" });
 }
@@ -502,10 +673,13 @@ function handleDeleteViolation(body) {
   requireAdmin(body);
   const id = reqStr(body.id, "id", null, 30);
   const sheet = getSheet(SHEETS.VIOLATIONS);
+  // Single getValues() then findIndex — no per-cell API lookups.
   const snap = readWholeSheet(sheet);
   const rowIdx = snap.findRowById(id);
   if (rowIdx < 0) throw httpError("Violation not found", "not_found");
   sheet.deleteRow(rowIdx);
+
+  invalidateViolations();
   logInfo("deleteViolation", { id: id });
   return jsonOk({ message: "Violation deleted" });
 }
@@ -514,6 +688,7 @@ function handleDeleteRunner(body) {
   requireAdmin(body);
   const name = reqStr(body.name, "name", NAME_PATTERN, 50);
 
+  // Both sheets: in-memory findIndex, delete on hit, no further loop.
   const rSheet = getSheet(SHEETS.RUNNERS);
   const rRow = readWholeSheet(rSheet).findRowByName(name);
   if (rRow > 0) rSheet.deleteRow(rRow);
@@ -521,6 +696,13 @@ function handleDeleteRunner(body) {
   const resSheet = getSheet(SHEETS.RESULTS);
   const resRow = readWholeSheet(resSheet).findRowByName(name);
   if (resRow > 0) resSheet.deleteRow(resRow);
+
+  invalidateRunners();
+  invalidateResults();
+
+  // Drive cleanup runs out-of-band so the admin sees an instant response.
+  // The folder is moved to trash by a one-shot trigger ~2 s later.
+  queueDriveDelete(name);
 
   logInfo("deleteRunner", { name: name });
   return jsonOk({ message: "Runner " + name + " deleted" });
@@ -543,7 +725,6 @@ function handleUpdateRunner(body) {
     rowIdx = sheet.getLastRow();
   }
 
-  // Single read-modify-write for the whole row.
   const range = sheet.getRange(rowIdx, 1, 1, snap.headers.length);
   const row = range.getValues()[0];
 
@@ -568,6 +749,7 @@ function handleUpdateRunner(body) {
   normalizeRowTimeCols(row, snap);
   range.setValues([row]);
 
+  invalidateResults();
   logInfo("updateRunner", { name: name });
   return jsonOk({ message: "Runner " + name + " updated" });
 }
@@ -587,8 +769,6 @@ function _setupAdminToken() {
 /**
  * Folds duplicate top-level Drive folders (e.g. multiple "RunnerFaces"
  * created by races before the lock fix) into a single canonical folder.
- * Picks the oldest as canonical, moves contents in, sets sharing,
- * trashes the empties.
  */
 function _consolidateDuplicateRootFolders() {
   const targets = [RUNNER_FACES_FOLDER, VIOLATION_FOLDER];
@@ -630,14 +810,12 @@ function _consolidateDuplicateRootFolders() {
 }
 
 function _mergeFolderInto(src, dst) {
-  // Files at this level
   const files = src.getFiles();
   while (files.hasNext()) {
     const f = files.next();
     try { f.moveTo(dst); }
     catch (e) { logErr("moveTo failed for file " + f.getId(), e); }
   }
-  // Subfolders — recurse if the destination already has a same-named one
   const subs = src.getFolders();
   while (subs.hasNext()) {
     const sub = subs.next();
@@ -655,13 +833,13 @@ function _mergeFolderInto(src, dst) {
 
 /**
  * Rewrites old viewer-style URLs (.../file/d/ID/view) into embed URLs
- * (uc?export=view&id=ID) across Violations.ImageUrl and Runners.Photo_*
- * columns. Single batched read + write per sheet.
+ * across Violations.ImageUrl and Runners.Photo_* columns. Single
+ * batched read + write per sheet. Invalidates caches at the end.
  */
 function _migrateAllImageUrls() {
   const targets = [
-    { sheet: SHEETS.VIOLATIONS, cols: ["ImageUrl"] },
-    { sheet: SHEETS.RUNNERS, cols: ["Photo_Front", "Photo_Top", "Photo_Bottom", "Photo_Left", "Photo_Right"] },
+    { sheet: SHEETS.VIOLATIONS, cols: ["ImageUrl"], invalidate: invalidateViolations },
+    { sheet: SHEETS.RUNNERS, cols: ["Photo_Front", "Photo_Top", "Photo_Bottom", "Photo_Left", "Photo_Right"], invalidate: invalidateRunners },
   ];
   let total = 0;
   const ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -693,8 +871,8 @@ function _migrateAllImageUrls() {
         }
       }
       if (changed) {
-        // One batched write back per sheet
         sheet.getRange(2, 1, data.length - 1, headers.length).setValues(data.slice(1));
+        target.invalidate();
         total += changed;
       }
       Logger.log("[" + target.sheet + "] rewrote " + changed + " URL(s)");
