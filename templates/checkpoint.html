@@ -385,11 +385,17 @@ async function reportViolation(name,expected,found,video){
 }
 
 // ── SIDEBAR ──
+// HTML escape — the `info` field can carry OCR-extracted text and
+// `name` carries the runner label, both of which must not be inserted
+// raw into innerHTML.
+function esc(s){
+ return String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
 function addSidebarItem(name,info,isViol){
  const list=document.getElementById("sb-list");
  const item=document.createElement("div");
  item.className="sb-item"+(isViol?" violation":"");
- item.innerHTML=`<div class="sb-name${isViol?" viol":""}">${isViol?"🔴":"✅"} ${name}</div><div class="sb-info">${info}</div>`;
+ item.innerHTML=`<div class="sb-name${isViol?" viol":""}">${isViol?"🔴":"✅"} ${esc(name)}</div><div class="sb-info">${esc(info)}</div>`;
  list.prepend(item);
  // Keep max 20
  while(list.children.length>20)list.lastChild.remove();

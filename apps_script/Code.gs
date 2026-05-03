@@ -1,136 +1,115 @@
 // ============================================================
-// AI Runner Timing System — Google Apps Script Backend
+// AI Runner Timing System — Google Apps Script Backend (v3)
 // ============================================================
 // Deploy: Extensions → Apps Script → Deploy → Web app
-//   Execute as: Me | Access: Anyone
+//   Execute as: Me | Access: Anyone with the link
 //
-// FIRST-TIME SETUP:
-//   In the Apps Script editor, select the function dropdown,
-//   pick `_setupAdminToken`, and click Run. This stores the
-//   admin password as a Script Property (not in source).
+// FIRST-TIME SETUP (run from the editor's function dropdown):
+//   1) _setupAdminToken()                  — stores admin password
+//   2) _consolidateDuplicateRootFolders()  — merges duplicate Drive folders
+//   3) _migrateAllImageUrls()              — rewrites old viewer URLs
+// All three are idempotent — re-running is safe.
 // ============================================================
 
-// ─── CONFIG ─────────────────────────────────────────────────
+// ─── CONSTANTS ──────────────────────────────────────────────
 const RUNNER_FACES_FOLDER = "RunnerFaces";
 const VIOLATION_FOLDER = "ViolationEvidence";
-const DEFAULT_ADMIN_TOKEN = "muto67"; // used only if ScriptProperty unset
+const DEFAULT_ADMIN_TOKEN = "muto67";
+const LOCK_TIMEOUT_MS = 10000;
+
+const SHEETS = Object.freeze({
+  RUNNERS: "Runners",
+  RESULTS: "Results",
+  VIOLATIONS: "Violations",
+});
+
+const SCHEMA = Object.freeze({
+  Runners: ["Name", "BibNumber", "Email", "RegisteredAt",
+    "Photo_Front", "Photo_Top", "Photo_Bottom", "Photo_Left", "Photo_Right",
+    "FolderUrl", "Embeddings"],
+  Results: ["Name", "BibNumber", "Start_Time", "CP1_Time", "CP2_Time",
+    "CP3_Time", "CP4_Time", "Finish_Time", "Total_Duration", "UpdatedAt"],
+  Violations: ["ID", "Name", "BibNumber", "Message", "ImageUrl",
+    "Timestamp", "Verified", "VerifiedAt"],
+});
+
+const TIME_COLUMNS = Object.freeze(
+  ["Start_Time", "CP1_Time", "CP2_Time", "CP3_Time", "CP4_Time", "Finish_Time"]
+);
+
+// ─── INPUT VALIDATION PATTERNS ──────────────────────────────
+const NAME_PATTERN = /^[a-zA-Z0-9_\-.]{1,50}$/;
+const BIB_PATTERN = /^[a-zA-Z0-9]{1,10}$/;
+const TIME_PATTERN = /^\d{1,2}:\d{2}(?::\d{2})?$/;
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+// ─── LOGGING ────────────────────────────────────────────────
+function logInfo(msg, data) {
+  Logger.log("INFO  " + msg + (data !== undefined ? " — " + safeStringify(data) : ""));
+}
+function logErr(msg, err) {
+  const detail = err && err.stack ? err.stack : String(err);
+  Logger.log("ERROR " + msg + " — " + detail);
+}
+function safeStringify(v) {
+  try { return JSON.stringify(v).slice(0, 500); }
+  catch (e) { return String(v).slice(0, 500); }
+}
+
+// ─── RESPONSE HELPERS ───────────────────────────────────────
+function jsonOk(data) {
+  const payload = Object.assign({ status: "success" }, data || {});
+  return ContentService
+    .createTextOutput(JSON.stringify(payload))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+function jsonErr(message, code) {
+  return ContentService
+    .createTextOutput(JSON.stringify({
+      status: "error",
+      code: code || "internal_error",
+      message: String(message || "Unknown error"),
+    }))
+    .setMimeType(ContentService.MimeType.JSON);
+}
 
 // ─── ADMIN AUTH ─────────────────────────────────────────────
 function getAdminToken() {
   const t = PropertiesService.getScriptProperties().getProperty("ADMIN_TOKEN");
   return t || DEFAULT_ADMIN_TOKEN;
 }
-
 function requireAdmin(body) {
   if (!body || body.token !== getAdminToken()) {
-    throw new Error("Unauthorized");
+    const e = new Error("Unauthorized");
+    e.code = "unauthorized";
+    throw e;
   }
 }
 
-/**
- * Run ONCE from the Apps Script editor to set the admin password.
- * Edit the string and run again to rotate.
- */
-function _setupAdminToken() {
-  PropertiesService.getScriptProperties().setProperty("ADMIN_TOKEN", "muto67");
+// ─── INPUT VALIDATION ───────────────────────────────────────
+function reqStr(v, name, pattern, maxLen) {
+  if (v == null || v === "") throw httpError(name + " is required", "bad_request");
+  const s = String(v).trim();
+  if (maxLen && s.length > maxLen) throw httpError(name + " exceeds " + maxLen + " chars", "bad_request");
+  if (pattern && !pattern.test(s)) throw httpError(name + " has invalid format", "bad_request");
+  return s;
+}
+function optStr(v, pattern, maxLen) {
+  if (v == null || v === "") return "";
+  const s = String(v).trim();
+  if (maxLen && s.length > maxLen) throw httpError("value exceeds " + maxLen + " chars", "bad_request");
+  if (pattern && !pattern.test(s)) throw httpError("invalid format", "bad_request");
+  return s;
+}
+function httpError(msg, code) {
+  const e = new Error(msg);
+  e.code = code || "bad_request";
+  return e;
 }
 
-// ─── RESPONSE HELPER ────────────────────────────────────────
-function jsonResponse(data) {
-  return ContentService
-    .createTextOutput(JSON.stringify(data))
-    .setMimeType(ContentService.MimeType.JSON);
-}
-
-// ─── SPREADSHEET HELPERS ────────────────────────────────────
-function getSheet(name) {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  let sheet = ss.getSheetByName(name);
-  if (!sheet) {
-    sheet = ss.insertSheet(name);
-    switch (name) {
-      case "Runners":
-        sheet.appendRow(["Name", "BibNumber", "Email", "RegisteredAt",
-          "Photo_Front", "Photo_Top", "Photo_Bottom", "Photo_Left", "Photo_Right",
-          "FolderUrl", "Embeddings"]);
-        break;
-      case "Results":
-        sheet.appendRow(["Name", "BibNumber", "Start_Time", "CP1_Time", "CP2_Time",
-          "CP3_Time", "CP4_Time", "Finish_Time", "Total_Duration", "UpdatedAt"]);
-        // Force time columns (C-I) to plain text so HH:MM:SS isn't
-        // auto-coerced to a Date and round-trips cleanly.
-        sheet.getRange("C:I").setNumberFormat("@");
-        break;
-      case "Violations":
-        sheet.appendRow(["ID", "Name", "BibNumber", "Message", "ImageUrl",
-          "Timestamp", "Verified", "VerifiedAt"]);
-        break;
-    }
-  }
-  return sheet;
-}
-
-function sheetToJson(sheet) {
-  // Use displayValues so Date-coerced cells return their formatted string.
-  const data = sheet.getDataRange().getDisplayValues();
-  if (data.length <= 1) return [];
-  const headers = data[0];
-  const rows = [];
-  for (let i = 1; i < data.length; i++) {
-    const obj = {};
-    for (let j = 0; j < headers.length; j++) {
-      obj[headers[j]] = data[i][j];
-    }
-    rows.push(obj);
-  }
-  return rows;
-}
-
-function findRowByName(sheet, name) {
-  const data = sheet.getDataRange().getValues();
-  for (let i = 1; i < data.length; i++) {
-    if (String(data[i][0]) === String(name)) return i + 1;
-  }
-  return -1;
-}
-
-function findRowById(sheet, id) {
-  const data = sheet.getDataRange().getValues();
-  for (let i = 1; i < data.length; i++) {
-    if (String(data[i][0]) === String(id)) return i + 1;
-  }
-  return -1;
-}
-
-function getColumnIndex(sheet, colName) {
-  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
-  return headers.indexOf(colName);
-}
-
-// ─── GOOGLE DRIVE HELPERS ───────────────────────────────────
-function getOrCreateFolder(parentFolder, name) {
-  const folders = parentFolder.getFoldersByName(name);
-  if (folders.hasNext()) return folders.next();
-  return parentFolder.createFolder(name);
-}
-
-function getRootFolder(name) {
-  return getOrCreateFolder(DriveApp.getRootFolder(), name);
-}
-
-function saveBase64Image(folder, filename, base64Data) {
-  let raw = base64Data;
-  if (raw.indexOf(",") > -1) raw = raw.split(",")[1];
-  const decoded = Utilities.base64Decode(raw);
-  const blob = Utilities.newBlob(decoded, "image/jpeg", filename);
-  const file = folder.createFile(blob);
-  file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
-  return file.getUrl();
-}
-
-// ─── DURATION CALCULATOR ────────────────────────────────────
-// Accepts strings ("HH:MM:SS" or "HH:MM") OR Date objects (Sheets may
-// coerce time strings into time-of-day Dates on older sheets).
+// ─── TIME / DURATION HELPERS ────────────────────────────────
+// Sheets sometimes coerces "HH:MM:SS" strings to time-of-day Dates on
+// columns that aren't text-formatted; this handles both shapes.
 function parseTimeToSeconds(v) {
   if (v == null || v === "") return null;
   if (v instanceof Date) {
@@ -142,7 +121,6 @@ function parseTimeToSeconds(v) {
   if (!m) return null;
   return parseInt(m[1], 10) * 3600 + parseInt(m[2], 10) * 60 + parseInt(m[3] || "0", 10);
 }
-
 function calcDuration(cp1, cp2) {
   const sec1 = parseTimeToSeconds(cp1);
   const sec2 = parseTimeToSeconds(cp2);
@@ -153,279 +131,576 @@ function calcDuration(cp1, cp2) {
   const secs = diff % 60;
   return mins + ":" + String(secs).padStart(2, "0");
 }
+// Pre-write coercion: any Date in a time column becomes "HH:MM:SS",
+// so it round-trips through a text-formatted column without surprises.
+function normalizeTimeStr(v) {
+  if (v == null || v === "") return "";
+  if (v instanceof Date) {
+    const pad = function (n) { return String(n).padStart(2, "0"); };
+    return pad(v.getHours()) + ":" + pad(v.getMinutes()) + ":" + pad(v.getSeconds());
+  }
+  return String(v);
+}
+function normalizeRowTimeCols(row, snap) {
+  for (let i = 0; i < TIME_COLUMNS.length; i++) {
+    const idx = snap.headerIndex(TIME_COLUMNS[i]);
+    if (idx >= 0) row[idx] = normalizeTimeStr(row[idx]);
+  }
+}
+
+// ─── SPREADSHEET HELPERS ────────────────────────────────────
+function getSheet(name) {
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    let sheet = ss.getSheetByName(name);
+    if (!sheet) {
+      sheet = ss.insertSheet(name);
+      const headers = SCHEMA[name];
+      if (headers) {
+        sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+        if (name === SHEETS.RESULTS) {
+          // Force time columns (C-I) to plain text — prevents Sheets from
+          // auto-coercing "HH:MM:SS" to a fraction-of-day Date.
+          sheet.getRange("C:I").setNumberFormat("@");
+        }
+      }
+    }
+    return sheet;
+  } catch (e) {
+    logErr("getSheet(" + name + ")", e);
+    throw httpError("Spreadsheet access failed: " + e.message, "spreadsheet_error");
+  }
+}
+
+// Single-read snapshot — much cheaper than re-querying for every lookup.
+function readWholeSheet(sheet) {
+  const all = sheet.getDataRange().getValues();
+  return {
+    headers: all[0] || [],
+    values: all.slice(1),
+    headerIndex: function (col) {
+      for (let i = 0; i < this.headers.length; i++) {
+        if (this.headers[i] === col) return i;
+      }
+      return -1;
+    },
+    findRowByName: function (name) {
+      const target = String(name);
+      for (let i = 0; i < this.values.length; i++) {
+        if (String(this.values[i][0]) === target) return i + 2; // +1 header, +1 1-indexed
+      }
+      return -1;
+    },
+    findRowById: function (id) {
+      const target = String(id);
+      for (let i = 0; i < this.values.length; i++) {
+        if (String(this.values[i][0]) === target) return i + 2;
+      }
+      return -1;
+    },
+  };
+}
+
+// JSON projection for read-only endpoints. getDisplayValues so any
+// Date-typed cells round-trip as their formatted string.
+function readSheetAsJson(sheet) {
+  const data = sheet.getDataRange().getDisplayValues();
+  if (data.length <= 1) return [];
+  const headers = data[0];
+  const rows = new Array(data.length - 1);
+  for (let i = 1; i < data.length; i++) {
+    const obj = {};
+    for (let j = 0; j < headers.length; j++) obj[headers[j]] = data[i][j];
+    rows[i - 1] = obj;
+  }
+  return rows;
+}
+
+// ─── DRIVE HELPERS ──────────────────────────────────────────
+const DRIVE_EMBED_URL = function (id) {
+  return "https://drive.google.com/uc?export=view&id=" + id;
+};
+
+// Idempotent + race-safe folder creation. The script-wide LockService
+// serializes concurrent registerRunner / reportViolation calls so two
+// simultaneous requests can't each create their own "RunnerFaces"
+// folder.
+function getOrCreateFolder(parentFolder, name) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(LOCK_TIMEOUT_MS);
+  try {
+    const it = parentFolder.getFoldersByName(name);
+    let folder;
+    if (it.hasNext()) {
+      folder = it.next();
+      if (it.hasNext()) {
+        logInfo("Duplicate folder detected; using first. Run _consolidateDuplicateRootFolders().",
+          { parent: parentFolder.getName(), name: name, id: folder.getId() });
+      }
+    } else {
+      folder = parentFolder.createFolder(name);
+      try {
+        folder.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+      } catch (e) {
+        // Workspace orgs can disable public sharing — we still want the
+        // folder, just log the limitation.
+        logErr("setSharing failed for new folder '" + name + "'", e);
+      }
+    }
+    return folder;
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function getRootFolder(name) {
+  return getOrCreateFolder(DriveApp.getRootFolder(), name);
+}
+
+function saveBase64Image(folder, filename, base64Data) {
+  if (!base64Data || typeof base64Data !== "string") {
+    throw httpError("Image data missing", "bad_request");
+  }
+  let raw = base64Data;
+  const commaIdx = raw.indexOf(",");
+  if (commaIdx > -1) raw = raw.substring(commaIdx + 1);
+  let decoded;
+  try {
+    decoded = Utilities.base64Decode(raw);
+  } catch (e) {
+    throw httpError("Image data is not valid base64", "bad_request");
+  }
+  let file;
+  try {
+    const blob = Utilities.newBlob(decoded, "image/jpeg", filename);
+    file = folder.createFile(blob);
+  } catch (e) {
+    logErr("Drive createFile failed for " + filename, e);
+    throw httpError("Failed to upload image: " + e.message, "drive_error");
+  }
+  try {
+    file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+  } catch (e) {
+    logErr("setSharing failed for file " + filename, e);
+    // Continue — the file exists; the URL will only fail to embed if
+    // the org policy blocks public sharing entirely.
+  }
+  // ALWAYS the embed URL — never .../file/d/.../view, which can't be
+  // rendered inside an <img> tag.
+  return DRIVE_EMBED_URL(file.getId());
+}
 
 // ─── GET HANDLER ────────────────────────────────────────────
 function doGet(e) {
-  const action = (e.parameter && e.parameter.action) || "";
+  const action = (e && e.parameter && e.parameter.action) || "";
   try {
     switch (action) {
       case "getResults":
-        return jsonResponse({ status: "success", data: sheetToJson(getSheet("Results")) });
+        return jsonOk({ data: readSheetAsJson(getSheet(SHEETS.RESULTS)) });
 
       case "getRunners":
-        return jsonResponse({ status: "success", data: sheetToJson(getSheet("Runners")) });
+        return jsonOk({ data: readSheetAsJson(getSheet(SHEETS.RUNNERS)) });
 
       case "getViolations": {
-        const all = sheetToJson(getSheet("Violations"));
-        const sorted = all.sort((a, b) => String(b.Timestamp).localeCompare(String(a.Timestamp)));
-        return jsonResponse({ status: "success", data: sorted.slice(0, 20) });
+        const all = readSheetAsJson(getSheet(SHEETS.VIOLATIONS));
+        all.sort(function (a, b) { return String(b.Timestamp).localeCompare(String(a.Timestamp)); });
+        return jsonOk({ data: all.slice(0, 20) });
       }
 
       case "getVerifiedViolations": {
-        const all = sheetToJson(getSheet("Violations"));
-        const verified = all.filter(v => String(v.Verified).toLowerCase() === "true");
-        const sorted = verified.sort((a, b) => String(b.Timestamp).localeCompare(String(a.Timestamp)));
-        return jsonResponse({ status: "success", data: sorted.slice(0, 20) });
+        const all = readSheetAsJson(getSheet(SHEETS.VIOLATIONS));
+        const verified = all.filter(function (v) { return String(v.Verified).toLowerCase() === "true"; });
+        verified.sort(function (a, b) { return String(b.Timestamp).localeCompare(String(a.Timestamp)); });
+        return jsonOk({ data: verified.slice(0, 20) });
       }
 
       default:
-        return jsonResponse({ status: "error", message: "Unknown action: " + action });
+        return jsonErr("Unknown action: " + action, "bad_request");
     }
   } catch (err) {
-    return jsonResponse({ status: "error", message: err.toString() });
+    logErr("doGet[" + action + "]", err);
+    return jsonErr(err.message, err.code);
   }
 }
 
 // ─── POST HANDLER ───────────────────────────────────────────
 function doPost(e) {
+  let body;
   try {
-    const body = JSON.parse(e.postData.contents);
-    const action = body.action || "";
-
+    body = JSON.parse(e.postData.contents);
+  } catch (err) {
+    logErr("doPost — JSON parse", err);
+    return jsonErr("Body is not valid JSON", "bad_request");
+  }
+  const action = body.action || "";
+  try {
     switch (action) {
-
-      // ── Verify admin password (no destructive effect) ────
       case "verifyAdmin": {
-        const pw = String(body.password || "");
-        return jsonResponse({ status: pw === getAdminToken() ? "success" : "error" });
+        const ok = String(body.password || "") === getAdminToken();
+        return ok ? jsonOk({}) : jsonErr("Invalid password", "unauthorized");
       }
-
-      // ── Register Runner ──────────────────────────────────
-      case "registerRunner": {
-        const name = body.name;
-        const bib = body.bib || "";
-        const email = body.email || "";
-        const timestamp = body.timestamp || new Date().toISOString();
-        if (!name) return jsonResponse({ status: "error", message: "Name is required" });
-
-        const rootFolder = getRootFolder(RUNNER_FACES_FOLDER);
-        const personFolder = getOrCreateFolder(rootFolder, name);
-
-        const angles = ["front", "top", "bottom", "left", "right"];
-        const photoUrls = {};
-        for (const angle of angles) {
-          const key = "photo_" + angle;
-          if (body[key]) {
-            const filename = name + "_" + angle + "_" + Date.now() + ".jpg";
-            photoUrls[angle] = saveBase64Image(personFolder, filename, body[key]);
-          } else {
-            photoUrls[angle] = "";
-          }
-        }
-
-        // Optional embeddings in same call (atomic registration)
-        let embStr = "";
-        if (body.embeddings) {
-          embStr = typeof body.embeddings === "string"
-            ? body.embeddings : JSON.stringify(body.embeddings);
-        }
-
-        const sheet = getSheet("Runners");
-        const existingRow = findRowByName(sheet, name);
-        const rowData = [
-          name, bib, email, timestamp,
-          photoUrls.front, photoUrls.top, photoUrls.bottom,
-          photoUrls.left, photoUrls.right,
-          personFolder.getUrl(), embStr,
-        ];
-        if (existingRow > 0) {
-          sheet.getRange(existingRow, 1, 1, rowData.length).setValues([rowData]);
-        } else {
-          sheet.appendRow(rowData);
-        }
-
-        return jsonResponse({
-          status: "success",
-          message: "Runner " + name + " registered",
-          folderUrl: personFolder.getUrl(),
-        });
-      }
-
-      // ── Save Embeddings (kept for backward compat) ───────
-      case "saveEmbeddings": {
-        const name = body.name;
-        const embeddings = body.embeddings;
-        if (!name || !embeddings) {
-          return jsonResponse({ status: "error", message: "Name and embeddings required" });
-        }
-        const sheet = getSheet("Runners");
-        const row = findRowByName(sheet, name);
-        if (row < 0) return jsonResponse({ status: "error", message: "Runner not found: " + name });
-        const colIdx = getColumnIndex(sheet, "Embeddings");
-        if (colIdx < 0) return jsonResponse({ status: "error", message: "Embeddings column not found" });
-        const embStr = typeof embeddings === "string" ? embeddings : JSON.stringify(embeddings);
-        sheet.getRange(row, colIdx + 1).setValue(embStr);
-        return jsonResponse({ status: "success", message: "Embeddings saved for " + name });
-      }
-
-      // ── Record Checkpoint ────────────────────────────────
-      case "recordCheckpoint": {
-        const name = body.name;
-        const cpId = body.checkpoint_id;
-        const timestamp = body.timestamp;
-        const bib = body.bib || "";
-        if (!name || cpId === undefined || cpId === null || !timestamp) {
-          return jsonResponse({ status: "error", message: "Missing fields" });
-        }
-
-        const sheet = getSheet("Results");
-        const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
-
-        let colName;
-        if (cpId === "start") colName = "Start_Time";
-        else if (cpId === "finish") colName = "Finish_Time";
-        else colName = "CP" + cpId + "_Time";
-
-        const colIdx = headers.indexOf(colName);
-        if (colIdx < 0) return jsonResponse({ status: "error", message: "Column not found: " + colName });
-
-        let row = findRowByName(sheet, name);
-        if (row < 0) {
-          const newRow = new Array(headers.length).fill("");
-          newRow[0] = name;
-          newRow[1] = bib;
-          newRow[colIdx] = timestamp;
-          newRow[headers.indexOf("UpdatedAt")] = new Date().toISOString();
-          sheet.appendRow(newRow);
-        } else {
-          sheet.getRange(row, colIdx + 1).setValue(timestamp);
-          if (bib) sheet.getRange(row, 2).setValue(bib);
-
-          const startCol = headers.indexOf("Start_Time");
-          const finishCol = headers.indexOf("Finish_Time");
-          const durCol = headers.indexOf("Total_Duration");
-          if (startCol >= 0 && finishCol >= 0 && durCol >= 0) {
-            const startTime = sheet.getRange(row, startCol + 1).getValue();
-            const finishTime = sheet.getRange(row, finishCol + 1).getValue();
-            if (startTime && finishTime) {
-              sheet.getRange(row, durCol + 1).setValue(calcDuration(startTime, finishTime));
-            }
-          }
-          sheet.getRange(row, headers.indexOf("UpdatedAt") + 1).setValue(new Date().toISOString());
-        }
-
-        return jsonResponse({ status: "success", message: name + " " + colName + " recorded" });
-      }
-
-      // ── Report Violation ─────────────────────────────────
-      case "reportViolation": {
-        const name = body.name || "Unknown";
-        const bib = body.bib || "";
-        const message = body.message || "";
-        const timestamp = body.timestamp || new Date().toISOString();
-        const imageBase64 = body.image || "";
-
-        let imageUrl = "";
-        if (imageBase64) {
-          const folder = getRootFolder(VIOLATION_FOLDER);
-          const filename = "violation_" + name + "_" + Date.now() + ".jpg";
-          imageUrl = saveBase64Image(folder, filename, imageBase64);
-        }
-
-        const id = "V" + Date.now();
-        getSheet("Violations").appendRow([id, name, bib, message, imageUrl, timestamp, false, ""]);
-        return jsonResponse({ status: "success", message: "Violation reported", id: id });
-      }
-
-      // ── Verify Violation (admin) ─────────────────────────
-      case "verifyViolation": {
-        requireAdmin(body);
-        const id = body.id;
-        if (!id) return jsonResponse({ status: "error", message: "ID required" });
-
-        const sheet = getSheet("Violations");
-        const row = findRowById(sheet, id);
-        if (row < 0) return jsonResponse({ status: "error", message: "Violation not found" });
-
-        const verifiedCol = getColumnIndex(sheet, "Verified");
-        const verifiedAtCol = getColumnIndex(sheet, "VerifiedAt");
-        sheet.getRange(row, verifiedCol + 1).setValue(true);
-        sheet.getRange(row, verifiedAtCol + 1).setValue(new Date().toISOString());
-        return jsonResponse({ status: "success", message: "Violation verified" });
-      }
-
-      // ── Delete Violation (admin) ─────────────────────────
-      case "deleteViolation": {
-        requireAdmin(body);
-        const id = body.id;
-        if (!id) return jsonResponse({ status: "error", message: "ID required" });
-        const sheet = getSheet("Violations");
-        const row = findRowById(sheet, id);
-        if (row < 0) return jsonResponse({ status: "error", message: "Violation not found" });
-        sheet.deleteRow(row);
-        return jsonResponse({ status: "success", message: "Violation deleted" });
-      }
-
-      // ── Delete Runner (admin) ────────────────────────────
-      case "deleteRunner": {
-        requireAdmin(body);
-        const name = body.name;
-        if (!name) return jsonResponse({ status: "error", message: "Name required" });
-
-        const rSheet = getSheet("Runners");
-        const rRow = findRowByName(rSheet, name);
-        if (rRow > 0) rSheet.deleteRow(rRow);
-
-        const resSheet = getSheet("Results");
-        const resRow = findRowByName(resSheet, name);
-        if (resRow > 0) resSheet.deleteRow(resRow);
-
-        return jsonResponse({ status: "success", message: "Runner " + name + " deleted" });
-      }
-
-      // ── Update Runner (admin) ────────────────────────────
-      case "updateRunner": {
-        requireAdmin(body);
-        const name = body.name;
-        if (!name) return jsonResponse({ status: "error", message: "Name required" });
-
-        const sheet = getSheet("Results");
-        const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
-        let row = findRowByName(sheet, name);
-        if (row < 0) {
-          const newRow = new Array(headers.length).fill("");
-          newRow[0] = name;
-          newRow[1] = body.bib || "";
-          sheet.appendRow(newRow);
-          row = sheet.getLastRow();
-        }
-
-        const timeFields = ["Start_Time", "CP1_Time", "CP2_Time", "CP3_Time", "CP4_Time", "Finish_Time"];
-        for (const field of timeFields) {
-          if (body[field] !== undefined) {
-            const col = headers.indexOf(field);
-            if (col >= 0) sheet.getRange(row, col + 1).setValue(body[field]);
-          }
-        }
-
-        const startCol = headers.indexOf("Start_Time");
-        const finishCol = headers.indexOf("Finish_Time");
-        const durCol = headers.indexOf("Total_Duration");
-        if (startCol >= 0 && finishCol >= 0 && durCol >= 0) {
-          const s = sheet.getRange(row, startCol + 1).getValue();
-          const f = sheet.getRange(row, finishCol + 1).getValue();
-          if (s && f) sheet.getRange(row, durCol + 1).setValue(calcDuration(s, f));
-        }
-        const updCol = headers.indexOf("UpdatedAt");
-        if (updCol >= 0) sheet.getRange(row, updCol + 1).setValue(new Date().toISOString());
-
-        return jsonResponse({ status: "success", message: "Runner " + name + " updated" });
-      }
-
+      case "registerRunner":   return handleRegisterRunner(body);
+      case "recordCheckpoint": return handleRecordCheckpoint(body);
+      case "reportViolation":  return handleReportViolation(body);
+      case "verifyViolation":  return handleVerifyViolation(body);
+      case "deleteViolation":  return handleDeleteViolation(body);
+      case "deleteRunner":     return handleDeleteRunner(body);
+      case "updateRunner":     return handleUpdateRunner(body);
       default:
-        return jsonResponse({ status: "error", message: "Unknown action: " + action });
+        return jsonErr("Unknown action: " + action, "bad_request");
     }
   } catch (err) {
-    return jsonResponse({ status: "error", message: err.toString() });
+    logErr("doPost[" + action + "]", err);
+    return jsonErr(err.message, err.code);
   }
+}
+
+// ─── ACTION HANDLERS ────────────────────────────────────────
+
+function handleRegisterRunner(body) {
+  const name = reqStr(body.name, "name", NAME_PATTERN, 50);
+  const bib = optStr(body.bib, BIB_PATTERN, 10);
+  const email = optStr(body.email, null, 200);
+  if (email && !EMAIL_PATTERN.test(email)) throw httpError("email has invalid format", "bad_request");
+  const timestamp = optStr(body.timestamp, null, 50) || new Date().toISOString();
+
+  const root = getRootFolder(RUNNER_FACES_FOLDER);
+  const personFolder = getOrCreateFolder(root, name);
+
+  const angles = ["front", "top", "bottom", "left", "right"];
+  const photoUrls = { front: "", top: "", bottom: "", left: "", right: "" };
+  for (let i = 0; i < angles.length; i++) {
+    const angle = angles[i];
+    const key = "photo_" + angle;
+    if (body[key]) {
+      const filename = name + "_" + angle + "_" + Date.now() + ".jpg";
+      photoUrls[angle] = saveBase64Image(personFolder, filename, body[key]);
+    }
+  }
+
+  let embStr = "";
+  if (body.embeddings) {
+    embStr = typeof body.embeddings === "string"
+      ? body.embeddings
+      : JSON.stringify(body.embeddings);
+  }
+
+  const sheet = getSheet(SHEETS.RUNNERS);
+  const snap = readWholeSheet(sheet);
+  const rowIdx = snap.findRowByName(name);
+  const rowData = [
+    name, bib, email, timestamp,
+    photoUrls.front, photoUrls.top, photoUrls.bottom,
+    photoUrls.left, photoUrls.right,
+    personFolder.getUrl(), embStr,
+  ];
+  // One write either way — append or batched setValues.
+  if (rowIdx > 0) {
+    sheet.getRange(rowIdx, 1, 1, rowData.length).setValues([rowData]);
+  } else {
+    sheet.appendRow(rowData);
+  }
+
+  logInfo("registerRunner", { name: name, bib: bib });
+  return jsonOk({ message: "Runner " + name + " registered", folderUrl: personFolder.getUrl() });
+}
+
+function handleRecordCheckpoint(body) {
+  const name = reqStr(body.name, "name", NAME_PATTERN, 50);
+  const cpId = body.checkpoint_id;
+  if (cpId == null) throw httpError("checkpoint_id is required", "bad_request");
+  const timestamp = reqStr(body.timestamp, "timestamp", TIME_PATTERN, 8);
+  const bib = optStr(body.bib, BIB_PATTERN, 10);
+
+  const colName = cpId === "start" ? "Start_Time"
+    : cpId === "finish" ? "Finish_Time"
+    : "CP" + cpId + "_Time";
+
+  const sheet = getSheet(SHEETS.RESULTS);
+  const snap = readWholeSheet(sheet);
+  const colIdx = snap.headerIndex(colName);
+  if (colIdx < 0) throw httpError("Column not found: " + colName, "schema_error");
+  const startCol = snap.headerIndex("Start_Time");
+  const finishCol = snap.headerIndex("Finish_Time");
+  const durCol = snap.headerIndex("Total_Duration");
+  const updCol = snap.headerIndex("UpdatedAt");
+  const bibCol = snap.headerIndex("BibNumber");
+
+  const rowIdx = snap.findRowByName(name);
+
+  if (rowIdx < 0) {
+    // New runner row — single appendRow.
+    const newRow = new Array(snap.headers.length).fill("");
+    newRow[0] = name;
+    if (bibCol >= 0) newRow[bibCol] = bib;
+    newRow[colIdx] = timestamp;
+    if (updCol >= 0) newRow[updCol] = new Date().toISOString();
+    sheet.appendRow(newRow);
+    logInfo("recordCheckpoint (new)", { name: name, cp: colName });
+  } else {
+    // Read full row, mutate, write once — replaces 4 separate setValue
+    // round-trips with one batched setValues.
+    const range = sheet.getRange(rowIdx, 1, 1, snap.headers.length);
+    const row = range.getValues()[0];
+    row[colIdx] = timestamp;
+    if (bib && bibCol >= 0) row[bibCol] = bib;
+    if (durCol >= 0 && row[startCol] && row[finishCol]) {
+      row[durCol] = calcDuration(row[startCol], row[finishCol]);
+    }
+    if (updCol >= 0) row[updCol] = new Date().toISOString();
+    normalizeRowTimeCols(row, snap);
+    range.setValues([row]);
+    logInfo("recordCheckpoint (update)", { name: name, cp: colName });
+  }
+  return jsonOk({ message: name + " " + colName + " recorded" });
+}
+
+function handleReportViolation(body) {
+  const name = optStr(body.name, NAME_PATTERN, 50) || "Unknown";
+  const bib = optStr(body.bib, BIB_PATTERN, 10);
+  const message = optStr(body.message, null, 500);
+  const timestamp = optStr(body.timestamp, null, 50) || new Date().toISOString();
+  const imageBase64 = body.image || "";
+
+  let imageUrl = "";
+  if (imageBase64) {
+    const folder = getRootFolder(VIOLATION_FOLDER);
+    const filename = "violation_" + name + "_" + Date.now() + ".jpg";
+    imageUrl = saveBase64Image(folder, filename, imageBase64);
+  }
+
+  const id = "V" + Date.now();
+  getSheet(SHEETS.VIOLATIONS).appendRow([id, name, bib, message, imageUrl, timestamp, false, ""]);
+  logInfo("reportViolation", { id: id, name: name });
+  return jsonOk({ id: id, message: "Violation reported" });
+}
+
+function handleVerifyViolation(body) {
+  requireAdmin(body);
+  const id = reqStr(body.id, "id", null, 30);
+  const sheet = getSheet(SHEETS.VIOLATIONS);
+  const snap = readWholeSheet(sheet);
+  const rowIdx = snap.findRowById(id);
+  if (rowIdx < 0) throw httpError("Violation not found", "not_found");
+
+  const verifiedCol = snap.headerIndex("Verified");
+  const verifiedAtCol = snap.headerIndex("VerifiedAt");
+  if (verifiedCol < 0 || verifiedAtCol < 0) throw httpError("Schema missing Verified columns", "schema_error");
+
+  // Verified + VerifiedAt are adjacent — one setValues call covers both.
+  if (verifiedAtCol === verifiedCol + 1) {
+    sheet.getRange(rowIdx, verifiedCol + 1, 1, 2).setValues([[true, new Date().toISOString()]]);
+  } else {
+    sheet.getRange(rowIdx, verifiedCol + 1).setValue(true);
+    sheet.getRange(rowIdx, verifiedAtCol + 1).setValue(new Date().toISOString());
+  }
+  logInfo("verifyViolation", { id: id });
+  return jsonOk({ message: "Violation verified" });
+}
+
+function handleDeleteViolation(body) {
+  requireAdmin(body);
+  const id = reqStr(body.id, "id", null, 30);
+  const sheet = getSheet(SHEETS.VIOLATIONS);
+  const snap = readWholeSheet(sheet);
+  const rowIdx = snap.findRowById(id);
+  if (rowIdx < 0) throw httpError("Violation not found", "not_found");
+  sheet.deleteRow(rowIdx);
+  logInfo("deleteViolation", { id: id });
+  return jsonOk({ message: "Violation deleted" });
+}
+
+function handleDeleteRunner(body) {
+  requireAdmin(body);
+  const name = reqStr(body.name, "name", NAME_PATTERN, 50);
+
+  const rSheet = getSheet(SHEETS.RUNNERS);
+  const rRow = readWholeSheet(rSheet).findRowByName(name);
+  if (rRow > 0) rSheet.deleteRow(rRow);
+
+  const resSheet = getSheet(SHEETS.RESULTS);
+  const resRow = readWholeSheet(resSheet).findRowByName(name);
+  if (resRow > 0) resSheet.deleteRow(resRow);
+
+  logInfo("deleteRunner", { name: name });
+  return jsonOk({ message: "Runner " + name + " deleted" });
+}
+
+function handleUpdateRunner(body) {
+  requireAdmin(body);
+  const name = reqStr(body.name, "name", NAME_PATTERN, 50);
+
+  const sheet = getSheet(SHEETS.RESULTS);
+  const snap = readWholeSheet(sheet);
+  let rowIdx = snap.findRowByName(name);
+
+  if (rowIdx < 0) {
+    const newRow = new Array(snap.headers.length).fill("");
+    newRow[0] = name;
+    const bibCol = snap.headerIndex("BibNumber");
+    if (bibCol >= 0) newRow[bibCol] = optStr(body.bib, BIB_PATTERN, 10);
+    sheet.appendRow(newRow);
+    rowIdx = sheet.getLastRow();
+  }
+
+  // Single read-modify-write for the whole row.
+  const range = sheet.getRange(rowIdx, 1, 1, snap.headers.length);
+  const row = range.getValues()[0];
+
+  for (let i = 0; i < TIME_COLUMNS.length; i++) {
+    const f = TIME_COLUMNS[i];
+    if (body[f] !== undefined) {
+      const v = optStr(body[f], TIME_PATTERN, 8);
+      const c = snap.headerIndex(f);
+      if (c >= 0) row[c] = v;
+    }
+  }
+
+  const startCol = snap.headerIndex("Start_Time");
+  const finishCol = snap.headerIndex("Finish_Time");
+  const durCol = snap.headerIndex("Total_Duration");
+  if (startCol >= 0 && finishCol >= 0 && durCol >= 0 && row[startCol] && row[finishCol]) {
+    row[durCol] = calcDuration(row[startCol], row[finishCol]);
+  }
+  const updCol = snap.headerIndex("UpdatedAt");
+  if (updCol >= 0) row[updCol] = new Date().toISOString();
+
+  normalizeRowTimeCols(row, snap);
+  range.setValues([row]);
+
+  logInfo("updateRunner", { name: name });
+  return jsonOk({ message: "Runner " + name + " updated" });
+}
+
+// ============================================================
+// ONE-OFF ADMIN HELPERS — run from the editor's function dropdown.
+// All idempotent: safe to re-run.
+// ============================================================
+
+/** Stores the admin password. Edit the literal below before running. */
+function _setupAdminToken() {
+  const pw = "muto67";
+  PropertiesService.getScriptProperties().setProperty("ADMIN_TOKEN", pw);
+  Logger.log("Admin token set.");
+}
+
+/**
+ * Folds duplicate top-level Drive folders (e.g. multiple "RunnerFaces"
+ * created by races before the lock fix) into a single canonical folder.
+ * Picks the oldest as canonical, moves contents in, sets sharing,
+ * trashes the empties.
+ */
+function _consolidateDuplicateRootFolders() {
+  const targets = [RUNNER_FACES_FOLDER, VIOLATION_FOLDER];
+  for (let t = 0; t < targets.length; t++) {
+    const name = targets[t];
+    try {
+      const root = DriveApp.getRootFolder();
+      const matches = [];
+      const it = root.getFoldersByName(name);
+      while (it.hasNext()) matches.push(it.next());
+
+      if (matches.length === 0) {
+        Logger.log("[" + name + "] no folder found.");
+        continue;
+      }
+      if (matches.length === 1) {
+        Logger.log("[" + name + "] 1 folder; ensuring sharing.");
+        try { matches[0].setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW); }
+        catch (e) { logErr("setSharing failed for " + name, e); }
+        continue;
+      }
+
+      matches.sort(function (a, b) { return a.getDateCreated() - b.getDateCreated(); });
+      const canonical = matches[0];
+      Logger.log("[" + name + "] " + matches.length + " duplicates found, canonical=" + canonical.getId());
+      try { canonical.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW); }
+      catch (e) { logErr("setSharing failed for canonical " + name, e); }
+
+      for (let i = 1; i < matches.length; i++) {
+        const dup = matches[i];
+        _mergeFolderInto(dup, canonical);
+        dup.setTrashed(true);
+        Logger.log("  trashed duplicate " + dup.getId());
+      }
+    } catch (err) {
+      logErr("_consolidateDuplicateRootFolders[" + name + "]", err);
+    }
+  }
+}
+
+function _mergeFolderInto(src, dst) {
+  // Files at this level
+  const files = src.getFiles();
+  while (files.hasNext()) {
+    const f = files.next();
+    try { f.moveTo(dst); }
+    catch (e) { logErr("moveTo failed for file " + f.getId(), e); }
+  }
+  // Subfolders — recurse if the destination already has a same-named one
+  const subs = src.getFolders();
+  while (subs.hasNext()) {
+    const sub = subs.next();
+    const subName = sub.getName();
+    const existing = dst.getFoldersByName(subName);
+    if (existing.hasNext()) {
+      _mergeFolderInto(sub, existing.next());
+      sub.setTrashed(true);
+    } else {
+      try { sub.moveTo(dst); }
+      catch (e) { logErr("moveTo failed for subfolder " + sub.getId(), e); }
+    }
+  }
+}
+
+/**
+ * Rewrites old viewer-style URLs (.../file/d/ID/view) into embed URLs
+ * (uc?export=view&id=ID) across Violations.ImageUrl and Runners.Photo_*
+ * columns. Single batched read + write per sheet.
+ */
+function _migrateAllImageUrls() {
+  const targets = [
+    { sheet: SHEETS.VIOLATIONS, cols: ["ImageUrl"] },
+    { sheet: SHEETS.RUNNERS, cols: ["Photo_Front", "Photo_Top", "Photo_Bottom", "Photo_Left", "Photo_Right"] },
+  ];
+  let total = 0;
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  for (let t = 0; t < targets.length; t++) {
+    const target = targets[t];
+    const sheet = ss.getSheetByName(target.sheet);
+    if (!sheet) continue;
+    try {
+      const range = sheet.getDataRange();
+      const data = range.getValues();
+      if (data.length <= 1) continue;
+      const headers = data[0];
+      const colIdx = target.cols
+        .map(function (c) { return headers.indexOf(c); })
+        .filter(function (i) { return i >= 0; });
+      if (!colIdx.length) continue;
+
+      let changed = 0;
+      for (let r = 1; r < data.length; r++) {
+        for (let k = 0; k < colIdx.length; k++) {
+          const c = colIdx[k];
+          const url = String(data[r][c] || "");
+          if (!url || url.indexOf("uc?export=view") >= 0) continue;
+          const m = url.match(/[-\w]{25,}/);
+          if (m) {
+            data[r][c] = "https://drive.google.com/uc?export=view&id=" + m[0];
+            changed++;
+          }
+        }
+      }
+      if (changed) {
+        // One batched write back per sheet
+        sheet.getRange(2, 1, data.length - 1, headers.length).setValues(data.slice(1));
+        total += changed;
+      }
+      Logger.log("[" + target.sheet + "] rewrote " + changed + " URL(s)");
+    } catch (err) {
+      logErr("_migrateAllImageUrls[" + target.sheet + "]", err);
+    }
+  }
+  Logger.log("Total URLs migrated: " + total);
 }
