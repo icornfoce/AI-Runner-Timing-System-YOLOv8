@@ -15,8 +15,9 @@
 //     — typical response is now a single in-memory hit (sub-100 ms).
 //   • Writes invalidate the relevant cache keys so admin actions are
 //     visible to the dashboard immediately (no 12 s polling lag).
-//   • Drive folder cleanup on deleteRunner runs out-of-band via a
-//     time-driven trigger so the admin UI returns instantly.
+//   • Drive folder/file cleanup on deleteRunner / deleteViolation is
+//     synchronous and isolated in try-catch — a Drive API failure is
+//     logged but never blocks the sheet row deletion.
 // ============================================================
 
 // ─── CONSTANTS ──────────────────────────────────────────────
@@ -36,12 +37,6 @@ const CACHE_KEYS = Object.freeze({
   VIOLATIONS: "CACHE_VIOLATIONS",
   VIOLATIONS_VERIFIED: "CACHE_VIOLATIONS_VERIFIED",
 });
-
-// Async Drive deletion — queue stored in ScriptProperties, drained
-// by a self-cleaning trigger so admin requests return immediately.
-const DRIVE_DELETE_QUEUE_KEY = "DRIVE_DELETE_QUEUE";
-const DRIVE_DELETE_TRIGGER = "_processDriveDeleteQueue";
-const DRIVE_DELETE_DELAY_MS = 2000;
 
 const SHEETS = Object.freeze({
   RUNNERS: "Runners",
@@ -355,86 +350,16 @@ function saveBase64Image(folder, filename, base64Data) {
   return DRIVE_EMBED_URL(file.getId());
 }
 
-// ─── ASYNC DRIVE DELETION QUEUE ─────────────────────────────
-// Apps Script has no true async, but a one-shot time-based trigger
-// runs in a separate execution. We push the runner name to a
-// ScriptProperties-backed queue and schedule the trigger to drain it.
-// The original request returns immediately; cleanup happens ~2 s later.
-function queueDriveDelete(personName) {
-  const lock = LockService.getScriptLock();
-  if (!lock.tryLock(LOCK_TIMEOUT_MS)) {
-    // Couldn't queue — fall through to inline cleanup so we don't lose work.
-    try { trashRunnerFolder(personName); }
-    catch (e) { logErr("inline trashRunnerFolder fallback", e); }
-    return;
-  }
-  try {
-    const props = PropertiesService.getScriptProperties();
-    const raw = props.getProperty(DRIVE_DELETE_QUEUE_KEY) || "[]";
-    let queue;
-    try { queue = JSON.parse(raw); } catch (e) { queue = []; }
-    if (!Array.isArray(queue)) queue = [];
-    if (queue.indexOf(personName) < 0) queue.push(personName);
-    props.setProperty(DRIVE_DELETE_QUEUE_KEY, JSON.stringify(queue));
+// ─── SYNCHRONOUS DRIVE CLEANUP ──────────────────────────────
+// Called inline from deleteRunner / deleteViolation. The callers wrap
+// these in try-catch so a Drive failure (e.g. file already trashed by
+// a manual cleanup) never blocks the sheet row deletion.
 
-    // Avoid stacking multiple triggers (max 20 per script).
-    const existing = ScriptApp.getProjectTriggers().some(function (t) {
-      return t.getHandlerFunction() === DRIVE_DELETE_TRIGGER;
-    });
-    if (!existing) {
-      ScriptApp.newTrigger(DRIVE_DELETE_TRIGGER).timeBased().after(DRIVE_DELETE_DELAY_MS).create();
-      logInfo("scheduled drive delete trigger", { name: personName });
-    }
-  } catch (e) {
-    logErr("queueDriveDelete", e);
-  } finally {
-    lock.releaseLock();
-  }
-}
-
-/** Trigger entrypoint — drains the queue, then deletes itself. */
-function _processDriveDeleteQueue() {
-  // Loop so any entries enqueued WHILE we were processing get picked up
-  // before the trigger self-deletes (avoids losing late additions).
-  while (true) {
-    const lock = LockService.getScriptLock();
-    if (!lock.tryLock(LOCK_TIMEOUT_MS)) {
-      // Couldn't grab the lock — leave the trigger in place so the next
-      // tick (or re-scheduling) handles it.
-      return;
-    }
-    let batch;
-    try {
-      const props = PropertiesService.getScriptProperties();
-      const raw = props.getProperty(DRIVE_DELETE_QUEUE_KEY) || "[]";
-      try { batch = JSON.parse(raw); } catch (e) { batch = []; }
-      if (!Array.isArray(batch)) batch = [];
-      if (!batch.length) {
-        // Queue empty → safe to retire this trigger.
-        deleteDriveDeleteTriggers();
-        return;
-      }
-      props.setProperty(DRIVE_DELETE_QUEUE_KEY, "[]");
-    } finally {
-      lock.releaseLock();
-    }
-    // Process outside the lock so concurrent admin actions aren't blocked.
-    for (let i = 0; i < batch.length; i++) {
-      try { trashRunnerFolder(batch[i]); }
-      catch (e) { logErr("trashRunnerFolder(" + batch[i] + ")", e); }
-    }
-  }
-}
-
-function deleteDriveDeleteTriggers() {
-  const triggers = ScriptApp.getProjectTriggers();
-  for (let i = 0; i < triggers.length; i++) {
-    if (triggers[i].getHandlerFunction() === DRIVE_DELETE_TRIGGER) {
-      ScriptApp.deleteTrigger(triggers[i]);
-    }
-  }
-}
-
+/**
+ * Move every "RunnerFaces/<personName>" folder to Trash.
+ * Iterates all RunnerFaces roots (in case duplicates were created
+ * before the lock fix) and trashes any matching subfolder.
+ */
 function trashRunnerFolder(personName) {
   const root = DriveApp.getRootFolder();
   const runnerRoots = root.getFoldersByName(RUNNER_FACES_FOLDER);
@@ -443,12 +368,33 @@ function trashRunnerFolder(personName) {
     const rf = runnerRoots.next();
     const personFolders = rf.getFoldersByName(personName);
     while (personFolders.hasNext()) {
-      const pf = personFolders.next();
-      pf.setTrashed(true);
+      personFolders.next().setTrashed(true);
       trashed++;
     }
   }
   logInfo("trashRunnerFolder", { name: personName, trashed: trashed });
+  return trashed;
+}
+
+/**
+ * Pull a Drive file ID out of any URL shape this codebase may have
+ * written: the embed form (uc?export=view&id=…) used by v3+, or the
+ * legacy viewer form (file/d/…/view) used before the migration.
+ */
+function extractDriveFileId(url) {
+  if (!url) return null;
+  const s = String(url);
+  const fromQuery = s.match(/[?&]id=([-\w]{25,})/);
+  if (fromQuery) return fromQuery[1];
+  const fromPath = s.match(/\/file\/d\/([-\w]{25,})/);
+  return fromPath ? fromPath[1] : null;
+}
+
+/** Move a Drive file to Trash by its ID, swallowing not-found errors. */
+function trashDriveFile(fileId) {
+  if (!fileId) return false;
+  DriveApp.getFileById(fileId).setTrashed(true);
+  return true;
 }
 
 // ─── GET HANDLER (cache-fronted) ────────────────────────────
@@ -677,6 +623,30 @@ function handleDeleteViolation(body) {
   const snap = readWholeSheet(sheet);
   const rowIdx = snap.findRowById(id);
   if (rowIdx < 0) throw httpError("Violation not found", "not_found");
+
+  // Pull the image URL out of the in-memory snapshot before we delete
+  // the row, so we can trash the Drive file in the same request.
+  const imageUrlCol = snap.headerIndex("ImageUrl");
+  // snap.values is 0-indexed from the row AFTER the header; rowIdx is
+  // the 1-indexed sheet row, with row 1 = header.
+  const imageUrl = imageUrlCol >= 0
+    ? String(snap.values[rowIdx - 2][imageUrlCol] || "")
+    : "";
+
+  // Synchronous Drive cleanup. Isolated try-catch so a missing/already-
+  // trashed file never blocks the sheet row deletion.
+  if (imageUrl) {
+    try {
+      const fileId = extractDriveFileId(imageUrl);
+      if (fileId) {
+        trashDriveFile(fileId);
+        logInfo("trashed violation image", { id: id, fileId: fileId });
+      }
+    } catch (e) {
+      logErr("trashDriveFile failed for violation " + id + " (continuing)", e);
+    }
+  }
+
   sheet.deleteRow(rowIdx);
 
   invalidateViolations();
@@ -687,6 +657,15 @@ function handleDeleteViolation(body) {
 function handleDeleteRunner(body) {
   requireAdmin(body);
   const name = reqStr(body.name, "name", NAME_PATTERN, 50);
+
+  // Synchronous Drive cleanup. Isolated try-catch — if Drive throws
+  // (e.g. folder already trashed manually, or org policy denies the
+  // operation), we log it and continue so the sheet rows still go.
+  try {
+    trashRunnerFolder(name);
+  } catch (e) {
+    logErr("trashRunnerFolder failed for " + name + " (continuing)", e);
+  }
 
   // Both sheets: in-memory findIndex, delete on hit, no further loop.
   const rSheet = getSheet(SHEETS.RUNNERS);
@@ -699,10 +678,6 @@ function handleDeleteRunner(body) {
 
   invalidateRunners();
   invalidateResults();
-
-  // Drive cleanup runs out-of-band so the admin sees an instant response.
-  // The folder is moved to trash by a one-shot trigger ~2 s later.
-  queueDriveDelete(name);
 
   logInfo("deleteRunner", { name: name });
   return jsonOk({ message: "Runner " + name + " deleted" });
