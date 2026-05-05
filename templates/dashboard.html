@@ -546,18 +546,41 @@
         }
 
         .type-select {
-            padding: .5rem .8rem;
-            background: rgba(255, 255, 255, .04);
+            padding: .5rem 2rem .5rem .8rem;
+            /* Explicit solid background — some browsers paint the popup
+               using the closed-state background, so keep it dark even
+               though the surrounding card is also dark. */
+            background-color: #1e293b;
+            background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'><path fill='%23f0f2f5' d='M6 8L0 0h12z'/></svg>");
+            background-repeat: no-repeat;
+            background-position: right .65rem center;
             border: 1px solid var(--bdr);
             border-radius: 10px;
-            color: var(--txt);
+            color: #ffffff;
             font-size: .85rem;
             outline: none;
             font-family: 'DM Sans', sans-serif;
-            cursor: pointer
+            cursor: pointer;
+            -webkit-appearance: none;
+            -moz-appearance: none;
+            appearance: none
         }
 
         .type-select:focus { border-color: var(--pri) }
+
+        /* Force the popup options to the same dark theme. Chrome/Edge
+           respect this; Firefox and Safari fall back to OS colors but
+           still pick up our color/background-color pair. */
+        .type-select option,
+        .type-select optgroup {
+            background-color: #1e293b;
+            color: #ffffff
+        }
+        .type-select option:checked,
+        .type-select option:hover {
+            background-color: #2d3a4f;
+            color: #ffffff
+        }
 
         .btn-bulk-del {
             padding: .5rem 1rem;
