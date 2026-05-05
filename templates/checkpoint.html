@@ -379,6 +379,7 @@ async function reportViolation(name,expected,found,video){
  try{
   await fetch(API,{method:"POST",headers:{"Content-Type":"text/plain"},body:JSON.stringify({
    action:"reportViolation",name,bib:found,message:msg,
+   violationType:"WRONG_PERSON",
    timestamp:new Date().toISOString(),image:imageData
   })});
  }catch(e){console.warn("Failed to send violation:",e)}

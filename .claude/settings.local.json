@@ -1,7 +1,10 @@
 {
   "permissions": {
     "allow": [
-      "Bash(git rm *)"
+      "Bash(git rm *)",
+      "Bash(gh pr *)",
+      "PowerShell(gh pr *)",
+      "Bash(git fetch *)"
     ]
   }
 }

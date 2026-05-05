@@ -517,6 +517,78 @@
             font-size: .9rem
         }
 
+        /* Violation-type badges + bulk toolbar */
+        .vt-badge {
+            display: inline-block;
+            padding: .2rem .55rem;
+            border-radius: 999px;
+            font-size: .68rem;
+            font-weight: 600;
+            letter-spacing: .5px;
+            border: 1px solid;
+            white-space: nowrap
+        }
+
+        .vt-NO_BIB        { color: #f59e0b; border-color: #f59e0b; background: rgba(245,158,11,.10) }
+        .vt-WRONG_PERSON  { color: #ef4444; border-color: #ef4444; background: rgba(239,68,68,.10) }
+        .vt-UNREGISTERED  { color: #a78bfa; border-color: #a78bfa; background: rgba(167,139,250,.10) }
+        .vt-MULTIPLE_BIBS { color: #facc15; border-color: #facc15; background: rgba(250,204,21,.10) }
+        .vt-WRONG_ROUTE   { color: #60a5fa; border-color: #60a5fa; background: rgba(96,165,250,.10) }
+        .vt-OBSCURED_BIB  { color: #94a3b8; border-color: #94a3b8; background: rgba(148,163,184,.10) }
+        .vt-OTHER         { color: #cbd5e1; border-color: #cbd5e1; background: rgba(203,213,225,.10) }
+
+        .viol-toolbar {
+            display: flex;
+            align-items: center;
+            gap: .8rem;
+            margin-bottom: 1rem;
+            flex-wrap: wrap
+        }
+
+        .type-select {
+            padding: .5rem .8rem;
+            background: rgba(255, 255, 255, .04);
+            border: 1px solid var(--bdr);
+            border-radius: 10px;
+            color: var(--txt);
+            font-size: .85rem;
+            outline: none;
+            font-family: 'DM Sans', sans-serif;
+            cursor: pointer
+        }
+
+        .type-select:focus { border-color: var(--pri) }
+
+        .btn-bulk-del {
+            padding: .5rem 1rem;
+            background: rgba(229, 62, 62, .12);
+            border: 1px solid var(--red);
+            border-radius: 10px;
+            color: var(--red);
+            cursor: pointer;
+            font-size: .85rem;
+            font-family: 'DM Sans', sans-serif;
+            font-weight: 600;
+            transition: all .2s
+        }
+
+        .btn-bulk-del:hover:not(:disabled) { background: rgba(229, 62, 62, .25) }
+        .btn-bulk-del:disabled { opacity: .35; cursor: not-allowed }
+
+        .bulk-info {
+            color: var(--mut);
+            font-size: .8rem;
+            margin-left: auto
+        }
+
+        .viol-cb {
+            cursor: pointer;
+            width: 16px;
+            height: 16px;
+            accent-color: var(--pri);
+            vertical-align: middle
+        }
+
         @keyframes pulse {
 
             0%,
@@ -714,6 +786,34 @@
         const seen = new Set(), dismissed = new Set();
         let audioCtx = null, adminTab = "runners";
 
+        // Violation-type whitelist — must match VIOLATION_TYPES in Code.gs.
+        // Adding a type here also adds it to the filter dropdown automatically.
+        const VIOLATION_TYPES = [
+            "NO_BIB", "WRONG_PERSON", "UNREGISTERED",
+            "MULTIPLE_BIBS", "WRONG_ROUTE", "OBSCURED_BIB", "OTHER"
+        ];
+        const VIOLATION_TYPE_LABELS = {
+            NO_BIB: "No BIB",
+            WRONG_PERSON: "Wrong Person",
+            UNREGISTERED: "Unregistered",
+            MULTIPLE_BIBS: "Multiple BIBs",
+            WRONG_ROUTE: "Wrong Route",
+            OBSCURED_BIB: "Obscured BIB",
+            OTHER: "Other"
+        };
+        // Empty/legacy ViolationType → WRONG_PERSON (matches backend default).
+        // Unknown values → OTHER, so the row still renders predictably.
+        function normalizeType(t) {
+            const s = String(t || "").trim().toUpperCase();
+            if (!s) return "WRONG_PERSON";
+            return VIOLATION_TYPE_LABELS.hasOwnProperty(s) ? s : "OTHER";
+        }
+        // Filter + selection state for the Violations admin tab. Persists
+        // across re-renders (poll, search, checkbox toggle) — only cleared
+        // explicitly after a successful bulk delete.
+        let typeFilter = "ALL";
+        const selectedViolationIds = new Set();
+
         // ── HTML ESCAPE (anti-XSS) ──
         // All data interpolated into innerHTML must pass through esc(). Raw
         // template strings let an OCR-detected message or a runner name with
@@ -861,10 +961,12 @@
                 card.setAttribute("data-k", key);
                 const imgHtml = v.ImageUrl
                     ? `<img src="${attr(v.ImageUrl)}" class="ac-img" data-img="${attr(v.ImageUrl)}">` : "";
+                const type = normalizeType(v.ViolationType);
+                const typeLabel = VIOLATION_TYPE_LABELS[type] || type;
                 card.innerHTML =
                     `<div class="ac-b">${imgHtml}` +
                     `<div class="ac-d">` +
-                    `<div class="ac-n">🔴 ${esc(v.Name || "Unknown")}</div>` +
+                    `<div class="ac-n">🔴 ${esc(v.Name || "Unknown")} <span class="vt-badge vt-${esc(type)}" style="margin-left:.4rem">${esc(typeLabel)}</span></div>` +
                     `<div class="ac-m">${esc(v.Message || "Violation")}</div>` +
                     `<div class="ac-t">🕐 ${esc(v.Timestamp || "")}</div>` +
                     `</div></div>` +
@@ -951,30 +1053,118 @@
                 body.querySelectorAll("[data-del-runner]").forEach(b =>
                     b.addEventListener("click", () => confirmDel("runner", b.dataset.delRunner)));
             } else {
-                const filtered = violations.filter(v => (v.Name || "").toLowerCase().includes(q));
-                if (!filtered.length) { body.innerHTML = `<div class="empty">ไม่มี violations</div>`; return; }
-                body.innerHTML = `<table><thead><tr><th>ID</th><th>ชื่อ</th><th>BIB</th><th>ข้อความ</th><th>หลักฐาน</th><th>เวลา</th><th>สถานะ</th><th>จัดการ</th></tr></thead><tbody>${filtered.map(v => {
-                    const verified = String(v.Verified).toLowerCase() === "true";
-                    const imgHtml = v.ImageUrl
-                        ? `<img src="${attr(v.ImageUrl)}" data-img="${attr(v.ImageUrl)}" style="width:60px;height:40px;object-fit:cover;border-radius:6px;cursor:pointer">`
-                        : "-";
-                    const verifyBtn = !verified
-                        ? `<button class="btn-sm btn-vf" data-verify="${attr(v.ID)}">✅</button>` : "";
-                    return `<tr>` +
-                        `<td style="font-size:.75rem;color:var(--mut)">${esc(v.ID || "")}</td>` +
-                        `<td style="font-weight:600">${esc(v.Name)}</td>` +
-                        `<td>${esc(v.BibNumber || "-")}</td>` +
-                        `<td style="font-size:.82rem;max-width:200px;overflow:hidden;text-overflow:ellipsis">${esc(v.Message || "")}</td>` +
-                        `<td>${imgHtml}</td>` +
-                        `<td style="font-size:.8rem">${esc(v.Timestamp || "")}</td>` +
-                        `<td>${verified ? '<span style="color:var(--grn);font-size:.8rem">✅ ยืนยันแล้ว</span>' : '<span style="color:var(--mut);font-size:.8rem">⏳ รอตรวจ</span>'}</td>` +
-                        `<td><div style="display:flex;gap:.3rem">${verifyBtn}<button class="btn-sm btn-dl" data-del-violation="${attr(v.ID)}">🗑️</button></div></td>` +
-                        `</tr>`;
-                }).join("")}</tbody></table>`;
+                // Type filter is applied AFTER the search filter so the
+                // displayed count reflects both. Both run on the cached
+                // violations array — no backend round-trip per change.
+                let filtered = violations.filter(v => (v.Name || "").toLowerCase().includes(q));
+                if (typeFilter !== "ALL") {
+                    filtered = filtered.filter(v => normalizeType(v.ViolationType) === typeFilter);
+                }
+
+                // Drop selections for rows that are no longer in the data
+                // (e.g., a row was deleted by another tab) so the count
+                // and Select-All state stay correct.
+                const validIds = new Set(violations.map(v => v.ID).filter(Boolean));
+                Array.from(selectedViolationIds).forEach(id => {
+                    if (!validIds.has(id)) selectedViolationIds.delete(id);
+                });
+                const visibleIds = filtered.map(v => v.ID).filter(Boolean);
+                const visibleSelected = visibleIds.filter(id => selectedViolationIds.has(id)).length;
+                const allChecked = visibleIds.length > 0 && visibleSelected === visibleIds.length;
+
+                const typeOptions = `<option value="ALL"${typeFilter === "ALL" ? " selected" : ""}>All Types</option>` +
+                    VIOLATION_TYPES.map(t =>
+                        `<option value="${t}"${typeFilter === t ? " selected" : ""}>${esc(VIOLATION_TYPE_LABELS[t] || t)}</option>`
+                    ).join("");
+
+                const toolbar = `<div class="viol-toolbar">` +
+                    `<select class="type-select" id="type-filter" aria-label="Filter by violation type">${typeOptions}</select>` +
+                    `<button class="btn-bulk-del" id="btn-bulk-del"${selectedViolationIds.size === 0 ? " disabled" : ""}>🗑️ Delete Selected (${selectedViolationIds.size})</button>` +
+                    `<div class="bulk-info">${filtered.length} / ${violations.length} violation(s)</div>` +
+                    `</div>`;
+
+                if (!filtered.length) {
+                    body.innerHTML = toolbar + `<div class="empty">ไม่มี violations</div>`;
+                    wireViolationToolbar(visibleIds);
+                    return;
+                }
+
+                body.innerHTML = toolbar + `<table><thead><tr>` +
+                    `<th style="width:32px"><input type="checkbox" class="viol-cb" id="cb-all"${allChecked ? " checked" : ""} aria-label="Select all visible"></th>` +
+                    `<th>ID</th><th>ชื่อ</th><th>BIB</th><th>ประเภท</th><th>ข้อความ</th><th>หลักฐาน</th><th>เวลา</th><th>สถานะ</th><th>จัดการ</th>` +
+                    `</tr></thead><tbody>${filtered.map(v => {
+                        const verified = String(v.Verified).toLowerCase() === "true";
+                        const type = normalizeType(v.ViolationType);
+                        const typeLabel = VIOLATION_TYPE_LABELS[type] || type;
+                        const imgHtml = v.ImageUrl
+                            ? `<img src="${attr(v.ImageUrl)}" data-img="${attr(v.ImageUrl)}" style="width:60px;height:40px;object-fit:cover;border-radius:6px;cursor:pointer">`
+                            : "-";
+                        const verifyBtn = !verified
+                            ? `<button class="btn-sm btn-vf" data-verify="${attr(v.ID)}">✅</button>` : "";
+                        const checked = selectedViolationIds.has(v.ID) ? " checked" : "";
+                        return `<tr>` +
+                            `<td><input type="checkbox" class="viol-cb" data-cb-id="${attr(v.ID)}"${checked} aria-label="Select violation"></td>` +
+                            `<td style="font-size:.75rem;color:var(--mut)">${esc(v.ID || "")}</td>` +
+                            `<td style="font-weight:600">${esc(v.Name)}</td>` +
+                            `<td>${esc(v.BibNumber || "-")}</td>` +
+                            `<td><span class="vt-badge vt-${esc(type)}">${esc(typeLabel)}</span></td>` +
+                            `<td style="font-size:.82rem;max-width:200px;overflow:hidden;text-overflow:ellipsis">${esc(v.Message || "")}</td>` +
+                            `<td>${imgHtml}</td>` +
+                            `<td style="font-size:.8rem">${esc(v.Timestamp || "")}</td>` +
+                            `<td>${verified ? '<span style="color:var(--grn);font-size:.8rem">✅ ยืนยันแล้ว</span>' : '<span style="color:var(--mut);font-size:.8rem">⏳ รอตรวจ</span>'}</td>` +
+                            `<td><div style="display:flex;gap:.3rem">${verifyBtn}<button class="btn-sm btn-dl" data-del-violation="${attr(v.ID)}">🗑️</button></div></td>` +
+                            `</tr>`;
+                    }).join("")}</tbody></table>`;
+
+                wireViolationToolbar(visibleIds);
                 body.querySelectorAll("[data-img]").forEach(el => el.addEventListener("click", () => openLb(el.dataset.img)));
                 body.querySelectorAll("[data-verify]").forEach(b => b.addEventListener("click", () => verifyV(b.dataset.verify)));
                 body.querySelectorAll("[data-del-violation]").forEach(b => b.addEventListener("click", () => confirmDel("violation", b.dataset.delViolation)));
             }
+        }
+
+        // Re-bound on every render — the toolbar nodes are recreated by
+        // innerHTML reassignment so the previous listeners die with them.
+        function wireViolationToolbar(visibleIds) {
+            const sel = document.getElementById("type-filter");
+            if (sel) sel.addEventListener("change", e => { typeFilter = e.target.value; renderAdminTab(); });
+
+            const cbAll = document.getElementById("cb-all");
+            if (cbAll) cbAll.addEventListener("change", e => {
+                if (e.target.checked) visibleIds.forEach(id => selectedViolationIds.add(id));
+                else visibleIds.forEach(id => selectedViolationIds.delete(id));
+                renderAdminTab();
+            });
+
+            document.querySelectorAll("[data-cb-id]").forEach(cb => cb.addEventListener("change", e => {
+                const id = cb.dataset.cbId;
+                if (e.target.checked) selectedViolationIds.add(id);
+                else selectedViolationIds.delete(id);
+                renderAdminTab();
+            }));
+
+            const btn = document.getElementById("btn-bulk-del");
+            if (btn) btn.addEventListener("click", bulkDeleteSelected);
+        }
+
+        function bulkDeleteSelected() {
+            const ids = Array.from(selectedViolationIds);
+            if (!ids.length) return;
+            document.getElementById("confirm-msg").textContent = `ลบ ${ids.length} รายการที่เลือก?`;
+            document.getElementById("confirm-modal").classList.add("on");
+            document.getElementById("confirm-ok").onclick = async () => {
+                closeConfirm();
+                const d = await adminPost({ action: "deleteViolationsBatch", ids });
+                if (d.status !== "success") {
+                    alert("ลบไม่สำเร็จ: " + (d.message || "Unknown"));
+                } else {
+                    selectedViolationIds.clear();
+                    if (Array.isArray(d.notFound) && d.notFound.length) {
+                        console.warn("deleteViolationsBatch: not found:", d.notFound);
+                    }
+                }
+                loadAdminData();
+            };
         }
 
         async function verifyV(id) {

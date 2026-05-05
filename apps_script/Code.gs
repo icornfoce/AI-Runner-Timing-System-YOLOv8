@@ -18,6 +18,15 @@
 //   • Drive folder/file cleanup on deleteRunner / deleteViolation is
 //     synchronous and isolated in try-catch — a Drive API failure is
 //     logged but never blocks the sheet row deletion.
+//
+// What's new in v5:
+//   • Violations now carry a ViolationType (NO_BIB, WRONG_PERSON, …);
+//     reportViolation validates the value against a fixed whitelist.
+//   • New deleteViolationsBatch endpoint deletes many rows + Drive files
+//     in one request, sorted bottom-up to avoid index shift, with each
+//     Drive trash isolated in try-catch. Cache is invalidated once.
+//   • _migrateViolationTypeColumn() helper backfills the new column on
+//     existing sheets (idempotent; safe to re-run).
 // ============================================================
 
 // ─── CONSTANTS ──────────────────────────────────────────────
@@ -50,19 +59,44 @@ const SCHEMA = Object.freeze({
     "FolderUrl", "Embeddings"],
   Results: ["Name", "BibNumber", "Start_Time", "CP1_Time", "CP2_Time",
     "CP3_Time", "CP4_Time", "Finish_Time", "Total_Duration", "UpdatedAt"],
+  // ViolationType lives at the end so existing sheets keep their column
+  // order; new fields are added on the right by _migrateViolationTypeColumn.
   Violations: ["ID", "Name", "BibNumber", "Message", "ImageUrl",
-    "Timestamp", "Verified", "VerifiedAt"],
+    "Timestamp", "Verified", "VerifiedAt", "ViolationType"],
 });
 
 const TIME_COLUMNS = Object.freeze(
   ["Start_Time", "CP1_Time", "CP2_Time", "CP3_Time", "CP4_Time", "Finish_Time"]
 );
 
+// ─── VIOLATION TYPES ────────────────────────────────────────
+// Whitelist for the ViolationType column. The frontend filter dropdown
+// is built from this same list so adding a type is a one-line change.
+//   NO_BIB         — face detected but no BIB number visible
+//   WRONG_PERSON   — BIB digits don't match the registered runner
+//   UNREGISTERED   — face has no match in the runner database
+//   MULTIPLE_BIBS  — more than one BIB candidate read from one runner
+//   WRONG_ROUTE    — runner reached a checkpoint out of order
+//   OBSCURED_BIB   — BIB partially covered / unreadable for OCR
+//   OTHER          — manual / catch-all for staff-entered notes
+const VIOLATION_TYPES = Object.freeze([
+  "NO_BIB", "WRONG_PERSON", "UNREGISTERED",
+  "MULTIPLE_BIBS", "WRONG_ROUTE", "OBSCURED_BIB", "OTHER",
+]);
+const VIOLATION_TYPE_SET = (function () {
+  const m = {};
+  for (let i = 0; i < VIOLATION_TYPES.length; i++) m[VIOLATION_TYPES[i]] = true;
+  return Object.freeze(m);
+})();
+const DEFAULT_VIOLATION_TYPE = "WRONG_PERSON";
+const BATCH_DELETE_MAX = 200;
+
 // ─── INPUT VALIDATION PATTERNS ──────────────────────────────
 const NAME_PATTERN = /^[a-zA-Z0-9_\-.]{1,50}$/;
 const BIB_PATTERN = /^[a-zA-Z0-9]{1,10}$/;
 const TIME_PATTERN = /^\d{1,2}:\d{2}(?::\d{2})?$/;
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const ID_PATTERN = /^V\d{10,}$/;
 
 // ─── LOGGING ────────────────────────────────────────────────
 function logInfo(msg, data) {
@@ -183,6 +217,17 @@ function httpError(msg, code) {
   const e = new Error(msg);
   e.code = code || "bad_request";
   return e;
+}
+
+// Accepts undefined/empty (returns DEFAULT_VIOLATION_TYPE), otherwise must
+// be one of VIOLATION_TYPES. Case-insensitive on input; stored as upper.
+function normalizeViolationType(v) {
+  if (v == null || v === "") return DEFAULT_VIOLATION_TYPE;
+  const s = String(v).trim().toUpperCase();
+  if (!VIOLATION_TYPE_SET[s]) {
+    throw httpError("Unknown violationType: " + s, "bad_request");
+  }
+  return s;
 }
 
 // ─── TIME / DURATION HELPERS ────────────────────────────────
@@ -459,6 +504,7 @@ function doPost(e) {
       case "reportViolation":  return handleReportViolation(body);
       case "verifyViolation":  return handleVerifyViolation(body);
       case "deleteViolation":  return handleDeleteViolation(body);
+      case "deleteViolationsBatch": return handleDeleteViolationsBatch(body);
       case "deleteRunner":     return handleDeleteRunner(body);
       case "updateRunner":     return handleUpdateRunner(body);
       default:
@@ -573,6 +619,7 @@ function handleReportViolation(body) {
   const name = optStr(body.name, NAME_PATTERN, 50) || "Unknown";
   const bib = optStr(body.bib, BIB_PATTERN, 10);
   const message = optStr(body.message, null, 500);
+  const violationType = normalizeViolationType(body.violationType);
   const timestamp = optStr(body.timestamp, null, 50) || new Date().toISOString();
   const imageBase64 = body.image || "";
 
@@ -584,10 +631,25 @@ function handleReportViolation(body) {
   }
 
   const id = "V" + Date.now();
-  getSheet(SHEETS.VIOLATIONS).appendRow([id, name, bib, message, imageUrl, timestamp, false, ""]);
+  // Header-mapped write so legacy sheets (no ViolationType column) still
+  // accept the row — the field is silently dropped until the migration
+  // helper adds the column. New sheets created by getSheet() include it.
+  const sheet = getSheet(SHEETS.VIOLATIONS);
+  const snap = readWholeSheet(sheet);
+  const row = new Array(snap.headers.length).fill("");
+  const fields = {
+    ID: id, Name: name, BibNumber: bib, Message: message,
+    ImageUrl: imageUrl, Timestamp: timestamp,
+    Verified: false, VerifiedAt: "", ViolationType: violationType,
+  };
+  for (const key in fields) {
+    const idx = snap.headerIndex(key);
+    if (idx >= 0) row[idx] = fields[key];
+  }
+  sheet.appendRow(row);
 
   invalidateViolations();
-  logInfo("reportViolation", { id: id, name: name });
+  logInfo("reportViolation", { id: id, name: name, type: violationType });
   return jsonOk({ id: id, message: "Violation reported" });
 }
 
@@ -652,6 +714,81 @@ function handleDeleteViolation(body) {
   invalidateViolations();
   logInfo("deleteViolation", { id: id });
   return jsonOk({ message: "Violation deleted" });
+}
+
+/**
+ * Bulk delete: accepts an array of violation IDs, trashes each Drive
+ * file in an isolated try-catch, then deletes the sheet rows from the
+ * BOTTOM up so earlier deletions don't shift later row indexes. Cache
+ * is invalidated once at the end. The whole operation is one read of
+ * the sheet, N deleteRow calls, and one removeAll on the cache.
+ */
+function handleDeleteViolationsBatch(body) {
+  requireAdmin(body);
+  const ids = body.ids;
+  if (!Array.isArray(ids) || ids.length === 0) {
+    throw httpError("ids must be a non-empty array", "bad_request");
+  }
+  if (ids.length > BATCH_DELETE_MAX) {
+    throw httpError("Too many IDs (max " + BATCH_DELETE_MAX + ")", "bad_request");
+  }
+
+  const sheet = getSheet(SHEETS.VIOLATIONS);
+  const snap = readWholeSheet(sheet);
+  const imageUrlCol = snap.headerIndex("ImageUrl");
+
+  // Resolve every ID against the snapshot once so we don't rescan the
+  // sheet inside the deletion loop.
+  const targets = [];
+  const notFound = [];
+  const seenIds = {};
+  for (let i = 0; i < ids.length; i++) {
+    const id = reqStr(ids[i], "ids[" + i + "]", ID_PATTERN, 30);
+    if (seenIds[id]) continue;
+    seenIds[id] = true;
+    const rowIdx = snap.findRowById(id);
+    if (rowIdx < 0) { notFound.push(id); continue; }
+    const imageUrl = imageUrlCol >= 0
+      ? String(snap.values[rowIdx - 2][imageUrlCol] || "")
+      : "";
+    targets.push({ id: id, rowIdx: rowIdx, imageUrl: imageUrl });
+  }
+
+  // Trash Drive files first — order doesn't matter, and a failure on
+  // one file must not block the rest. Each call is wrapped so a 404 /
+  // permission error is logged but never aborts the batch.
+  let driveTrashed = 0;
+  for (let i = 0; i < targets.length; i++) {
+    if (!targets[i].imageUrl) continue;
+    try {
+      const fileId = extractDriveFileId(targets[i].imageUrl);
+      if (fileId) {
+        trashDriveFile(fileId);
+        driveTrashed++;
+      }
+    } catch (e) {
+      logErr("trashDriveFile failed for " + targets[i].id + " (continuing)", e);
+    }
+  }
+
+  // Delete rows bottom-up so earlier deletions don't shift later indexes.
+  targets.sort(function (a, b) { return b.rowIdx - a.rowIdx; });
+  for (let i = 0; i < targets.length; i++) {
+    sheet.deleteRow(targets[i].rowIdx);
+  }
+
+  invalidateViolations();
+  logInfo("deleteViolationsBatch", {
+    requested: ids.length,
+    deleted: targets.length,
+    notFound: notFound.length,
+    driveTrashed: driveTrashed,
+  });
+  return jsonOk({
+    deleted: targets.length,
+    notFound: notFound,
+    message: "Deleted " + targets.length + " violation(s)",
+  });
 }
 
 function handleDeleteRunner(body) {
@@ -856,4 +993,54 @@ function _migrateAllImageUrls() {
     }
   }
   Logger.log("Total URLs migrated: " + total);
+}
+
+/**
+ * Adds the ViolationType column to the Violations sheet if missing,
+ * and backfills existing rows with DEFAULT_VIOLATION_TYPE. Idempotent —
+ * re-running on an already-migrated sheet is a no-op.
+ *
+ * Run once after deploying v5: editor → function dropdown →
+ * _migrateViolationTypeColumn → Run.
+ */
+function _migrateViolationTypeColumn() {
+  const sheet = getSheet(SHEETS.VIOLATIONS);
+  const lastCol = sheet.getLastColumn();
+  const lastRow = sheet.getLastRow();
+  const headers = lastCol > 0
+    ? sheet.getRange(1, 1, 1, lastCol).getValues()[0]
+    : [];
+
+  let typeCol = headers.indexOf("ViolationType");
+  if (typeCol < 0) {
+    typeCol = lastCol; // append at the end
+    sheet.getRange(1, typeCol + 1).setValue("ViolationType");
+    Logger.log("Added ViolationType column at index " + (typeCol + 1));
+  } else {
+    Logger.log("ViolationType column already at index " + (typeCol + 1));
+  }
+
+  if (lastRow < 2) {
+    invalidateViolations();
+    Logger.log("No data rows to backfill.");
+    return;
+  }
+
+  const range = sheet.getRange(2, typeCol + 1, lastRow - 1, 1);
+  const values = range.getValues();
+  let backfilled = 0;
+  for (let i = 0; i < values.length; i++) {
+    const cur = String(values[i][0] || "").trim();
+    if (cur === "") {
+      values[i][0] = DEFAULT_VIOLATION_TYPE;
+      backfilled++;
+    } else if (!VIOLATION_TYPE_SET[cur.toUpperCase()]) {
+      Logger.log("Row " + (i + 2) + " has unknown ViolationType '" + cur + "' — leaving as-is");
+    }
+  }
+  if (backfilled) {
+    range.setValues(values);
+    invalidateViolations();
+  }
+  Logger.log("Backfilled " + backfilled + " row(s) with default '" + DEFAULT_VIOLATION_TYPE + "'");
 }
