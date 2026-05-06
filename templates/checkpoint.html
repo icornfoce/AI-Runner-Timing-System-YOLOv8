@@ -121,6 +121,7 @@ let tesseractWorker=null;
 let ocrReady=false;
 let videoStream=null;
 let loopRunning=false;
+let rafId=null;
 const CP_BUTTONS=['start',1,2,3,4,'finish'];
 
 // ── CP SELECTOR ──
@@ -164,13 +165,21 @@ async function init(){
     runnerRegistry[r.Name]=String(r.BibNumber||"");
    }catch(e){console.warn("Bad embedding for",r.Name,e)}
   }
-  console.log('Labeled descriptors:',labeled.length,'/',runners.length);
   if(labeled.length>0)faceMatcher=new faceapi.FaceMatcher(labeled,0.5);
   markStep("step-runners","done");
 
-  // 3) Camera
+  // 3) Camera — surface NotAllowedError specifically so the operator
+  // gets actionable feedback instead of a generic stack trace.
   markStep("step-camera","loading");
-  videoStream=await navigator.mediaDevices.getUserMedia({video:{facingMode:"user",width:{ideal:640},height:{ideal:480}}});
+  try{
+   videoStream=await navigator.mediaDevices.getUserMedia({video:{facingMode:"user",width:{ideal:640},height:{ideal:480}}});
+  }catch(camErr){
+   const friendly=(camErr&&(camErr.name==="NotAllowedError"||camErr.name==="PermissionDeniedError"))
+    ?"ไม่ได้รับสิทธิ์เข้าถึงกล้อง — โปรดอนุญาตในเบราว์เซอร์"
+    :"เปิดกล้องไม่สำเร็จ: "+(camErr&&camErr.message||camErr);
+   setStatus("err","❌ "+friendly);
+   return;
+  }
   const video=document.getElementById("video");
   video.srcObject=videoStream;
   await new Promise(r=>video.addEventListener("loadedmetadata",r,{once:true}));
@@ -188,7 +197,6 @@ async function init(){
   try{
    tesseractWorker=await Tesseract.createWorker("eng");
    ocrReady=true;
-   console.log("Tesseract OCR ready");
   }catch(e){console.warn("Tesseract init failed, OCR disabled:",e);ocrReady=false;}
 
   setStatus("ok","🟢 Connected");
@@ -197,8 +205,7 @@ async function init(){
   // Start loop
   processLoop();
  }catch(e){
-  setStatus("err","❌ "+e.message);
-  console.error(e);
+  setStatus("err","❌ "+(e&&e.message||e));
  }
 }
 
@@ -208,6 +215,7 @@ function stopCamera(){
   videoStream=null;
  }
  loopRunning=false;
+ if(rafId!==null){cancelAnimationFrame(rafId);rafId=null;}
 }
 
 function markStep(id,state){
@@ -242,7 +250,7 @@ async function processLoop(){
 
   ctx.clearRect(0,0,overlay.width,overlay.height);
 
-  if(!faceMatcher){requestAnimationFrame(frame);return}
+  if(!faceMatcher){rafId=requestAnimationFrame(frame);return}
 
   try{
    const detections=await faceapi.detectAllFaces(video).withFaceLandmarks().withFaceDescriptors();
@@ -313,9 +321,9 @@ async function processLoop(){
    }
   }catch(e){console.error("Detection error:",e)}
 
-  requestAnimationFrame(frame);
+  rafId=requestAnimationFrame(frame);
  }
- requestAnimationFrame(frame);
+ rafId=requestAnimationFrame(frame);
 }
 
 // ── SMART OCR ──
@@ -361,8 +369,13 @@ async function recordCP(name){
    action:"recordCheckpoint",name,checkpoint_id:checkpointId,timestamp:timeStr,bib
   }),redirect:"follow"});
   const result=await resp.json();
-  console.log("CP record result:",result);
- }catch(e){console.warn("Failed to send CP:",e)}
+  if(!result||result.status!=="success"){
+   addSidebarItem(name,`❌ บันทึกไม่สำเร็จ: ${(result&&result.message)||"Unknown"}`,true);
+  }
+ }catch(e){
+  console.warn("Failed to send CP:",e);
+  addSidebarItem(name,"❌ บันทึกไม่สำเร็จ: เชื่อมต่อเซิร์ฟเวอร์ไม่ได้",true);
+ }
 }
 
 // ── VIOLATION REPORTING ──
@@ -382,7 +395,10 @@ async function reportViolation(name,expected,found,video){
    violationType:"WRONG_PERSON",
    timestamp:new Date().toISOString(),image:imageData
   })});
- }catch(e){console.warn("Failed to send violation:",e)}
+ }catch(e){
+  console.warn("Failed to send violation:",e);
+  addSidebarItem(name,"❌ ส่ง violation ไม่ได้",true);
+ }
 }
 
 // ── SIDEBAR ──
@@ -400,7 +416,6 @@ function addSidebarItem(name,info,isViol){
  list.prepend(item);
  // Keep max 20
  while(list.children.length>20)list.lastChild.remove();
- recentRecords.unshift({name,info});
 }
 
 // START

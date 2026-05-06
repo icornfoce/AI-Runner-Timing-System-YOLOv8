@@ -807,6 +807,18 @@
 
         let results = [], violations = [], runners = [];
         const seen = new Set(), dismissed = new Set();
+        // Cap dismissed at DISMISSED_MAX entries; oldest evicted FIFO so
+        // long-lived tabs don't accumulate unbounded keys.
+        const DISMISSED_MAX = 500;
+        const dismissedQueue = [];
+        function rememberDismissed(key) {
+            if (dismissed.has(key)) return;
+            dismissed.add(key);
+            dismissedQueue.push(key);
+            if (dismissedQueue.length > DISMISSED_MAX) {
+                dismissed.delete(dismissedQueue.shift());
+            }
+        }
         let audioCtx = null, adminTab = "runners";
 
         // Violation-type whitelist — must match VIOLATION_TYPES in Code.gs.
@@ -912,16 +924,18 @@
         }
 
         // ── PUBLIC DATA ──
+        // Both fetchers tolerate (a) network failure and (b) a non-JSON
+        // response (e.g. a 500 returning HTML). Either flips the Live dot
+        // to Offline after 2 consecutive failures.
         async function fetchResults() {
             try {
                 const r = await fetch(API + "?action=getResults");
                 const d = await r.json();
-                if (d.status === "success") results = d.data || [];
+                if (d && d.status === "success") results = d.data || [];
                 renderLeaderboard();
                 resultsFailures = 0;
                 setLiveStatus(true);
             } catch (e) {
-                console.error("getResults failed:", e);
                 if (++resultsFailures >= 2) setLiveStatus(false);
             }
         }
@@ -929,14 +943,13 @@
             try {
                 const r = await fetch(API + "?action=getVerifiedViolations");
                 const d = await r.json();
-                if (d.status === "success") {
+                if (d && d.status === "success") {
                     violations = d.data || [];
                     document.getElementById("s-viol").textContent = violations.length;
                     renderAlerts();
                 }
                 violationsFailures = 0;
             } catch (e) {
-                console.error("getVerifiedViolations failed:", e);
                 if (++violationsFailures >= 2) setLiveStatus(false);
             }
         }
@@ -945,9 +958,13 @@
             const emp = document.getElementById("lb-empty");
             if (!results.length) { tb.innerHTML = ""; emp.style.display = ""; return; }
             emp.style.display = "none";
-            const fin = results.filter(r => r.Total_Duration).sort((a, b) => parseDur(a.Total_Duration) - parseDur(b.Total_Duration));
-            const unfin = results.filter(r => !r.Total_Duration);
-            const sorted = [...fin, ...unfin];
+            // Single-pass partition into finished/unfinished — was two filters.
+            const fin = [], unfin = [];
+            for (let i = 0; i < results.length; i++) {
+                if (results[i].Total_Duration) fin.push(results[i]); else unfin.push(results[i]);
+            }
+            fin.sort((a, b) => parseDur(a.Total_Duration) - parseDur(b.Total_Duration));
+            const sorted = fin.concat(unfin);
             document.getElementById("s-total").textContent = results.length;
             document.getElementById("s-fin").textContent = fin.length;
             tb.innerHTML = sorted.map((r, i) => {
@@ -994,14 +1011,27 @@
                     `<div class="ac-t">🕐 ${esc(v.Timestamp || "")}</div>` +
                     `</div></div>` +
                     `<div class="ac-a"><button class="btn-ack" data-dismiss="${attr(key)}">✅ รับทราบ</button></div>`;
-                card.querySelectorAll("[data-img]").forEach(el => el.addEventListener("click", () => openLb(el.dataset.img)));
-                card.querySelector("[data-dismiss]").addEventListener("click", e => dismissA(key, e.target.closest(".ac")));
                 grid.prepend(card);
             });
             if (hasNew) playBeep();
             updateBadge();
         }
-        function dismissA(k, el) { dismissed.add(k); el.classList.add("gone"); setTimeout(() => { el.remove(); updateBadge(); }, 400); }
+        // Single delegated listener on the alert grid — replaces per-card
+        // attachment in renderAlerts(). Lives for the page lifetime.
+        (function wireAlertGridDelegation() {
+            const grid = document.getElementById("alert-grid");
+            if (!grid) return;
+            grid.addEventListener("click", e => {
+                const imgEl = e.target.closest("[data-img]");
+                if (imgEl) { openLb(imgEl.dataset.img); return; }
+                const dismissBtn = e.target.closest("[data-dismiss]");
+                if (dismissBtn) {
+                    const card = dismissBtn.closest(".ac");
+                    if (card) dismissA(dismissBtn.dataset.dismiss, card);
+                }
+            });
+        })();
+        function dismissA(k, el) { rememberDismissed(k); el.classList.add("gone"); setTimeout(() => { el.remove(); updateBadge(); }, 400); }
         function updateBadge() {
             const n = document.querySelectorAll(".ac:not(.gone)").length;
             document.getElementById("alert-badge").textContent = n;
@@ -1024,20 +1054,72 @@
         }
 
         // ── ADMIN ──
+        // isLoadingAdmin coalesces overlapping calls so a poll firing
+        // mid-bulk-delete doesn't kick off a duplicate fetch and clobber
+        // the optimistic UI state.
+        let isLoadingAdmin = false;
         async function loadAdminData() {
+            if (isLoadingAdmin) return;
+            isLoadingAdmin = true;
             try {
                 const [rr, vr, resr] = await Promise.all([
                     fetch(API + "?action=getRunners").then(r => r.json()),
                     fetch(API + "?action=getViolations").then(r => r.json()),
                     fetch(API + "?action=getResults").then(r => r.json()),
                 ]);
-                runners = rr.data || [];
-                violations = vr.data || [];
-                results = resr.data || [];
+                runners = (rr && rr.data) || [];
+                violations = (vr && vr.data) || [];
+                results = (resr && resr.data) || [];
                 renderAdminTab();
-            } catch (e) { console.error("loadAdminData failed:", e); }
+                setLiveStatus(true);
+            } catch (e) {
+                setLiveStatus(false);
+            } finally {
+                isLoadingAdmin = false;
+            }
         }
         function switchTab(t, el) { adminTab = t; document.querySelectorAll(".tab").forEach(b => b.classList.remove("on")); el.classList.add("on"); renderAdminTab(); }
+
+        function renderRunnerRow(r) {
+            return `<tr>` +
+                `<td style="font-weight:600">${esc(r.Name)}</td>` +
+                `<td>${esc(r.BibNumber || "-")}</td>` +
+                `<td style="font-size:.8rem;color:var(--mut)">${esc(r.Email || "-")}</td>` +
+                `<td class="tt">${esc(r.Start_Time)}</td>` +
+                `<td class="tt">${esc(r.CP1_Time)}</td>` +
+                `<td class="tt">${esc(r.CP2_Time)}</td>` +
+                `<td class="tt">${esc(r.CP3_Time)}</td>` +
+                `<td class="tt">${esc(r.CP4_Time)}</td>` +
+                `<td class="tt">${esc(r.Finish_Time)}</td>` +
+                `<td class="tt">${esc(r.Total_Duration)}</td>` +
+                `<td>${r.FolderUrl ? `<a href="${attr(r.FolderUrl)}" target="_blank" rel="noopener" style="color:var(--pri);font-size:.8rem">📂</a>` : "-"}</td>` +
+                `<td><button class="btn-sm btn-dl" data-del-runner="${attr(r.Name)}">🗑️</button></td>` +
+                `</tr>`;
+        }
+
+        function renderViolationRow(v) {
+            const verified = v.Verified === true || String(v.Verified).toLowerCase() === "true";
+            const type = normalizeType(v.ViolationType);
+            const typeLabel = VIOLATION_TYPE_LABELS[type] || type;
+            const imgHtml = v.ImageUrl
+                ? `<img src="${attr(v.ImageUrl)}" data-img="${attr(v.ImageUrl)}" style="width:60px;height:40px;object-fit:cover;border-radius:6px;cursor:pointer">`
+                : "-";
+            const verifyBtn = !verified
+                ? `<button class="btn-sm btn-vf" data-verify="${attr(v.ID)}">✅</button>` : "";
+            const checked = selectedViolationIds.has(v.ID) ? " checked" : "";
+            return `<tr>` +
+                `<td><input type="checkbox" class="viol-cb" data-cb-id="${attr(v.ID)}"${checked} aria-label="Select violation"></td>` +
+                `<td style="font-size:.75rem;color:var(--mut)">${esc(v.ID || "")}</td>` +
+                `<td style="font-weight:600">${esc(v.Name)}</td>` +
+                `<td>${esc(v.BibNumber || "-")}</td>` +
+                `<td><span class="vt-badge vt-${esc(type)}">${esc(typeLabel)}</span></td>` +
+                `<td style="font-size:.82rem;max-width:200px;overflow:hidden;text-overflow:ellipsis">${esc(v.Message || "")}</td>` +
+                `<td>${imgHtml}</td>` +
+                `<td style="font-size:.8rem">${esc(v.Timestamp || "")}</td>` +
+                `<td>${verified ? '<span style="color:var(--grn);font-size:.8rem">✅ ยืนยันแล้ว</span>' : '<span style="color:var(--mut);font-size:.8rem">⏳ รอตรวจ</span>'}</td>` +
+                `<td><div style="display:flex;gap:.3rem">${verifyBtn}<button class="btn-sm btn-dl" data-del-violation="${attr(v.ID)}">🗑️</button></div></td>` +
+                `</tr>`;
+        }
 
         function renderAdminTab() {
             const body = document.getElementById("admin-body");
@@ -1057,42 +1139,37 @@
                     };
                 }).filter(r => (r.Name || "").toLowerCase().includes(q) || String(r.BibNumber).includes(q));
                 if (!merged.length) { body.innerHTML = `<div class="empty">ไม่พบข้อมูลนักวิ่ง</div>`; return; }
-                body.innerHTML = `<table><thead><tr><th>ชื่อ</th><th>BIB</th><th>Email</th><th>Start</th><th>CP1</th><th>CP2</th><th>CP3</th><th>CP4</th><th>Finish</th><th>เวลา</th><th>Drive</th><th>จัดการ</th></tr></thead><tbody>${merged.map(r =>
-                    `<tr>` +
-                    `<td style="font-weight:600">${esc(r.Name)}</td>` +
-                    `<td>${esc(r.BibNumber || "-")}</td>` +
-                    `<td style="font-size:.8rem;color:var(--mut)">${esc(r.Email || "-")}</td>` +
-                    `<td class="tt">${esc(r.Start_Time)}</td>` +
-                    `<td class="tt">${esc(r.CP1_Time)}</td>` +
-                    `<td class="tt">${esc(r.CP2_Time)}</td>` +
-                    `<td class="tt">${esc(r.CP3_Time)}</td>` +
-                    `<td class="tt">${esc(r.CP4_Time)}</td>` +
-                    `<td class="tt">${esc(r.Finish_Time)}</td>` +
-                    `<td class="tt">${esc(r.Total_Duration)}</td>` +
-                    `<td>${r.FolderUrl ? `<a href="${attr(r.FolderUrl)}" target="_blank" rel="noopener" style="color:var(--pri);font-size:.8rem">📂</a>` : "-"}</td>` +
-                    `<td><button class="btn-sm btn-dl" data-del-runner="${attr(r.Name)}">🗑️</button></td>` +
-                    `</tr>`
-                ).join("")}</tbody></table>`;
-                body.querySelectorAll("[data-del-runner]").forEach(b =>
-                    b.addEventListener("click", () => confirmDel("runner", b.dataset.delRunner)));
+                body.innerHTML = `<table><thead><tr><th>ชื่อ</th><th>BIB</th><th>Email</th><th>Start</th><th>CP1</th><th>CP2</th><th>CP3</th><th>CP4</th><th>Finish</th><th>เวลา</th><th>Drive</th><th>จัดการ</th></tr></thead><tbody>${merged.map(renderRunnerRow).join("")}</tbody></table>`;
             } else {
-                // Type filter is applied AFTER the search filter so the
-                // displayed count reflects both. Both run on the cached
-                // violations array — no backend round-trip per change.
-                let filtered = violations.filter(v => (v.Name || "").toLowerCase().includes(q));
-                if (typeFilter !== "ALL") {
-                    filtered = filtered.filter(v => normalizeType(v.ViolationType) === typeFilter);
+                // Single-pass combined search + type filter — was two
+                // sequential .filter() chains. Avoids one full traversal.
+                const filtered = [];
+                for (let i = 0; i < violations.length; i++) {
+                    const v = violations[i];
+                    const nameMatch = (v.Name || "").toLowerCase().includes(q);
+                    if (!nameMatch) continue;
+                    if (typeFilter !== "ALL" && normalizeType(v.ViolationType) !== typeFilter) continue;
+                    filtered.push(v);
                 }
 
                 // Drop selections for rows that are no longer in the data
                 // (e.g., a row was deleted by another tab) so the count
                 // and Select-All state stay correct.
-                const validIds = new Set(violations.map(v => v.ID).filter(Boolean));
+                const validIds = new Set();
+                for (let i = 0; i < violations.length; i++) {
+                    if (violations[i].ID) validIds.add(violations[i].ID);
+                }
                 Array.from(selectedViolationIds).forEach(id => {
                     if (!validIds.has(id)) selectedViolationIds.delete(id);
                 });
-                const visibleIds = filtered.map(v => v.ID).filter(Boolean);
-                const visibleSelected = visibleIds.filter(id => selectedViolationIds.has(id)).length;
+                const visibleIds = [];
+                for (let i = 0; i < filtered.length; i++) {
+                    if (filtered[i].ID) visibleIds.push(filtered[i].ID);
+                }
+                let visibleSelected = 0;
+                for (let i = 0; i < visibleIds.length; i++) {
+                    if (selectedViolationIds.has(visibleIds[i])) visibleSelected++;
+                }
                 const allChecked = visibleIds.length > 0 && visibleSelected === visibleIds.length;
 
                 const typeOptions = `<option value="ALL"${typeFilter === "ALL" ? " selected" : ""}>All Types</option>` +
@@ -1115,39 +1192,41 @@
                 body.innerHTML = toolbar + `<table><thead><tr>` +
                     `<th style="width:32px"><input type="checkbox" class="viol-cb" id="cb-all"${allChecked ? " checked" : ""} aria-label="Select all visible"></th>` +
                     `<th>ID</th><th>ชื่อ</th><th>BIB</th><th>ประเภท</th><th>ข้อความ</th><th>หลักฐาน</th><th>เวลา</th><th>สถานะ</th><th>จัดการ</th>` +
-                    `</tr></thead><tbody>${filtered.map(v => {
-                        const verified = String(v.Verified).toLowerCase() === "true";
-                        const type = normalizeType(v.ViolationType);
-                        const typeLabel = VIOLATION_TYPE_LABELS[type] || type;
-                        const imgHtml = v.ImageUrl
-                            ? `<img src="${attr(v.ImageUrl)}" data-img="${attr(v.ImageUrl)}" style="width:60px;height:40px;object-fit:cover;border-radius:6px;cursor:pointer">`
-                            : "-";
-                        const verifyBtn = !verified
-                            ? `<button class="btn-sm btn-vf" data-verify="${attr(v.ID)}">✅</button>` : "";
-                        const checked = selectedViolationIds.has(v.ID) ? " checked" : "";
-                        return `<tr>` +
-                            `<td><input type="checkbox" class="viol-cb" data-cb-id="${attr(v.ID)}"${checked} aria-label="Select violation"></td>` +
-                            `<td style="font-size:.75rem;color:var(--mut)">${esc(v.ID || "")}</td>` +
-                            `<td style="font-weight:600">${esc(v.Name)}</td>` +
-                            `<td>${esc(v.BibNumber || "-")}</td>` +
-                            `<td><span class="vt-badge vt-${esc(type)}">${esc(typeLabel)}</span></td>` +
-                            `<td style="font-size:.82rem;max-width:200px;overflow:hidden;text-overflow:ellipsis">${esc(v.Message || "")}</td>` +
-                            `<td>${imgHtml}</td>` +
-                            `<td style="font-size:.8rem">${esc(v.Timestamp || "")}</td>` +
-                            `<td>${verified ? '<span style="color:var(--grn);font-size:.8rem">✅ ยืนยันแล้ว</span>' : '<span style="color:var(--mut);font-size:.8rem">⏳ รอตรวจ</span>'}</td>` +
-                            `<td><div style="display:flex;gap:.3rem">${verifyBtn}<button class="btn-sm btn-dl" data-del-violation="${attr(v.ID)}">🗑️</button></div></td>` +
-                            `</tr>`;
-                    }).join("")}</tbody></table>`;
+                    `</tr></thead><tbody>${filtered.map(renderViolationRow).join("")}</tbody></table>`;
 
                 wireViolationToolbar(visibleIds);
-                body.querySelectorAll("[data-img]").forEach(el => el.addEventListener("click", () => openLb(el.dataset.img)));
-                body.querySelectorAll("[data-verify]").forEach(b => b.addEventListener("click", () => verifyV(b.dataset.verify)));
-                body.querySelectorAll("[data-del-violation]").forEach(b => b.addEventListener("click", () => confirmDel("violation", b.dataset.delViolation)));
             }
         }
 
-        // Re-bound on every render — the toolbar nodes are recreated by
-        // innerHTML reassignment so the previous listeners die with them.
+        // ── EVENT DELEGATION on #admin-body ──
+        // One listener per event type lives forever on the container; the
+        // table contents are replaced via innerHTML on every render but the
+        // delegated listener is not. This replaces the previous N-per-row
+        // attach pattern (one listener per button per render).
+        (function wireAdminBodyDelegation() {
+            const body = document.getElementById("admin-body");
+            if (!body) return;
+            body.addEventListener("click", e => {
+                const t = e.target.closest("[data-img], [data-verify], [data-del-runner], [data-del-violation]");
+                if (!t) return;
+                if (t.dataset.img != null) openLb(t.dataset.img);
+                else if (t.dataset.verify != null) verifyV(t.dataset.verify);
+                else if (t.dataset.delRunner != null) confirmDel("runner", t.dataset.delRunner);
+                else if (t.dataset.delViolation != null) confirmDel("violation", t.dataset.delViolation);
+            });
+            body.addEventListener("change", e => {
+                const cb = e.target.closest("[data-cb-id]");
+                if (!cb) return;
+                const id = cb.dataset.cbId;
+                if (cb.checked) selectedViolationIds.add(id);
+                else selectedViolationIds.delete(id);
+                renderAdminTab();
+            });
+        })();
+
+        // Re-bound on every render for the controls that live in the
+        // toolbar (type-filter, cb-all, bulk-del button) — those nodes are
+        // recreated by innerHTML reassignment so old listeners die with them.
         function wireViolationToolbar(visibleIds) {
             const sel = document.getElementById("type-filter");
             if (sel) sel.addEventListener("change", e => { typeFilter = e.target.value; renderAdminTab(); });
@@ -1158,13 +1237,6 @@
                 else visibleIds.forEach(id => selectedViolationIds.delete(id));
                 renderAdminTab();
             });
-
-            document.querySelectorAll("[data-cb-id]").forEach(cb => cb.addEventListener("change", e => {
-                const id = cb.dataset.cbId;
-                if (e.target.checked) selectedViolationIds.add(id);
-                else selectedViolationIds.delete(id);
-                renderAdminTab();
-            }));
 
             const btn = document.getElementById("btn-bulk-del");
             if (btn) btn.addEventListener("click", bulkDeleteSelected);
@@ -1177,22 +1249,27 @@
             document.getElementById("confirm-modal").classList.add("on");
             document.getElementById("confirm-ok").onclick = async () => {
                 closeConfirm();
-                const d = await adminPost({ action: "deleteViolationsBatch", ids });
-                if (d.status !== "success") {
-                    alert("ลบไม่สำเร็จ: " + (d.message || "Unknown"));
-                } else {
-                    selectedViolationIds.clear();
-                    if (Array.isArray(d.notFound) && d.notFound.length) {
-                        console.warn("deleteViolationsBatch: not found:", d.notFound);
+                try {
+                    const d = await adminPost({ action: "deleteViolationsBatch", ids });
+                    if (!d || d.status !== "success") {
+                        alert("ลบไม่สำเร็จ: " + ((d && d.message) || "Unknown"));
+                    } else {
+                        selectedViolationIds.clear();
                     }
+                } catch (e) {
+                    alert("ลบไม่สำเร็จ: เชื่อมต่อเซิร์ฟเวอร์ไม่ได้");
                 }
                 loadAdminData();
             };
         }
 
         async function verifyV(id) {
-            const d = await adminPost({ action: "verifyViolation", id });
-            if (d.status !== "success") alert("ตรวจสอบไม่สำเร็จ: " + (d.message || "Unknown"));
+            try {
+                const d = await adminPost({ action: "verifyViolation", id });
+                if (!d || d.status !== "success") alert("ตรวจสอบไม่สำเร็จ: " + ((d && d.message) || "Unknown"));
+            } catch (e) {
+                alert("ตรวจสอบไม่สำเร็จ: เชื่อมต่อเซิร์ฟเวอร์ไม่ได้");
+            }
             loadAdminData();
         }
         function confirmDel(type, id) {
@@ -1203,8 +1280,12 @@
                 const payload = type === "runner"
                     ? { action: "deleteRunner", name: id }
                     : { action: "deleteViolation", id };
-                const d = await adminPost(payload);
-                if (d.status !== "success") alert("ลบไม่สำเร็จ: " + (d.message || "Unknown"));
+                try {
+                    const d = await adminPost(payload);
+                    if (!d || d.status !== "success") alert("ลบไม่สำเร็จ: " + ((d && d.message) || "Unknown"));
+                } catch (e) {
+                    alert("ลบไม่สำเร็จ: เชื่อมต่อเซิร์ฟเวอร์ไม่ได้");
+                }
                 loadAdminData();
             };
         }

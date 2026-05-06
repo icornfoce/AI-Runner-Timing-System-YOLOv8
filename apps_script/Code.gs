@@ -199,15 +199,18 @@ function requireAdmin(body) {
 }
 
 // ─── INPUT VALIDATION ───────────────────────────────────────
+function isEmpty(v) {
+  return v == null || v === "";
+}
 function reqStr(v, name, pattern, maxLen) {
-  if (v == null || v === "") throw httpError(name + " is required", "bad_request");
+  if (isEmpty(v)) throw httpError(name + " is required", "bad_request");
   const s = String(v).trim();
   if (maxLen && s.length > maxLen) throw httpError(name + " exceeds " + maxLen + " chars", "bad_request");
   if (pattern && !pattern.test(s)) throw httpError(name + " has invalid format", "bad_request");
   return s;
 }
 function optStr(v, pattern, maxLen) {
-  if (v == null || v === "") return "";
+  if (isEmpty(v)) return "";
   const s = String(v).trim();
   if (maxLen && s.length > maxLen) throw httpError("value exceeds " + maxLen + " chars", "bad_request");
   if (pattern && !pattern.test(s)) throw httpError("invalid format", "bad_request");
@@ -222,7 +225,7 @@ function httpError(msg, code) {
 // Accepts undefined/empty (returns DEFAULT_VIOLATION_TYPE), otherwise must
 // be one of VIOLATION_TYPES. Case-insensitive on input; stored as upper.
 function normalizeViolationType(v) {
-  if (v == null || v === "") return DEFAULT_VIOLATION_TYPE;
+  if (isEmpty(v)) return DEFAULT_VIOLATION_TYPE;
   const s = String(v).trim().toUpperCase();
   if (!VIOLATION_TYPE_SET[s]) {
     throw httpError("Unknown violationType: " + s, "bad_request");
@@ -232,7 +235,7 @@ function normalizeViolationType(v) {
 
 // ─── TIME / DURATION HELPERS ────────────────────────────────
 function parseTimeToSeconds(v) {
-  if (v == null || v === "") return null;
+  if (isEmpty(v)) return null;
   if (v instanceof Date) {
     return v.getHours() * 3600 + v.getMinutes() * 60 + v.getSeconds();
   }
@@ -253,7 +256,7 @@ function calcDuration(cp1, cp2) {
   return mins + ":" + String(secs).padStart(2, "0");
 }
 function normalizeTimeStr(v) {
-  if (v == null || v === "") return "";
+  if (isEmpty(v)) return "";
   if (v instanceof Date) {
     const pad = function (n) { return String(n).padStart(2, "0"); };
     return pad(v.getHours()) + ":" + pad(v.getMinutes()) + ":" + pad(v.getSeconds());
@@ -316,11 +319,19 @@ function readWholeSheet(sheet) {
   };
 }
 
+// Convenience wrapper around readWholeSheet + findRowByName — returns
+// both the snapshot and the resolved row index so callers don't duplicate
+// the snap+lookup pattern when they only need the row.
+function getRowByName(sheet, name) {
+  const snap = readWholeSheet(sheet);
+  return { snap: snap, rowIdx: snap.findRowByName(name) };
+}
+
 // JSON projection for read-only endpoints. getDisplayValues so any
 // Date-typed cells round-trip as their formatted string.
 function readSheetAsJson(sheet) {
   const data = sheet.getDataRange().getDisplayValues();
-  if (data.length <= 1) return [];
+  if (!data || data.length <= 1) return [];
   const headers = data[0];
   const rows = new Array(data.length - 1);
   for (let i = 1; i < data.length; i++) {
@@ -579,35 +590,39 @@ function handleRecordCheckpoint(body) {
 
   const sheet = getSheet(SHEETS.RESULTS);
   const snap = readWholeSheet(sheet);
-  const colIdx = snap.headerIndex(colName);
-  if (colIdx < 0) throw httpError("Column not found: " + colName, "schema_error");
-  const startCol = snap.headerIndex("Start_Time");
-  const finishCol = snap.headerIndex("Finish_Time");
-  const durCol = snap.headerIndex("Total_Duration");
-  const updCol = snap.headerIndex("UpdatedAt");
-  const bibCol = snap.headerIndex("BibNumber");
+
+  // Build a single column-name → index map so we don't re-scan headers
+  // five times below. Missing columns are -1.
+  const cols = {};
+  for (let i = 0; i < snap.headers.length; i++) cols[snap.headers[i]] = i;
+  const colIdx = cols[colName];
+  if (colIdx == null || colIdx < 0) throw httpError("Column not found: " + colName, "schema_error");
+  const startCol = cols.Start_Time, finishCol = cols.Finish_Time;
+  const durCol = cols.Total_Duration, updCol = cols.UpdatedAt, bibCol = cols.BibNumber;
 
   const rowIdx = snap.findRowByName(name);
 
   if (rowIdx < 0) {
     const newRow = new Array(snap.headers.length).fill("");
     newRow[0] = name;
-    if (bibCol >= 0) newRow[bibCol] = bib;
+    if (bibCol != null && bibCol >= 0) newRow[bibCol] = bib;
     newRow[colIdx] = timestamp;
-    if (updCol >= 0) newRow[updCol] = new Date().toISOString();
+    if (updCol != null && updCol >= 0) newRow[updCol] = new Date().toISOString();
     sheet.appendRow(newRow);
     logInfo("recordCheckpoint (new)", { name: name, cp: colName });
   } else {
-    const range = sheet.getRange(rowIdx, 1, 1, snap.headers.length);
-    const row = range.getValues()[0];
+    // Reuse the snapshot row instead of round-tripping a second
+    // getValues() — the data is already in memory from readWholeSheet.
+    const row = snap.values[rowIdx - 2].slice();
     row[colIdx] = timestamp;
-    if (bib && bibCol >= 0) row[bibCol] = bib;
-    if (durCol >= 0 && row[startCol] && row[finishCol]) {
+    if (bib && bibCol != null && bibCol >= 0) row[bibCol] = bib;
+    if (durCol != null && durCol >= 0 && startCol != null && finishCol != null
+        && row[startCol] && row[finishCol]) {
       row[durCol] = calcDuration(row[startCol], row[finishCol]);
     }
-    if (updCol >= 0) row[updCol] = new Date().toISOString();
+    if (updCol != null && updCol >= 0) row[updCol] = new Date().toISOString();
     normalizeRowTimeCols(row, snap);
-    range.setValues([row]);
+    sheet.getRange(rowIdx, 1, 1, snap.headers.length).setValues([row]);
     logInfo("recordCheckpoint (update)", { name: name, cp: colName });
   }
 
@@ -805,13 +820,19 @@ function handleDeleteRunner(body) {
   }
 
   // Both sheets: in-memory findIndex, delete on hit, no further loop.
-  const rSheet = getSheet(SHEETS.RUNNERS);
-  const rRow = readWholeSheet(rSheet).findRowByName(name);
-  if (rRow > 0) rSheet.deleteRow(rRow);
-
-  const resSheet = getSheet(SHEETS.RESULTS);
-  const resRow = readWholeSheet(resSheet).findRowByName(name);
-  if (resRow > 0) resSheet.deleteRow(resRow);
+  // Each sheet's read+delete is isolated so a Results-sheet failure
+  // can't leave the Runners row orphaned (and vice versa).
+  const sheetsToClear = [SHEETS.RUNNERS, SHEETS.RESULTS];
+  for (let i = 0; i < sheetsToClear.length; i++) {
+    const sheetName = sheetsToClear[i];
+    try {
+      const sheet = getSheet(sheetName);
+      const found = getRowByName(sheet, name);
+      if (found.rowIdx > 0) sheet.deleteRow(found.rowIdx);
+    } catch (e) {
+      logErr("deleteRunner: " + sheetName + " cleanup failed for " + name, e);
+    }
+  }
 
   invalidateRunners();
   invalidateResults();
