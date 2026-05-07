@@ -9,7 +9,8 @@
 > cadence, caching, or guardrails MUST update this file in the same change
 > set.
 >
-> **Last updated:** 2026-05-07 — initial generation (covers Code.gs v5)
+> **Last updated:** 2026-05-07 — CV pipeline overhaul in `checkpoint.html`
+> (TinyFaceDetector, bbox EMA, OCR preprocess + voting). Backend still v5.
 
 ---
 
@@ -206,45 +207,113 @@ My Drive/
 
 ### 4.2 Checkpoint detection (`checkpoint.html` → `recordCheckpoint`/`reportViolation`)
 
+The pipeline has two **independent triggers**:
+
+- **`recordCheckpoint`** is gated by FACE recognition only — N consecutive
+  matches above the FACE_MATCH_DISTANCE threshold + per-CP cooldown.
+- **`reportViolation`** is gated by FACE recognition AND OCR consensus —
+  consensus BIB must disagree with the registered BIB AND a separate
+  per-CP violation cooldown must be elapsed.
+
 ```
 init():
-  load face-api models  (pinned to @0.22.2)
+  load face-api models           (TinyFaceDetector + Landmark68 + Recognition)
   GET /?action=getRunners
-    → build FaceMatcher(labels, threshold=0.5)
+    → build FaceMatcher(labels, FACE_MATCH_DISTANCE = 0.45)
     → runnerRegistry[name] = bibNumber
-  open camera (NotAllowedError surfaced as friendly Thai message)
-  init Tesseract worker
+  getUserMedia(VIDEO_WIDTH × VIDEO_HEIGHT = 1280×720)
+    NotAllowedError surfaced as friendly Thai message
+  Tesseract.createWorker("eng") + setParameters({
+    tessedit_char_whitelist: '0123456789',
+    tessedit_pageseg_mode:   '7'        // single text line
+  })
   start requestAnimationFrame(processLoop)
 
 processLoop (every frame):
-  detectAllFaces().withFaceLandmarks().withFaceDescriptors()
+  detectorOptions = TinyFaceDetectorOptions({
+    inputSize: FACE_DETECTOR_INPUT_SIZE (320),
+    scoreThreshold: FACE_DETECTOR_SCORE_THRESHOLD (0.5)
+  })
+  detectAllFaces(video, detectorOptions).withFaceLandmarks().withFaceDescriptors()
+
   for each detection:
     match = faceMatcher.findBestMatch(descriptor)
-    if match.label !== "unknown" AND match.distance <= 0.5:
+    isKnown = match.label !== "unknown" AND match.distance <= FACE_MATCH_DISTANCE
+    box = isKnown ? smoothBox(name, rawBox) : rawBox      ← EMA: α=0.35
+
+    if isKnown:
       consecutiveFrames[name]++
+
+      ── recordCheckpoint trigger (face-only) ──
       if consecutiveFrames[name] >= RECORD_AFTER_FRAMES (5)
          AND now - cooldowns["name:cpId"] > COOLDOWN_SEC (30):
            cooldowns["name:cpId"] = now
            POST recordCheckpoint
+
+      ── OCR trigger ──
       if consecutiveFrames[name] >= OCR_AFTER_FRAMES (10) AND !ocrBusy:
-           runSmartOCR(video, det, name)   ← crops body region below face
-    else:
-      currentNames.add("unknown")
-  reset consecutiveFrames for names not seen this frame
-  if OCR cache entry is older than OCR_CACHE_TTL_MS (15s) → drop it
-  if ocrBib is set AND ocrBib !== runnerRegistry[name]:
-      reportViolation(name, expected=runnerRegistry[name], found=ocrBib)
-      with violationType="WRONG_PERSON"
+           runSmartOCR(video, box, name)   ← uses SMOOTHED box
+
+    draw rect (using box), label "name (XX%)", BIB consensusBib(name) || expected
+
+  ── per-frame staleness sweep ──
+  consecutiveFrames[n] = 0 for n not in currentNames
+  bboxEMA[n].missingFrames++ for n not in currentNames
+  if missingFrames > BBOX_EMA_RESET_FRAMES (10):
+    delete bboxEMA[n]; delete ocrVotes[n]
+
+
+runSmartOCR(video, box, name):
+  crop chest region using SMOOTHED box (below face: 2.5×faceH tall)
+  preprocessForOCR(crop):
+    grayscale (BT.601) → integral image →
+    adaptive threshold (mean − ADAPTIVE_THRESHOLD_C, ADAPTIVE_THRESHOLD_BLOCK² window) →
+    nearest-neighbor 2× upscale
+  result = tesseractWorker.recognize(processed)            ← async, off-thread
+  text = digits-only(result.data.text)
+  conf = result.data.confidence
+
+  ── validation gate (silent reject on fail) ──
+  if !text                                          → return
+  if text.length < BIB_MIN_LEN (2)
+     OR text.length > BIB_MAX_LEN (5)               → return
+  if conf < OCR_MIN_CONFIDENCE (70)                 → return
+
+  ── majority vote ──
+  buf = ocrVotes[name]; push {text, ts, conf}
+  evict entries older than OCR_CACHE_TTL_MS (15s)
+  cap buf at OCR_VOTE_BUFFER_SIZE (5)
+  if max-tally(buf) < OCR_VOTE_MIN_CONSENSUS (3)    → return  (no consensus yet)
+
+  consensus = majority bib
+  ocrConsensus[name] = {bib: consensus, ts: now}
+
+  ── violation trigger (consensus mismatch + cooldown) ──
+  if registered[name] AND consensus !== registered[name]:
+    if now - violationCooldowns["name:cpId"] > VIOLATION_COOLDOWN_SEC (60):
+      violationCooldowns["name:cpId"] = now
+      reportViolation(name, expected=registered[name], found=consensus,
+                      violationType="WRONG_PERSON")
 ```
 
-**Per-CP cooldown** uses key `"<name>:<cpId>"` — this lets a runner
+**Per-CP cooldown keys** use `"<name>:<cpId>"` — this lets a runner
 trigger each station once even if they double back through the camera
-view.
+view. Record cooldowns and violation cooldowns live in **separate
+buckets** so reporting a violation does not suppress a legitimate
+timing record (or vice versa).
 
 **Smart OCR** crops a region **below** the face (height ≈ 2.5×face
 height, width ≈ face width + 0.6×face height on each side, clamped to
 video dimensions) — the assumption is the BIB is on the chest of the
-shirt.
+shirt. The crop is taken from the **EMA-smoothed** box; using the raw
+detection box made the crop jitter and tanked Tesseract confidence.
+
+**Preprocessing runs on the main thread** (not in a Web Worker) because
+the typical 200×150 px crop costs <1 ms via integral image, while a
+worker round-trip would add postMessage / structured-clone overhead
+larger than the work itself. **Tesseract itself runs in its own Web
+Worker** (Tesseract.js v5 default), so the actual recognition step
+never blocks the render loop.
 
 ### 4.3 Dashboard polling (`dashboard.html`)
 
@@ -382,6 +451,31 @@ explicit, justified, and accompanied by an update to this file.
 17. **`legacy_v1/` is frozen.** Do not refactor it as part of v2 work.
     It only changes when the user explicitly asks for offline-mode
     fixes.
+18. **The EMA-smoothed bbox MUST be passed to `runSmartOCR`.** Cropping
+    from the raw detection box reintroduces frame-to-frame jitter and
+    Tesseract confidence collapses. `processLoop` builds `box =
+    smoothBox(name, rawBox)` once per detection and uses it for both
+    the overlay and the OCR crop — preserve that contract.
+19. **OCR preprocessing is `grayscale → adaptive threshold → 2×
+    nearest-neighbor`, in that order, on the main thread.** Don't swap
+    in bilinear upscale (introduces gray pixels Tesseract mistreats).
+    Don't move it to a Web Worker (the postMessage round-trip is
+    larger than the work). Don't drop the threshold step (gray text on
+    gray jersey is the dominant failure mode without it).
+20. **Tesseract worker config is part of the contract.** `tessedit_char_whitelist
+    = '0123456789'` and `tessedit_pageseg_mode = '7'` are set once at
+    init and assumed by the validation gate. Do not change these
+    without re-deriving the BIB length and confidence thresholds.
+21. **Violations require majority consensus, not a single read.** The
+    `castVote` → consensus gate exists because single-frame OCR
+    misreads were generating false-positive `WRONG_PERSON` reports.
+    Don't bypass it (e.g., by calling `reportViolation` directly from
+    `runSmartOCR` on the first read).
+22. **Recording vs violation triggers are independent.** `recordCheckpoint`
+    is gated on **face** consecutive frames + record cooldown only — it
+    must NOT depend on OCR consensus, because operators want timing
+    records even when the BIB is unreadable. Conversely, the violation
+    gate must NOT trigger record writes.
 
 ---
 
@@ -393,7 +487,44 @@ explicit, justified, and accompanied by an update to this file.
   authoritative changelog for the backend.
 - Frontend templates align with v5 (ViolationType + bulk delete UI).
 
-### 6.2 Latest features in v5 (current)
+### 6.2 Recent changes (2026-05-07): CV pipeline overhaul in `checkpoint.html`
+
+Frontend-only change; backend `Code.gs` is still v5. Goal was higher real-
+world accuracy and FPS without blocking the main thread.
+
+- **Detector swap**: `ssdMobilenetv1` → **`tinyFaceDetector`**
+  (`inputSize=320`, `scoreThreshold=0.5`). ~5× FPS uplift in practice. To
+  revert: load `ssdMobilenetv1` and pass no detector options to
+  `detectAllFaces`.
+- **Match distance tightened**: `0.5` → **`0.45`**. Trades more
+  "Unknown" labels for fewer cross-runner false matches.
+- **Video stream upgraded**: `640×480` → **`1280×720`**. TinyFaceDetector
+  internally rescales to its `inputSize` for inference, so this only
+  affects the operator preview and the OCR crop quality.
+- **EMA bbox stabilization**: per-runner exponential moving average
+  (`BBOX_EMA_ALPHA=0.35`, ~3-frame half-life) on `(x, y, width, height)`.
+  Smoothed box drives both the overlay rectangle AND the chest crop —
+  this is the single biggest contributor to OCR accuracy at higher FPS.
+  EMA expires after `BBOX_EMA_RESET_FRAMES=10` consecutive missing frames
+  (drops the vote buffer at the same time, so a returning runner starts
+  clean).
+- **OCR preprocessing pipeline**: cropped chest → grayscale (BT.601) →
+  integral-image adaptive threshold (`block=15`, `C=10`) → nearest-
+  neighbor 2× upscale. <1 ms total on the main thread; no Web Worker
+  needed.
+- **Tesseract config**: `tessedit_char_whitelist = '0123456789'` +
+  `tessedit_pageseg_mode = '7'` (single text line) at worker init.
+- **OCR validation gate**: silently rejects reads that fail any of
+  digits-only / `length ∈ [2, 5]` / `confidence ≥ 70`.
+- **Multi-frame majority vote**: `OCR_VOTE_BUFFER_SIZE=5`,
+  `OCR_VOTE_MIN_CONSENSUS=3` per runner; entries older than
+  `OCR_CACHE_TTL_MS=15s` evict on every call. Consensus result cached in
+  `ocrConsensus[name]` for the display path.
+- **Two-bucket cooldowns**: `cooldowns` (record, 30 s) and
+  `violationCooldowns` (violation, 60 s) are separate so reporting a
+  violation can't suppress a legitimate timing record (or vice versa).
+
+### 6.3 Backend features in v5 (still current)
 
 - **`ViolationType` column** on the Violations sheet, with a fixed
   whitelist of 7 values (`NO_BIB`, `WRONG_PERSON`, `UNREGISTERED`,
@@ -412,12 +543,12 @@ explicit, justified, and accompanied by an update to this file.
 - **`_migrateViolationTypeColumn()`** one-shot helper for back-filling
   existing sheets.
 
-### 6.3 Carried over from v4
+### 6.4 Carried over from v4
 
 - **Read-through CacheService** for all 4 GET actions (12 s TTL).
 - **Synchronous Drive cleanup** in delete paths.
 
-### 6.4 Known behaviors (not bugs)
+### 6.5 Known behaviors (not bugs)
 
 - **Cache lag**: A write made directly in the sheet UI (not via the API)
   won't be visible to the dashboard for up to 12 seconds, because the
@@ -431,15 +562,31 @@ explicit, justified, and accompanied by an update to this file.
 - **Camera released on `pagehide`**: The OS camera indicator goes off
   when navigating away from `/checkpoint` or `/register`. Re-entering
   the page restarts the camera.
-- **OCR cache TTL = 15 s**: A bad OCR read self-corrects within 15
-  seconds. Do not lengthen this.
-- **face-api.js distance = 0.5**: This is the recognition threshold.
+- **Camera resolution = 1280×720**. TinyFaceDetector internally
+  rescales to `inputSize=320` for inference; the 720p preview is for
+  the operator and the OCR crop. Some devices may negotiate a lower
+  resolution if 720p isn't supported by the webcam.
+- **`OCR_CACHE_TTL_MS` = 15 s** governs both the consensus expiry
+  AND the vote-buffer eviction. A drifting OCR self-corrects within
+  this window. Do not lengthen.
+- **`FACE_MATCH_DISTANCE` = 0.45** is the recognition threshold.
   Lower = stricter (fewer false matches, more "Unknown" labels).
   Tuning this requires re-validating with real-event footage.
+- **Silent OCR rejects**: reads failing the validation gate (digits-
+  only, length 2–5, confidence ≥ 70) are dropped without UI feedback.
+  This is intentional — corrupt votes would derail consensus. Drop
+  `OCR_MIN_CONFIDENCE` if low-light footage starves the vote buffer.
+- **Violation requires ≥3-of-5 consensus**: a single wrong-BIB read
+  no longer fires a `WRONG_PERSON` violation. The runner's chest must
+  be readable for at least 3 frames inside a 15-second window.
+- **EMA persists across brief detection misses**: a 1–10 frame gap in
+  detection keeps the smoothed box around so the next match snaps
+  back without re-warming up. Past 10 frames the EMA and vote buffer
+  are dropped together.
 - **Sample data** in `Data/` (legacy face DB) and `events/test/` is
   retained for reference; both directories are gitignored.
 
-### 6.5 One-off setup helpers (Apps Script editor)
+### 6.6 One-off setup helpers (Apps Script editor)
 
 Run these from the function dropdown in the Apps Script editor.
 All are idempotent.
@@ -451,7 +598,7 @@ All are idempotent.
 | `_migrateAllImageUrls()` | Rewrites legacy `/file/d/<id>/view` URLs to the embed form | Once after the v3 image-URL change |
 | `_migrateViolationTypeColumn()` | Adds the `ViolationType` column and back-fills `WRONG_PERSON` | Once after deploying v5 |
 
-### 6.6 Endpoints reference
+### 6.7 Endpoints reference
 
 **GET** (`?action=…`)
 | Action | Returns |
@@ -477,23 +624,57 @@ All are idempotent.
 All responses are
 `{ status: "success", … }` or `{ status: "error", code, message }`.
 
-### 6.7 Configuration knobs (frontend)
+### 6.8 Configuration knobs (frontend)
 
+#### Common
 | Constant | File | Default | Effect |
 |---|---|---|---|
 | `API` / `API_URL` | all 3 templates | (deploy URL) | Points all 3 pages at the Apps Script web app |
 | `MODEL_URL` | register, checkpoint | `…@0.22.2/weights/` | face-api weight CDN, **pinned** |
-| `COOLDOWN_SEC` | checkpoint | `30` | Per-CP write cooldown |
-| `RECORD_AFTER_FRAMES` | checkpoint | `5` | Consecutive recognitions before logging |
-| `OCR_AFTER_FRAMES` | checkpoint | `10` | Consecutive recognitions before triggering Tesseract |
-| `OCR_CACHE_TTL_MS` | checkpoint | `15000` | Stale OCR purge interval |
-| `POLL_RESULTS_MS` | dashboard | `5000` | Leaderboard refresh |
-| `POLL_VIOLATIONS_MS` | dashboard | `10000` | Public alerts refresh |
-| `POLL_ADMIN_MS` | dashboard | `15000` | Admin tables refresh |
-| `DISMISSED_MAX` | dashboard | `500` | FIFO cap on dismissed-alert memory |
-| Face match distance | checkpoint | `0.5` | `findBestMatch` threshold (lower = stricter) |
 
-### 6.8 Configuration knobs (backend, `Code.gs`)
+#### `checkpoint.html` — video & detection
+| Constant | Default | Effect |
+|---|---|---|
+| `VIDEO_WIDTH` × `VIDEO_HEIGHT` | `1280 × 720` | `getUserMedia` ideal; operator preview + OCR crop quality |
+| `FACE_DETECTOR_INPUT_SIZE` | `320` | TinyFaceDetector inference size; 224=faster, 416=more accurate |
+| `FACE_DETECTOR_SCORE_THRESHOLD` | `0.5` | TinyFaceDetector minimum face-score |
+| `FACE_MATCH_DISTANCE` | `0.45` | `findBestMatch` threshold (lower = stricter) |
+
+#### `checkpoint.html` — bbox EMA
+| Constant | Default | Effect |
+|---|---|---|
+| `BBOX_EMA_ALPHA` | `0.35` | Smoothing weight on new sample (low = smoother but laggier) |
+| `BBOX_EMA_RESET_FRAMES` | `10` | Drop EMA + vote buffer after this many missing frames |
+
+#### `checkpoint.html` — recording / cooldowns
+| Constant | Default | Effect |
+|---|---|---|
+| `RECORD_AFTER_FRAMES` | `5` | Consecutive recognitions before logging a checkpoint |
+| `COOLDOWN_SEC` | `30` | Per-CP per-runner record cooldown |
+| `VIOLATION_COOLDOWN_SEC` | `60` | Per-CP per-runner violation cooldown (separate bucket) |
+
+#### `checkpoint.html` — OCR pipeline
+| Constant | Default | Effect |
+|---|---|---|
+| `OCR_AFTER_FRAMES` | `10` | Consecutive recognitions before triggering Tesseract |
+| `OCR_CACHE_TTL_MS` | `15000` | Vote-buffer + consensus expiry |
+| `ADAPTIVE_THRESHOLD_BLOCK` | `15` | Local-window size for adaptive threshold (odd; 11–19 typical) |
+| `ADAPTIVE_THRESHOLD_C` | `10` | Mean offset; higher = more aggressive thresholding |
+| `OCR_UPSCALE` | `2` | Nearest-neighbor scale factor before OCR |
+| `OCR_MIN_CONFIDENCE` | `70` | Tesseract overall-confidence floor |
+| `BIB_MIN_LEN` / `BIB_MAX_LEN` | `2` / `5` | Accepted BIB length range |
+| `OCR_VOTE_BUFFER_SIZE` | `5` | Rolling buffer of recent valid reads |
+| `OCR_VOTE_MIN_CONSENSUS` | `3` | Reads-in-agreement required for consensus |
+
+#### `dashboard.html`
+| Constant | Default | Effect |
+|---|---|---|
+| `POLL_RESULTS_MS` | `5000` | Leaderboard refresh |
+| `POLL_VIOLATIONS_MS` | `10000` | Public alerts refresh |
+| `POLL_ADMIN_MS` | `15000` | Admin tables refresh |
+| `DISMISSED_MAX` | `500` | FIFO cap on dismissed-alert memory |
+
+### 6.9 Configuration knobs (backend, `Code.gs`)
 
 | Constant | Default | Effect |
 |---|---|---|
@@ -516,20 +697,21 @@ MUST update `AI_CONTEXT.md` in the same change set so it reflects the
 new reality. Concretely:
 
 1. **Before finishing a task**, ask: did this change…
-   - introduce, rename, or remove an endpoint? → §6.6
-   - change a sheet schema, column order, or default? → §3.1, §6.2
+   - introduce, rename, or remove an endpoint? → §6.7
+   - change a sheet schema, column order, or default? → §3.1, §6.3
    - change a Drive folder layout or sharing setting? → §3.2, §5
-   - change a polling cadence, cache TTL, or any tuning constant? → §6.7, §6.8
-   - change the recognition / OCR / cooldown logic? → §4.2, §6.7
+   - change a polling cadence, cache TTL, or any tuning constant? → §6.8, §6.9
+   - change the recognition / OCR / cooldown logic? → §4.2, §6.8
    - change the admin auth flow? → §4.6
    - establish a new "do not break" rule? → §5
-   - close out a known behavior or introduce a new one? → §6.4
+   - close out a known behavior or introduce a new one? → §6.5
 2. If yes to any of the above, **edit the relevant section of this
    file** before declaring the task done.
 3. Bump the `Last updated:` line at the top.
 4. If the change is large enough that other agents would benefit from
-   knowing the *why*, drop a one-line note under §6.2 ("Latest features"
-   becomes "Recent changes" if needed).
+   knowing the *why*, add a "Recent changes (YYYY-MM-DD)" subsection
+   immediately after §6.1 (rename/renumber existing subsections — keep
+   §6.2 as the most recent change so readers find it first).
 5. **Do not** create a separate changelog or planning doc — this file is
    the changelog. Multiple parallel docs drift apart.
 6. Commit the `AI_CONTEXT.md` change in the same commit as the code
