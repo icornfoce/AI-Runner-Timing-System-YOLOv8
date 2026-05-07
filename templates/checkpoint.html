@@ -149,9 +149,13 @@ const ADAPTIVE_THRESHOLD_BLOCK = 15;        // odd; 11–19 typical
 const ADAPTIVE_THRESHOLD_C = 10;
 const OCR_UPSCALE = 2;                      // nearest-neighbor; preserves binary edges
 
-const OCR_MIN_CONFIDENCE = 70;              // Tesseract overall confidence
-const BIB_MIN_LEN = 2;
-const BIB_MAX_LEN = 5;
+// FIELD-TEST: relaxed for indoor lighting + short BIBs.
+// Revert to 70 / 2 / 5 once real-world setups are validated. The
+// majority-vote gate (OCR_VOTE_MIN_CONSENSUS=3) still requires three
+// agreeing reads, so loosening these doesn't lower the violation bar.
+const OCR_MIN_CONFIDENCE = 60;
+const BIB_MIN_LEN = 1;
+const BIB_MAX_LEN = 6;
 
 // Multi-frame majority vote — protects against single-frame OCR misreads.
 // Buffer caps at OCR_VOTE_BUFFER_SIZE; consensus declared when
@@ -425,6 +429,28 @@ function consensusBib(name){
  return c.bib;
 }
 
+// ── OCR CROP GEOMETRY ───────────────────────────────────────
+// Single source of truth for the chest-region crop. Used by BOTH
+// processLoop (for the dashed red OCR-debug overlay) AND runSmartOCR
+// (for the actual Tesseract input). Identical geometry is critical —
+// otherwise the operator's visible OCR rectangle would not match where
+// Tesseract is actually looking.
+//
+// Factors are tuned for hand-held BIBs near chin/neck height (field
+// observation: BIBs were missed when held above the chest region).
+//   bx = box.x − 0.5·faceH         ← wider than the face
+//   by = box.y + 0.6·faceH         ← starts in the chin region
+//   bw = box.width + 1.0·faceH     ← roughly 2× face width
+//   bh = 3.0·faceH                 ← extends well below the chest
+function getOCRCropBox(box, video){
+ const faceH = box.height;
+ const bx = Math.max(0, box.x - faceH * 0.5);
+ const by = Math.max(0, box.y + faceH * 0.6);
+ const bw = Math.min(box.width + faceH * 1.0, video.videoWidth - bx);
+ const bh = Math.min(faceH * 3.0, video.videoHeight - by);
+ return {bx:bx, by:by, bw:bw, bh:bh};
+}
+
 // ── MAIN LOOP ──
 async function processLoop(){
  if(loopRunning)return; // guard against double-start
@@ -525,6 +551,26 @@ async function processLoop(){
      ctx.fillStyle="#fff"; ctx.font="11px 'JetBrains Mono',monospace";
      ctx.fillText(bibText, box.x+4, box.y+box.height+14);
     }
+
+    // OCR debug overlay — dashed red rect labeled "OCR" showing the
+    // exact region runSmartOCR will crop. Lets the field operator see
+    // whether the BIB they're holding falls inside the AI's chest
+    // region. Drawn for known runners only — we never OCR Unknowns.
+    if(isKnown){
+     const oc = getOCRCropBox(box, video);
+     ctx.save();
+     ctx.strokeStyle = "#ff3b30";
+     ctx.lineWidth = 2;
+     ctx.setLineDash([6, 4]);
+     ctx.strokeRect(oc.bx, oc.by, oc.bw, oc.bh);
+     ctx.setLineDash([]);
+     ctx.fillStyle = "rgba(255,59,48,.85)";
+     ctx.fillRect(oc.bx, oc.by, 32, 16);
+     ctx.fillStyle = "#fff";
+     ctx.font = "bold 11px 'JetBrains Mono',monospace";
+     ctx.fillText("OCR", oc.bx + 4, oc.by + 12);
+     ctx.restore();
+    }
    }
 
    // Reset stale per-name state. consecutiveFrames goes to 0 immediately
@@ -571,11 +617,10 @@ async function runSmartOCR(video, box, name){
  if(ocrBusy || !ocrReady || !tesseractWorker) return;
  ocrBusy=true;
  try{
-  const faceH=box.height;
-  const bx=Math.max(0, box.x - faceH*0.3);
-  const by=box.y + faceH;
-  const bw=Math.min(box.width + faceH*0.6, video.videoWidth - bx);
-  const bh=Math.min(faceH*2.5, video.videoHeight - by);
+  // Crop geometry shared with the OCR debug overlay in processLoop
+  // via getOCRCropBox — must remain identical or the operator's
+  // visible rectangle won't match what Tesseract actually sees.
+  const {bx, by, bw, bh} = getOCRCropBox(box, video);
   if(bw<=0 || bh<=0) return;
 
   const cropCanvas=document.createElement("canvas");

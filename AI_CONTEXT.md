@@ -9,8 +9,9 @@
 > cadence, caching, or guardrails MUST update this file in the same change
 > set.
 >
-> **Last updated:** 2026-05-07 — CV pipeline overhaul in `checkpoint.html`
-> (TinyFaceDetector, bbox EMA, OCR preprocess + voting). Backend still v5.
+> **Last updated:** 2026-05-07 — Field-test fixes: AbortController polling +
+> admin loading strip in `dashboard.html`; OCR debug overlay + relaxed
+> validation gate + wider chest crop in `checkpoint.html`. Backend still v5.
 
 ---
 
@@ -255,6 +256,8 @@ processLoop (every frame):
            runSmartOCR(video, box, name)   ← uses SMOOTHED box
 
     draw rect (using box), label "name (XX%)", BIB consensusBib(name) || expected
+    if isKnown:
+      draw dashed-red OCR debug rect at getOCRCropBox(box, video)   ← operator visibility
 
   ── per-frame staleness sweep ──
   consecutiveFrames[n] = 0 for n not in currentNames
@@ -264,7 +267,8 @@ processLoop (every frame):
 
 
 runSmartOCR(video, box, name):
-  crop chest region using SMOOTHED box (below face: 2.5×faceH tall)
+  {bx, by, bw, bh} = getOCRCropBox(box, video)              ← shared with overlay
+  crop chest region using SMOOTHED box (3×faceH tall, starts at chin)
   preprocessForOCR(crop):
     grayscale (BT.601) → integral image →
     adaptive threshold (mean − ADAPTIVE_THRESHOLD_C, ADAPTIVE_THRESHOLD_BLOCK² window) →
@@ -275,9 +279,9 @@ runSmartOCR(video, box, name):
 
   ── validation gate (silent reject on fail) ──
   if !text                                          → return
-  if text.length < BIB_MIN_LEN (2)
-     OR text.length > BIB_MAX_LEN (5)               → return
-  if conf < OCR_MIN_CONFIDENCE (70)                 → return
+  if text.length < BIB_MIN_LEN (1, field-test)
+     OR text.length > BIB_MAX_LEN (6, field-test)   → return
+  if conf < OCR_MIN_CONFIDENCE (60, field-test)     → return
 
   ── majority vote ──
   buf = ocrVotes[name]; push {text, ts, conf}
@@ -302,11 +306,24 @@ view. Record cooldowns and violation cooldowns live in **separate
 buckets** so reporting a violation does not suppress a legitimate
 timing record (or vice versa).
 
-**Smart OCR** crops a region **below** the face (height ≈ 2.5×face
-height, width ≈ face width + 0.6×face height on each side, clamped to
-video dimensions) — the assumption is the BIB is on the chest of the
-shirt. The crop is taken from the **EMA-smoothed** box; using the raw
-detection box made the crop jitter and tanked Tesseract confidence.
+**Smart OCR** crops a region anchored to the smoothed face box, computed
+by `getOCRCropBox(box, video)` — the **single source of truth** for crop
+geometry, used by both `runSmartOCR` and the dashed-red OCR debug overlay
+in `processLoop`. Current factors (post-field-test tuning):
+
+- `bx = box.x − 0.5·faceH`         (lateral pad)
+- `by = box.y + 0.6·faceH`         (start at chin level — catches BIBs
+                                     held by hand near neck)
+- `bw = box.width + 1.0·faceH`     (~2× face width)
+- `bh = 3.0·faceH`                 (extends well below the chest)
+
+The crop is taken from the **EMA-smoothed** box; using the raw detection
+box made the crop jitter and tanked Tesseract confidence.
+
+The OCR debug overlay (dashed red rectangle labeled `OCR`) is drawn on
+the overlay canvas for known runners only — it lets the field operator
+see exactly where Tesseract will look, so they can correct how a runner
+holds the BIB. Skipped for `Unknown` (we never OCR them).
 
 **Preprocessing runs on the main thread** (not in a Web Worker) because
 the typical 200×150 px crop costs <1 ms via integral image, while a
@@ -327,8 +344,30 @@ never blocks the render loop.
   consecutive failures** of either public poller.
 - `dismissed` (in-tab) caps at **500 entries**, evicted FIFO via
   `dismissedQueue`.
-- `isLoadingAdmin` mutex prevents an admin poll from clobbering an
-  in-progress bulk delete.
+- **AbortController abort-and-restart**: each poller (`fetchResults`,
+  `fetchViolations`, `loadAdminData`) holds its own `AbortController`
+  in `resultsAbort` / `violationsAbort` / `adminAbort`. When a new tick
+  fires while the previous fetch is still in flight, the old controller
+  is aborted before the new fetch begins — the freshest data always
+  wins. For `loadAdminData`, a single `signal` is shared across all
+  three parallel fetches (`Promise.all` of `getRunners`/`getViolations`/
+  `getResults`) so one `abort()` cancels the trio. After every `await`,
+  an `ac === xxxAbort` identity check drops late-arriving stale
+  responses (a fetch that finished after a newer one started). This
+  replaces the previous mutex-coalescing approach in `loadAdminData`,
+  which dropped fresh polls and left tables stale.
+- **Admin loading strip** (`#admin-loading`, Thai text + small spinner)
+  shows during in-flight admin fetches. `isLoadingAdmin` is repurposed
+  from a mutex to a UI flag toggled by `setAdminLoading(bool)`. The
+  strip is a sibling of `#admin-body`, not a child — `renderAdminTab`
+  replaces `#admin-body.innerHTML` on every call, which would wipe a
+  child element.
+- **Alert rendering uses `DocumentFragment`**: new violation cards are
+  appended to a fragment, which is then prepended to `#alert-grid` in a
+  single DOM operation. Replaces the previous per-card
+  `grid.prepend(card)` (layout thrash when several violations arrived
+  in the same tick). Side benefit: batch order is now newest-on-top
+  (was reversed under the per-card pattern).
 
 ### 4.4 Caching strategy (Apps Script v4+)
 
@@ -476,6 +515,20 @@ explicit, justified, and accompanied by an update to this file.
     must NOT depend on OCR consensus, because operators want timing
     records even when the BIB is unreadable. Conversely, the violation
     gate must NOT trigger record writes.
+23. **Recurring polls MUST use `AbortController`, not a mutex or queue.**
+    Each poller (`fetchResults`, `fetchViolations`, `loadAdminData`)
+    aborts its own in-flight fetch before starting a new one and drops
+    late-arriving stale responses via an `ac === xxxAbort` identity
+    check after the await. Reasoning: a mutex coalesces by **dropping
+    the new fetch on the floor** — under an Apps Script cold start that
+    leaves the UI stale for 30 + s. A queue introduces tail latency.
+    Abort-and-restart gives the freshest data with no pile-up.
+24. **`getOCRCropBox` is the single source of truth for chest crop
+    geometry.** Both `runSmartOCR` and the dashed-red OCR debug overlay
+    in `processLoop` call it. If either path computes the crop inline,
+    the operator's visible rectangle drifts away from where Tesseract
+    actually looks — defeating the purpose of the debug overlay. Keep
+    the helper as the only place crop factors live.
 
 ---
 
@@ -573,9 +626,24 @@ world accuracy and FPS without blocking the main thread.
   Lower = stricter (fewer false matches, more "Unknown" labels).
   Tuning this requires re-validating with real-event footage.
 - **Silent OCR rejects**: reads failing the validation gate (digits-
-  only, length 2–5, confidence ≥ 70) are dropped without UI feedback.
-  This is intentional — corrupt votes would derail consensus. Drop
-  `OCR_MIN_CONFIDENCE` if low-light footage starves the vote buffer.
+  only, length 1–6, confidence ≥ 60 — current field-test values; nominal
+  is 2–5 / 70) are dropped without UI feedback. This is intentional —
+  corrupt votes would derail consensus. The values are inline-flagged
+  in `checkpoint.html` as `FIELD-TEST` and expected to revert post-
+  validation.
+- **OCR debug overlay**: a dashed red rectangle labeled `OCR` is drawn
+  on the overlay canvas for known runners only. It shows exactly where
+  Tesseract will crop, so the field operator can adjust how a runner
+  holds the BIB. The rectangle and the actual crop are guaranteed
+  identical because both call `getOCRCropBox(box, video)`.
+- **Admin loading strip**: while admin polls are in flight, a small
+  Thai-text strip with `กำลังโหลดข้อมูล...` appears above the admin
+  table. Driven by `setAdminLoading(bool)` from inside `loadAdminData`.
+- **Polls cancel-and-restart, not coalesce**: if a 15 s admin poll
+  fires while the previous fetch is still in flight (e.g. during an
+  Apps Script cold start), the in-flight `Promise.all` is aborted and
+  a new triplet starts. Apparent in DevTools → Network as
+  `(canceled)` rows.
 - **Violation requires ≥3-of-5 consensus**: a single wrong-BIB read
   no longer fires a `WRONG_PERSON` violation. The runner's chest must
   be readable for at least 3 frames inside a 15-second window.
@@ -661,8 +729,8 @@ All responses are
 | `ADAPTIVE_THRESHOLD_BLOCK` | `15` | Local-window size for adaptive threshold (odd; 11–19 typical) |
 | `ADAPTIVE_THRESHOLD_C` | `10` | Mean offset; higher = more aggressive thresholding |
 | `OCR_UPSCALE` | `2` | Nearest-neighbor scale factor before OCR |
-| `OCR_MIN_CONFIDENCE` | `70` | Tesseract overall-confidence floor |
-| `BIB_MIN_LEN` / `BIB_MAX_LEN` | `2` / `5` | Accepted BIB length range |
+| `OCR_MIN_CONFIDENCE` | `60` (field-test; nominal `70`) | Tesseract overall-confidence floor |
+| `BIB_MIN_LEN` / `BIB_MAX_LEN` | `1` / `6` (field-test; nominal `2` / `5`) | Accepted BIB length range |
 | `OCR_VOTE_BUFFER_SIZE` | `5` | Rolling buffer of recent valid reads |
 | `OCR_VOTE_MIN_CONSENSUS` | `3` | Reads-in-agreement required for consensus |
 

@@ -612,6 +612,36 @@
             vertical-align: middle
         }
 
+        /* Admin loading strip — sits above #admin-body, toggled by
+           setAdminLoading() during in-flight admin fetches. */
+        .loading-strip {
+            display: flex;
+            align-items: center;
+            gap: .6rem;
+            padding: .5rem 1rem;
+            background: rgba(29, 158, 117, .08);
+            border: 1px solid rgba(29, 158, 117, .25);
+            border-radius: 10px;
+            color: var(--pri);
+            font-size: .8rem;
+            margin: 0 1.5rem 1rem 1.5rem
+        }
+
+        .spinner-sm {
+            width: 14px;
+            height: 14px;
+            border: 2px solid rgba(255, 255, 255, .1);
+            border-top-color: var(--pri);
+            border-radius: 50%;
+            animation: spin 1s linear infinite
+        }
+
+        @keyframes spin {
+            to {
+                transform: rotate(360deg)
+            }
+        }
+
         @keyframes pulse {
 
             0%,
@@ -763,6 +793,13 @@
                         <input class="search" id="admin-search" placeholder="🔍 ค้นหา" oninput="renderAdminTab()">
                         <button class="btn-out" onclick="doLogout()">🚪 ออก</button>
                     </div>
+                </div>
+                <!-- Loading strip is OUTSIDE #admin-body because every
+                     renderAdminTab() call replaces admin-body's innerHTML;
+                     a child of admin-body would be wiped on each render. -->
+                <div class="loading-strip" id="admin-loading" style="display:none">
+                    <div class="spinner-sm"></div>
+                    <span>กำลังโหลดข้อมูล...</span>
                 </div>
                 <div class="admin-body" id="admin-body"></div>
             </div>
@@ -927,22 +964,42 @@
         // Both fetchers tolerate (a) network failure and (b) a non-JSON
         // response (e.g. a 500 returning HTML). Either flips the Live dot
         // to Offline after 2 consecutive failures.
+        //
+        // AbortController pattern: each poller holds its own controller. A
+        // new tick aborts the in-flight request before starting the next so
+        // overlapping fetches don't pile up during Apps Script cold starts.
+        // The post-await `ac !== xxxAbort` identity check drops late-
+        // arriving stale responses (the request finished, but a newer one
+        // was already started — we don't want the old data flashing in).
+        let resultsAbort = null;
+        let violationsAbort = null;
         async function fetchResults() {
+            if (resultsAbort) resultsAbort.abort();
+            const ac = new AbortController();
+            resultsAbort = ac;
             try {
-                const r = await fetch(API + "?action=getResults");
+                const r = await fetch(API + "?action=getResults", { signal: ac.signal });
                 const d = await r.json();
+                if (ac !== resultsAbort) return; // superseded — drop result
                 if (d && d.status === "success") results = d.data || [];
                 renderLeaderboard();
                 resultsFailures = 0;
                 setLiveStatus(true);
             } catch (e) {
+                if (e.name === "AbortError") return; // expected when superseded
                 if (++resultsFailures >= 2) setLiveStatus(false);
+            } finally {
+                if (ac === resultsAbort) resultsAbort = null;
             }
         }
         async function fetchViolations() {
+            if (violationsAbort) violationsAbort.abort();
+            const ac = new AbortController();
+            violationsAbort = ac;
             try {
-                const r = await fetch(API + "?action=getVerifiedViolations");
+                const r = await fetch(API + "?action=getVerifiedViolations", { signal: ac.signal });
                 const d = await r.json();
+                if (ac !== violationsAbort) return;
                 if (d && d.status === "success") {
                     violations = d.data || [];
                     document.getElementById("s-viol").textContent = violations.length;
@@ -950,7 +1007,10 @@
                 }
                 violationsFailures = 0;
             } catch (e) {
+                if (e.name === "AbortError") return;
                 if (++violationsFailures >= 2) setLiveStatus(false);
+            } finally {
+                if (ac === violationsAbort) violationsAbort = null;
             }
         }
         function renderLeaderboard() {
@@ -989,8 +1049,18 @@
         }
 
         // ── ALERTS ──
+        // Batched render: all new cards go into a DocumentFragment, which
+        // is then prepended to the grid in a single DOM operation. The
+        // previous per-card grid.prepend(card) was the layout-thrash hot
+        // path when several violations landed in the same poll tick.
+        //
+        // Backend returns newest-first. Appending to the fragment in
+        // iteration order, then prepending the whole fragment, yields
+        // newest-on-top in the DOM. (Side effect: the previous one-by-one
+        // prepend reversed batch order — that's fixed here.)
         function renderAlerts() {
             const grid = document.getElementById("alert-grid");
+            const fragment = document.createDocumentFragment();
             let hasNew = false;
             violations.forEach(v => {
                 const key = v.ID || v.Timestamp + "_" + v.Name;
@@ -1011,8 +1081,9 @@
                     `<div class="ac-t">🕐 ${esc(v.Timestamp || "")}</div>` +
                     `</div></div>` +
                     `<div class="ac-a"><button class="btn-ack" data-dismiss="${attr(key)}">✅ รับทราบ</button></div>`;
-                grid.prepend(card);
+                fragment.appendChild(card);
             });
+            if (fragment.childNodes.length) grid.prepend(fragment);
             if (hasNew) playBeep();
             updateBadge();
         }
@@ -1054,29 +1125,53 @@
         }
 
         // ── ADMIN ──
-        // isLoadingAdmin coalesces overlapping calls so a poll firing
-        // mid-bulk-delete doesn't kick off a duplicate fetch and clobber
-        // the optimistic UI state.
+        // AbortController-based abort-and-restart: a new poll while one is
+        // still in flight aborts the old triplet of fetches and starts a
+        // fresh one. The previous mutex-coalescing approach dropped the new
+        // fetch on the floor, which left the admin tables stale after a
+        // cold start.
+        //
+        // isLoadingAdmin is repurposed from a coalescing mutex into a UI
+        // flag for the loading-strip spinner — set true at fetch start,
+        // false when the LATEST fetch finishes (the `ac === adminAbort`
+        // check ensures a superseded fetch's finally branch can't toggle
+        // the spinner off prematurely).
         let isLoadingAdmin = false;
+        let adminAbort = null;
         async function loadAdminData() {
-            if (isLoadingAdmin) return;
+            if (adminAbort) adminAbort.abort();
+            const ac = new AbortController();
+            adminAbort = ac;
             isLoadingAdmin = true;
+            setAdminLoading(true);
             try {
+                // Single signal shared by all three parallel fetches — one
+                // abort() cancels the trio.
                 const [rr, vr, resr] = await Promise.all([
-                    fetch(API + "?action=getRunners").then(r => r.json()),
-                    fetch(API + "?action=getViolations").then(r => r.json()),
-                    fetch(API + "?action=getResults").then(r => r.json()),
+                    fetch(API + "?action=getRunners", { signal: ac.signal }).then(r => r.json()),
+                    fetch(API + "?action=getViolations", { signal: ac.signal }).then(r => r.json()),
+                    fetch(API + "?action=getResults", { signal: ac.signal }).then(r => r.json()),
                 ]);
+                if (ac !== adminAbort) return; // superseded — drop results
                 runners = (rr && rr.data) || [];
                 violations = (vr && vr.data) || [];
                 results = (resr && resr.data) || [];
                 renderAdminTab();
                 setLiveStatus(true);
             } catch (e) {
+                if (e.name === "AbortError") return;
                 setLiveStatus(false);
             } finally {
-                isLoadingAdmin = false;
+                if (ac === adminAbort) {
+                    isLoadingAdmin = false;
+                    adminAbort = null;
+                    setAdminLoading(false);
+                }
             }
+        }
+        function setAdminLoading(on) {
+            const el = document.getElementById("admin-loading");
+            if (el) el.style.display = on ? "flex" : "none";
         }
         function switchTab(t, el) { adminTab = t; document.querySelectorAll(".tab").forEach(b => b.classList.remove("on")); el.classList.add("on"); renderAdminTab(); }
 
