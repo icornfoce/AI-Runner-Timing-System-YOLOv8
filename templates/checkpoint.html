@@ -105,6 +105,12 @@ const API="https://script.google.com/macros/s/AKfycbyI4vNBRqjO5f00DN7VDCTaMKUoDq
 // Pinned to a release tag — `@master` would silently change at any time.
 const MODEL_URL="https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js@0.22.2/weights/";
 
+// ── DEBUG MODE ─────────────────────────────────────────────────
+// Append `?debug=1` to the URL to enable verbose OCR/vote console
+// logs and an overlay HUD showing tracked-runner / vote / cooldown /
+// ocrBusy state. Side-effect-free: production paths are unchanged.
+const DEBUG = new URLSearchParams(location.search).get("debug") === "1";
+
 // ── VIDEO ──────────────────────────────────────────────────────
 // 720p protects FPS while giving the operator a usable preview.
 // TinyFaceDetector internally downsizes to FACE_DETECTOR_INPUT_SIZE
@@ -314,7 +320,7 @@ function markStep(id,state){
 function setStatus(type,text){
  const el=document.getElementById("conn-status");
  el.className="status "+type;
- el.innerHTML=`<div class="dot ${type}"></div><span>${text}</span>`;
+ el.innerHTML=`<div class="dot ${esc(type)}"></div><span>${esc(text)}</span>`;
 }
 
 // ── BBOX EMA SMOOTHING ──────────────────────────────────────
@@ -468,6 +474,32 @@ function getOCRCropBox(box, video){
  const bw = Math.min(box.width + faceH * 1.0, video.videoWidth - bx);
  const bh = Math.min(faceH * 3.0, video.videoHeight - by);
  return {bx:bx, by:by, bw:bw, bh:bh};
+}
+
+// ── DEBUG HUD ──────────────────────────────────────────────────
+// Top-left overlay strip showing pipeline state. No-op when DEBUG is
+// false (early return). Drawn on the same overlay canvas as the
+// detection rectangles, so it never touches the DOM (no XSS path).
+function drawDebugHUD(ctx){
+ if(!DEBUG) return;
+ const nowSec = Date.now()/1000;
+ const activeCooldowns = Object.values(violationCooldowns)
+  .filter(t => (nowSec - t) <= VIOLATION_COOLDOWN_SEC).length;
+ const totalVotes = Object.values(ocrVotes)
+  .reduce((s,a) => s + (a ? a.length : 0), 0);
+ const lines = [
+  `tracked: ${Object.keys(bboxEMA).length}`,
+  `votes: ${totalVotes}`,
+  `cooldowns: ${activeCooldowns}`,
+  `ocrBusy: ${ocrBusy}`,
+ ];
+ ctx.save();
+ ctx.fillStyle = "rgba(0,0,0,.65)";
+ ctx.fillRect(8, 8, 180, 18*lines.length + 8);
+ ctx.fillStyle = "#fff";
+ ctx.font = "11px 'JetBrains Mono',monospace";
+ for(let i=0;i<lines.length;i++) ctx.fillText(lines[i], 14, 24 + i*18);
+ ctx.restore();
 }
 
 // ── MAIN LOOP ──
@@ -643,11 +675,14 @@ async function processLoop(){
      if(bboxEMA[n].missingFrames > BBOX_EMA_RESET_FRAMES){
       delete bboxEMA[n];
       delete ocrVotes[n];
+      delete ocrConsensus[n];
       delete ocrFailureCount[n];
       delete ocrLastFailureKind[n];
      }
     }
    }
+
+   drawDebugHUD(ctx);
   }catch(e){console.error("Detection error:",e)}
 
   rafId=requestAnimationFrame(frame);
@@ -691,6 +726,8 @@ async function runSmartOCR(video, box, name){
   const result=await tesseractWorker.recognize(processed);
   const rawText=String(result.data.text||"");
   const conf=Number(result.data.confidence||0);
+
+  if(DEBUG) console.log("[debug] OCR", { name, rawText, conf });
 
   // ── MULTIPLE BIBS (Cluttered Chest) ──
   // Run on RAW text BEFORE digit-only normalization — once normalized,
@@ -750,6 +787,8 @@ async function runSmartOCR(video, box, name){
 
   // Cast vote. Returns the consensus BIB (or null if not yet reached).
   const consensus=castVote(name, text, conf);
+  if(DEBUG) console.log("[debug] vote", { name, text, conf,
+   buffer: (ocrVotes[name]||[]).length, consensus });
   if(!consensus) return;
 
   const expectedBib=runnerRegistry[name];

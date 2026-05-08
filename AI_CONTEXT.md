@@ -9,10 +9,12 @@
 > cadence, caching, or guardrails MUST update this file in the same change
 > set.
 >
-> **Last updated:** 2026-05-08 — Advanced violation triggers (Ghost BIB,
-> Intruder, Multiple BIBs) added to `checkpoint.html`; `reportViolation`
-> refactored to options-style payload; all violation types share the
-> same per-runner+CP cooldown bucket. Backend still v5.
+> **Last updated:** 2026-05-09 — Audit-driven hardening in `checkpoint.html`:
+> `ocrConsensus` now cleared in the EMA reset sweep; `setStatus()`
+> interpolations escaped (Guardrail 7); `?debug=1` URL flag adds verbose
+> OCR/vote console logs plus an overlay HUD (no production-path branching).
+> Backend still v5; `Code.gs` file-header comment bumped from v4 to v5
+> (no functional change — v5 changelog block was already present).
 
 ---
 
@@ -277,7 +279,7 @@ processLoop (every frame):
   consecutiveFrames[n] = 0 for n not in currentNames        ← also resets "unknown"
   bboxEMA[n].missingFrames++ for n not in currentNames
   if missingFrames > BBOX_EMA_RESET_FRAMES (10):
-    delete bboxEMA[n]; delete ocrVotes[n]
+    delete bboxEMA[n]; delete ocrVotes[n]; delete ocrConsensus[n]
     delete ocrFailureCount[n]; delete ocrLastFailureKind[n]
 
 
@@ -600,6 +602,35 @@ explicit, justified, and accompanied by an update to this file.
 
 ### 6.2 Recent changes
 
+#### 2026-05-09 — Audit-driven hardening in `checkpoint.html`
+
+Frontend-only correctness / observability sweep prompted by a full-system
+audit. Backend `Code.gs` still v5; only its file-header comment bumped
+from `(v4)` to `(v5)` to reflect reality (the v5 changelog block was
+already present at lines 22–29).
+
+- **`ocrConsensus[n]` cleared on EMA reset.** When a runner has been
+  missing for `BBOX_EMA_RESET_FRAMES` (10) consecutive frames, the
+  staleness sweep now drops `ocrConsensus[n]` alongside `ocrVotes`,
+  `ocrFailureCount`, and `ocrLastFailureKind`. Previously the cached
+  consensus was only released by its own 15 s TTL inside
+  `consensusBib()` — a runner returning within ~12 s would briefly see
+  the previous lap's consensus painted on the overlay even though every
+  other piece of per-runner state had already been wiped.
+- **`setStatus()` interpolations escaped.** Both `type` and `text` now
+  pass through the existing `esc()` helper before being concatenated
+  into `innerHTML`. Closes a Guardrail 7 compliance gap. No production
+  call site sent untrusted input here, so behavior is unchanged for
+  every observed input.
+- **`?debug=1` URL flag.** Append `?debug=1` to the checkpoint URL to
+  enable: (a) `console.log("[debug] OCR", …)` after every Tesseract
+  recognize, (b) `console.log("[debug] vote", …)` after every
+  `castVote`, and (c) a small overlay HUD (top-left of the canvas)
+  showing tracked-runner count, total OCR-vote-buffer entries, active
+  violation cooldowns, and `ocrBusy` state. The HUD draws via canvas
+  API only — no `innerHTML`, no XSS path. No production paths branch on
+  `DEBUG`; it strictly adds observability.
+
 #### 2026-05-08 — Advanced violation triggers in `checkpoint.html`
 
 Frontend-only change; backend `Code.gs` still v5. The pipeline now fires
@@ -739,6 +770,14 @@ world accuracy and FPS without blocking the main thread.
   Tesseract will crop, so the field operator can adjust how a runner
   holds the BIB. The rectangle and the actual crop are guaranteed
   identical because both call `getOCRCropBox(box, video)`.
+- **`?debug=1` URL flag** (checkpoint only): appending `?debug=1` to
+  the checkpoint URL enables verbose console logs (`[debug] OCR` after
+  every Tesseract recognize; `[debug] vote` after every `castVote`)
+  and a small overlay HUD in the top-left of the canvas showing
+  tracked-runner count, total vote-buffer entries, active violation
+  cooldowns, and `ocrBusy` state. Strictly observational — no
+  production logic branches on `DEBUG`. HUD drawn via canvas API, so
+  no XSS surface.
 - **Admin loading strip**: while admin polls are in flight, a small
   Thai-text strip with `กำลังโหลดข้อมูล...` appears above the admin
   table. Driven by `setAdminLoading(bool)` from inside `loadAdminData`.
@@ -752,8 +791,8 @@ world accuracy and FPS without blocking the main thread.
   be readable for at least 3 frames inside a 15-second window.
 - **EMA persists across brief detection misses**: a 1–10 frame gap in
   detection keeps the smoothed box around so the next match snaps
-  back without re-warming up. Past 10 frames the EMA and vote buffer
-  are dropped together.
+  back without re-warming up. Past 10 frames the EMA, vote buffer,
+  cached consensus, and Ghost-BIB counters are dropped together.
 - **Sample data** in `Data/` (legacy face DB) and `events/test/` is
   retained for reference; both directories are gitignored.
 - **Multiple unknowns in frame**: the `UNREGISTERED` trigger captures

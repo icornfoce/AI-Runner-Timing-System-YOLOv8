@@ -1,5 +1,5 @@
 // ============================================================
-// AI Runner Timing System — Google Apps Script Backend (v4)
+// AI Runner Timing System — Google Apps Script Backend (v5)
 // ============================================================
 // Deploy: Extensions → Apps Script → Deploy → Web app
 //   Execute as: Me | Access: Anyone with the link
