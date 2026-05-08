@@ -343,8 +343,20 @@ function readSheetAsJson(sheet) {
 }
 
 // ─── DRIVE HELPERS ──────────────────────────────────────────
+// Two URL shapes coexist on purpose:
+//   • DRIVE_EMBED_URL — used for runner-photo links (Photo_* and FolderUrl
+//     consumers); historical default that the v3 migration normalized to.
+//   • DRIVE_THUMBNAIL_URL — used for Violations.ImageUrl. The dashboard
+//     embeds violation evidence directly via <img src>; the embed form
+//     started returning broken images in browsers with strict third-party
+//     cookie defaults (image opens fine in a new tab but the cookie-less
+//     <img> request gets bounced to a login page). The thumbnail endpoint
+//     serves a public bitmap with no cookie dance.
 const DRIVE_EMBED_URL = function (id) {
   return "https://drive.google.com/uc?export=view&id=" + id;
+};
+const DRIVE_THUMBNAIL_URL = function (id, size) {
+  return "https://drive.google.com/thumbnail?id=" + id + "&sz=w" + (size || 800);
 };
 
 function getOrCreateFolder(parentFolder, name) {
@@ -403,7 +415,9 @@ function saveBase64Image(folder, filename, base64Data) {
   } catch (e) {
     logErr("setSharing failed for file " + filename, e);
   }
-  return DRIVE_EMBED_URL(file.getId());
+  // Return the raw file ID; callers wrap with DRIVE_EMBED_URL or
+  // DRIVE_THUMBNAIL_URL depending on how the URL will be consumed.
+  return file.getId();
 }
 
 // ─── SYNCHRONOUS DRIVE CLEANUP ──────────────────────────────
@@ -546,7 +560,7 @@ function handleRegisterRunner(body) {
     const key = "photo_" + angle;
     if (body[key]) {
       const filename = name + "_" + angle + "_" + Date.now() + ".jpg";
-      photoUrls[angle] = saveBase64Image(personFolder, filename, body[key]);
+      photoUrls[angle] = DRIVE_EMBED_URL(saveBase64Image(personFolder, filename, body[key]));
     }
   }
 
@@ -642,7 +656,10 @@ function handleReportViolation(body) {
   if (imageBase64) {
     const folder = getRootFolder(VIOLATION_FOLDER);
     const filename = "violation_" + name + "_" + Date.now() + ".jpg";
-    imageUrl = saveBase64Image(folder, filename, imageBase64);
+    // Thumbnail URL — the dashboard renders this in <img src>, which
+    // breaks under the embed URL form in browsers with strict third-party
+    // cookie defaults. See DRIVE_THUMBNAIL_URL comment block for context.
+    imageUrl = DRIVE_THUMBNAIL_URL(saveBase64Image(folder, filename, imageBase64), 800);
   }
 
   const id = "V" + Date.now();

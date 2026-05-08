@@ -9,12 +9,12 @@
 > cadence, caching, or guardrails MUST update this file in the same change
 > set.
 >
-> **Last updated:** 2026-05-09 — Audit-driven hardening in `checkpoint.html`:
-> `ocrConsensus` now cleared in the EMA reset sweep; `setStatus()`
-> interpolations escaped (Guardrail 7); `?debug=1` URL flag adds verbose
-> OCR/vote console logs plus an overlay HUD (no production-path branching).
-> Backend still v5; `Code.gs` file-header comment bumped from v4 to v5
-> (no functional change — v5 changelog block was already present).
+> **Last updated:** 2026-05-09 — Audit-driven hardening in `checkpoint.html`
+> (`ocrConsensus` cleared on EMA reset; `setStatus()` interpolations
+> escaped; `?debug=1` URL flag); plus `Violations.ImageUrl` now writes
+> the Drive thumbnail URL (`thumbnail?id=…&sz=w800`) so dashboard
+> `<img>` rendering works under strict third-party cookie defaults.
+> Runner photos unchanged (still embed form). Backend still v5.
 
 ---
 
@@ -175,9 +175,21 @@ My Drive/
 
 - Folder creation is wrapped in a **`LockService` lock** to prevent
   duplicates from concurrent registrations.
-- All files are served via the embed URL form
-  `https://drive.google.com/uc?export=view&id=<id>` — this is what makes
-  `<img src>` work without OAuth in the public dashboard.
+- Two URL shapes are written depending on the consumer:
+  - **Runner photos** (`Runners.Photo_*`): embed form
+    `https://drive.google.com/uc?export=view&id=<id>`.
+  - **Violation evidence** (`Violations.ImageUrl`): thumbnail form
+    `https://drive.google.com/thumbnail?id=<id>&sz=w800`.
+- The thumbnail form is preferred wherever an `<img src>` consumer
+  exists in a public browser context, because the embed form breaks
+  under strict third-party cookie defaults — the image opens fine in
+  a new tab, but a cookie-less `<img>` request gets bounced to a
+  login page. The thumbnail endpoint serves a public bitmap with no
+  cookie dance.
+- Both shapes require `ANYONE_WITH_LINK / VIEW` sharing on the file.
+- The deletion path (`deleteViolation` → `extractDriveFileId`) is
+  format-agnostic: its `/[?&]id=([-\w]{25,})/` regex matches the file
+  ID inside either query string.
 
 ### 3.3 Where the data lives in code
 
@@ -445,7 +457,8 @@ trash the relevant Drive resource **inline, in the same request**:
   any subfolder whose name matches.
 - **`deleteViolation`** → reads `ImageUrl` from the in-memory snapshot
   *before* deleting the row, extracts the file ID via
-  `extractDriveFileId` (handles both `uc?export=view&id=…` and legacy
+  `extractDriveFileId` (matches any URL with an `id=` query param —
+  current `thumbnail?id=…`, embed `uc?export=view&id=…`, or legacy
   `/file/d/…/view`), then trashes that file.
 - **`deleteViolationsBatch`** → resolves all targets up front, trashes
   Drive files in any order (each in its own try-catch), then deletes
@@ -509,9 +522,13 @@ explicit, justified, and accompanied by an update to this file.
     leaderboard breaks.
 11. **`ANYONE_WITH_LINK / VIEW` sharing is intentional.** The dashboard
     renders Drive images in `<img src>` from any browser — without
-    public sharing the embed URLs return 401 and the alerts show broken
-    images. Restricting sharing requires re-architecting image
-    delivery (e.g. base64-inline or a proxy endpoint).
+    public sharing the image URLs return 401 (or worse, a redirect to
+    a login page) and the alerts show broken images. Restricting
+    sharing requires re-architecting image delivery (e.g. base64-inline
+    or a proxy endpoint). Note: even with sharing correct, the embed
+    form (`uc?export=view`) can still break in `<img src>` under strict
+    third-party cookie defaults — that's why violations now write the
+    thumbnail form.
 12. **Violation ID format is `V<unix-ms>`.** `ID_PATTERN = /^V\d{10,}$/`
     enforces it on writes. Do not change this format without writing a
     migration helper similar to `_migrateViolationTypeColumn`.
@@ -601,6 +618,37 @@ explicit, justified, and accompanied by an update to this file.
 - Frontend templates align with v5 (ViolationType + bulk delete UI).
 
 ### 6.2 Recent changes
+
+#### 2026-05-09 — Violation `ImageUrl` switched to Drive thumbnail format
+
+Backend-only change in `Code.gs`. `Violations.ImageUrl` now writes
+`https://drive.google.com/thumbnail?id=<id>&sz=w800` (was the embed
+form `uc?export=view&id=<id>`). Runner photos (`Photo_*`) are
+unchanged and still write the embed form.
+
+**Why:** the embed form started returning broken `<img>` images on
+the public dashboard in browsers with strict third-party cookie
+defaults — the image opens fine in a new tab, confirming the file is
+shared correctly, but the cookie-less `<img>` request gets bounced to
+a Google login page. The thumbnail endpoint serves a public bitmap
+with no cookie dance, so `<img>` works again.
+
+**Refactor shape:** `saveBase64Image` now returns the raw file ID
+(was the embed URL). `registerRunner` wraps with `DRIVE_EMBED_URL(...)`
+to preserve byte-identical sheet writes. `handleReportViolation`
+wraps with the new helper `DRIVE_THUMBNAIL_URL(id, size)`, which sits
+next to `DRIVE_EMBED_URL` in the Drive helpers section.
+
+**Existing rows are NOT migrated** by this change. Violations recorded
+before this commit still carry the embed URL and will continue to show
+broken on the dashboard. A one-shot helper modeled on
+`_migrateAllImageUrls()` would be required to back-fix the historical
+backlog — not added in this change set.
+
+`extractDriveFileId` already matches both URL forms via its
+`/[?&]id=([-\w]{25,})/` regex, so the `deleteViolation` /
+`deleteViolationsBatch` paths are unaffected. Backend version remains
+v5 (no schema or endpoint change).
 
 #### 2026-05-09 — Audit-driven hardening in `checkpoint.html`
 
