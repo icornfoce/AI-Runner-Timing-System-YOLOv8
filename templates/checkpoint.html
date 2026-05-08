@@ -164,6 +164,23 @@ const BIB_MAX_LEN = 6;
 const OCR_VOTE_BUFFER_SIZE = 5;
 const OCR_VOTE_MIN_CONSENSUS = 3;
 
+// ── ADVANCED VIOLATION TRIGGERS ────────────────────────────────
+// Ghost BIB: consecutive failed OCR attempts on a known runner before
+// flagging. Empty result → NO_BIB; failed validation gate (length/conf)
+// → OBSCURED_BIB.
+const NO_BIB_AFTER_FAILURES = 5;
+
+// Intruder: consecutive frames an unrecognized face must stay visible
+// before firing UNREGISTERED. Higher than RECORD_AFTER_FRAMES (5) so it
+// requires deliberate presence, not a passerby behind a recognized runner.
+const UNREGISTERED_AFTER_FRAMES = 15;
+
+// Multiple BIBs: minimum digits per block, minimum block count.
+// 2 digits per block filters Tesseract single-digit fragments;
+// 2 blocks is the trigger.
+const MULTIPLE_BIBS_MIN_BLOCK_LEN = 2;
+const MULTIPLE_BIBS_MIN_BLOCKS = 2;
+
 // ── STATE ──────────────────────────────────────────────────────
 let checkpointId = 'start';
 let faceMatcher = null;
@@ -174,6 +191,8 @@ let consecutiveFrames = {};                 // name → count
 let bboxEMA = {};                           // name → { x, y, width, height, missingFrames }
 let ocrVotes = {};                          // name → [{ bib, ts, conf }, ...]
 let ocrConsensus = {};                      // name → { bib, ts }
+let ocrFailureCount = {};                   // name → consecutive validation failures (Ghost BIB)
+let ocrLastFailureKind = {};                // name → "empty" | "low_quality" — drives NO_BIB vs OBSCURED_BIB
 let fpsCounter = 0, lastFpsTime = performance.now();
 let ocrBusy = false;
 let tesseractWorker = null;
@@ -487,6 +506,10 @@ async function processLoop(){
     .withFaceDescriptors();
 
    const currentNames=new Set();
+   // Per-frame holder for the largest unknown face. Largest by area is the
+   // closest face — most likely the actual intruder rather than a
+   // bystander in the background of a registered runner's frame.
+   let largestUnknownBox = null, largestUnknownArea = 0;
 
    for(const det of detections){
     const match=faceMatcher.findBestMatch(det.descriptor);
@@ -521,6 +544,15 @@ async function processLoop(){
       // Pass the SMOOTHED box — the chest crop must not jitter or
       // Tesseract's confidence collapses.
       runSmartOCR(video, box, name);
+     }
+    } else {
+     // Track the largest unknown face for the post-loop UNREGISTERED
+     // trigger. We never OCR unknowns (they have no registered BIB
+     // anyway), so the only signal is "stayed visible long enough."
+     const area = rawBox.width * rawBox.height;
+     if (area > largestUnknownArea){
+      largestUnknownArea = area;
+      largestUnknownBox = rawBox;
      }
     }
 
@@ -573,11 +605,35 @@ async function processLoop(){
     }
    }
 
+   // ── POST-LOOP: UNREGISTERED (Intruder) trigger ──
+   // Increments at most once per frame regardless of how many unknowns
+   // are visible. Largest-area pick was decided in the detection loop.
+   // The staleness sweep below resets the counter when no unknown is
+   // in frame — strict reset matches consecutiveFrames' behavior for
+   // known runners (a one-frame miss restarts the warmup).
+   if (largestUnknownBox){
+    consecutiveFrames["unknown"] = (consecutiveFrames["unknown"]||0) + 1;
+    if (consecutiveFrames["unknown"] >= UNREGISTERED_AFTER_FRAMES){
+     const cpLabel = checkpointId==='start' ? 'Start'
+                   : checkpointId==='finish' ? 'Finish'
+                   : 'CP'+checkpointId;
+     const fired = tryFireViolation("unknown:"+checkpointId, {
+      name: "Unknown",
+      bib: "",
+      message: `Unregistered runner detected at ${cpLabel}`,
+      violationType: "UNREGISTERED",
+      image: captureFaceCrop(video, largestUnknownBox),
+     });
+     if (fired) consecutiveFrames["unknown"] = 0;
+    }
+   }
+
    // Reset stale per-name state. consecutiveFrames goes to 0 immediately
    // (a one-frame miss should retrigger the warmup). EMA persists for
    // BBOX_EMA_RESET_FRAMES so a brief detection miss doesn't kill the
    // smoothing — when it finally expires we also drop the vote buffer
-   // so a returning runner starts with a clean slate.
+   // and the Ghost BIB failure counters so a returning runner starts
+   // with a clean slate.
    for(const n of Object.keys(consecutiveFrames)){
     if(!currentNames.has(n)) consecutiveFrames[n]=0;
    }
@@ -587,6 +643,8 @@ async function processLoop(){
      if(bboxEMA[n].missingFrames > BBOX_EMA_RESET_FRAMES){
       delete bboxEMA[n];
       delete ocrVotes[n];
+      delete ocrFailureCount[n];
+      delete ocrLastFailureKind[n];
      }
     }
    }
@@ -631,13 +689,64 @@ async function runSmartOCR(video, box, name){
   const processed=preprocessForOCR(cropCanvas);
 
   const result=await tesseractWorker.recognize(processed);
-  const text=String(result.data.text||"").replace(/[^0-9]/g,"").trim();
+  const rawText=String(result.data.text||"");
   const conf=Number(result.data.confidence||0);
 
-  // Validation gate. Anything that fails is silently dropped — better
-  // to wait one more frame than to corrupt the vote buffer.
-  if(!text || text.length < BIB_MIN_LEN || text.length > BIB_MAX_LEN) return;
-  if(conf < OCR_MIN_CONFIDENCE) return;
+  // ── MULTIPLE BIBS (Cluttered Chest) ──
+  // Run on RAW text BEFORE digit-only normalization — once normalized,
+  // the whitespace separating distinct BIB blocks is gone (Guardrail 26).
+  // Two-or-more digits per block filters Tesseract single-digit
+  // artefacts; ≥2 distinct blocks fires the violation.
+  const blockRe = new RegExp("\\d{"+MULTIPLE_BIBS_MIN_BLOCK_LEN+",}", "g");
+  const blocks = rawText.match(blockRe) || [];
+  if (blocks.length >= MULTIPLE_BIBS_MIN_BLOCKS){
+   const fired = tryFireViolation(name+":"+checkpointId, {
+    name,
+    bib: "",                                          // BIB_PATTERN rejects commas; full list lives in message
+    message: `Multiple BIBs detected on ${name}: ${blocks.join(", ")}`,
+    violationType: "MULTIPLE_BIBS",
+    image: captureFullFrame(video),
+   });
+   if (fired){
+    ocrFailureCount[name] = 0;                       // a multi-bib read isn't a "failure"
+    return;
+   }
+   // Cooldown blocked it — fall through to normal validation. Better to
+   // try voting one of the bibs than drop the frame entirely.
+  }
+
+  const text=rawText.replace(/[^0-9]/g,"").trim();
+
+  // ── VALIDATION GATE → Ghost BIB counter ──
+  // Failures used to silently return; now they feed the Ghost BIB counter.
+  // Empty text → NO_BIB; length/confidence fail → OBSCURED_BIB.
+  let failureKind = null;
+  if (!text) failureKind = "empty";
+  else if (text.length < BIB_MIN_LEN || text.length > BIB_MAX_LEN || conf < OCR_MIN_CONFIDENCE)
+   failureKind = "low_quality";
+
+  if (failureKind){
+   ocrFailureCount[name] = (ocrFailureCount[name]||0) + 1;
+   ocrLastFailureKind[name] = failureKind;
+   if (ocrFailureCount[name] >= NO_BIB_AFTER_FAILURES){
+    const expected = runnerRegistry[name] || "";
+    const violationType = ocrLastFailureKind[name] === "empty" ? "NO_BIB" : "OBSCURED_BIB";
+    const fired = tryFireViolation(name+":"+checkpointId, {
+     name, bib: expected,
+     message: violationType==="NO_BIB"
+      ? `BIB not visible for ${name}`
+      : `BIB unreadable for ${name} (low confidence / wrong length)`,
+     violationType,
+     image: captureFullFrame(video),
+    });
+    if (fired) ocrFailureCount[name] = 0;            // reset; next 5 failures can re-trigger after the 60 s cooldown
+   }
+   return;
+  }
+
+  // Validation passed — clear failure state before the vote.
+  ocrFailureCount[name] = 0;
+  ocrLastFailureKind[name] = null;
 
   // Cast vote. Returns the consensus BIB (or null if not yet reached).
   const consensus=castVote(name, text, conf);
@@ -645,16 +754,14 @@ async function runSmartOCR(video, box, name){
 
   const expectedBib=runnerRegistry[name];
   if(expectedBib && consensus !== expectedBib){
-   // Per-CP violation cooldown — without this, the same mismatch on
-   // every consensus refresh would spam reports. Separate from the
-   // record-cooldown bucket so a violation report doesn't suppress a
-   // legitimate timing record (or vice versa).
-   const violKey=name+":"+checkpointId;
-   const nowSec=Date.now()/1000;
-   if(!violationCooldowns[violKey] || (nowSec-violationCooldowns[violKey]) > VIOLATION_COOLDOWN_SEC){
-    violationCooldowns[violKey]=nowSec;
-    reportViolation(name, expectedBib, consensus, video);
-   }
+   // WRONG_PERSON shares the same name+cpId cooldown bucket with NO_BIB,
+   // OBSCURED_BIB, MULTIPLE_BIBS — see Guardrail 25.
+   tryFireViolation(name+":"+checkpointId, {
+    name, bib: consensus,
+    message: `Expected BIB ${expectedBib}, Found ${consensus}`,
+    violationType: "WRONG_PERSON",
+    image: captureFullFrame(video),
+   });
   }
  }catch(e){console.warn("OCR error:",e)}
  finally{ocrBusy=false}
@@ -683,26 +790,62 @@ async function recordCP(name){
 }
 
 // ── VIOLATION REPORTING ──
-async function reportViolation(name,expected,found,video){
- const msg=`Expected BIB ${expected}, Found ${found}`;
- addSidebarItem(name,`⚠️ ${msg}`,"violation");
-
- // Capture frame
- const canvas=document.createElement("canvas");
- canvas.width=video.videoWidth;canvas.height=video.videoHeight;
- canvas.getContext("2d").drawImage(video,0,0);
- const imageData=canvas.toDataURL("image/jpeg",0.7);
-
+// Options-style payload. All five trigger sites (WRONG_PERSON, NO_BIB,
+// OBSCURED_BIB, UNREGISTERED, MULTIPLE_BIBS) build their own message +
+// image and call this with a uniform shape. The cooldown gate lives
+// in tryFireViolation so the 60 s budget is enforced before we hit
+// the network or sidebar.
+async function reportViolation({ name, bib, message, violationType, image }){
+ addSidebarItem(name, `⚠️ ${message}`, "violation");
  try{
   await fetch(API,{method:"POST",headers:{"Content-Type":"text/plain"},body:JSON.stringify({
-   action:"reportViolation",name,bib:found,message:msg,
-   violationType:"WRONG_PERSON",
-   timestamp:new Date().toISOString(),image:imageData
+   action:"reportViolation",
+   name, bib, message, violationType,
+   timestamp:new Date().toISOString(),
+   image,
   })});
  }catch(e){
   console.warn("Failed to send violation:",e);
   addSidebarItem(name,"❌ ส่ง violation ไม่ได้",true);
  }
+}
+
+// Snapshot helpers — every fire allocates one canvas; bounded to ≤1
+// per minute per cooldown bucket by VIOLATION_COOLDOWN_SEC.
+function captureFullFrame(video){
+ const canvas=document.createElement("canvas");
+ canvas.width=video.videoWidth; canvas.height=video.videoHeight;
+ canvas.getContext("2d").drawImage(video,0,0);
+ return canvas.toDataURL("image/jpeg",0.7);
+}
+
+// Pads 50% beyond the face on each side so the operator sees who it is,
+// not just a tightly-framed head. Clamped to video bounds.
+function captureFaceCrop(video, box){
+ const pad = box.height * 0.5;
+ const cx = Math.max(0, box.x - pad);
+ const cy = Math.max(0, box.y - pad);
+ const cw = Math.min(box.width  + pad*2, video.videoWidth  - cx);
+ const ch = Math.min(box.height + pad*2, video.videoHeight - cy);
+ const canvas=document.createElement("canvas");
+ canvas.width=cw; canvas.height=ch;
+ canvas.getContext("2d").drawImage(video, cx, cy, cw, ch, 0, 0, cw, ch);
+ return canvas.toDataURL("image/jpeg",0.7);
+}
+
+// Single cooldown gate for ALL violation types. Returns true if the
+// violation fired, false if blocked by cooldown. Sharing the bucket
+// across types prevents stacking different violation types on the same
+// name+CP from bypassing the 60 s spam-prevention budget (Guardrail 25).
+function tryFireViolation(cooldownKey, payload){
+ const nowSec = Date.now()/1000;
+ if (violationCooldowns[cooldownKey]
+     && (nowSec - violationCooldowns[cooldownKey]) <= VIOLATION_COOLDOWN_SEC){
+  return false;
+ }
+ violationCooldowns[cooldownKey] = nowSec;
+ reportViolation(payload);
+ return true;
 }
 
 // ── SIDEBAR ──

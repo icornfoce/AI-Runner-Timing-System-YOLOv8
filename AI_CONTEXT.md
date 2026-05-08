@@ -9,9 +9,10 @@
 > cadence, caching, or guardrails MUST update this file in the same change
 > set.
 >
-> **Last updated:** 2026-05-07 — Field-test fixes: AbortController polling +
-> admin loading strip in `dashboard.html`; OCR debug overlay + relaxed
-> validation gate + wider chest crop in `checkpoint.html`. Backend still v5.
+> **Last updated:** 2026-05-08 — Advanced violation triggers (Ghost BIB,
+> Intruder, Multiple BIBs) added to `checkpoint.html`; `reportViolation`
+> refactored to options-style payload; all violation types share the
+> same per-runner+CP cooldown bucket. Backend still v5.
 
 ---
 
@@ -237,6 +238,8 @@ processLoop (every frame):
   })
   detectAllFaces(video, detectorOptions).withFaceLandmarks().withFaceDescriptors()
 
+  largestUnknownBox = null, largestUnknownArea = 0          ← per-frame intruder tracker
+
   for each detection:
     match = faceMatcher.findBestMatch(descriptor)
     isKnown = match.label !== "unknown" AND match.distance <= FACE_MATCH_DISTANCE
@@ -255,15 +258,27 @@ processLoop (every frame):
       if consecutiveFrames[name] >= OCR_AFTER_FRAMES (10) AND !ocrBusy:
            runSmartOCR(video, box, name)   ← uses SMOOTHED box
 
+    else:                                                    ← intruder candidate
+      area = rawBox.width * rawBox.height
+      if area > largestUnknownArea: largestUnknownBox = rawBox
+
     draw rect (using box), label "name (XX%)", BIB consensusBib(name) || expected
     if isKnown:
       draw dashed-red OCR debug rect at getOCRCropBox(box, video)   ← operator visibility
 
+  ── post-loop: UNREGISTERED (Intruder) trigger ──
+  if largestUnknownBox:
+    consecutiveFrames["unknown"]++
+    if consecutiveFrames["unknown"] >= UNREGISTERED_AFTER_FRAMES (15):
+      tryFireViolation("unknown:cpId", { violationType:"UNREGISTERED",
+                                          image:captureFaceCrop(...) })
+
   ── per-frame staleness sweep ──
-  consecutiveFrames[n] = 0 for n not in currentNames
+  consecutiveFrames[n] = 0 for n not in currentNames        ← also resets "unknown"
   bboxEMA[n].missingFrames++ for n not in currentNames
   if missingFrames > BBOX_EMA_RESET_FRAMES (10):
     delete bboxEMA[n]; delete ocrVotes[n]
+    delete ocrFailureCount[n]; delete ocrLastFailureKind[n]
 
 
 runSmartOCR(video, box, name):
@@ -274,14 +289,30 @@ runSmartOCR(video, box, name):
     adaptive threshold (mean − ADAPTIVE_THRESHOLD_C, ADAPTIVE_THRESHOLD_BLOCK² window) →
     nearest-neighbor 2× upscale
   result = tesseractWorker.recognize(processed)            ← async, off-thread
-  text = digits-only(result.data.text)
+  rawText = result.data.text                               ← keep raw for MULTIPLE_BIBS
   conf = result.data.confidence
 
-  ── validation gate (silent reject on fail) ──
-  if !text                                          → return
-  if text.length < BIB_MIN_LEN (1, field-test)
-     OR text.length > BIB_MAX_LEN (6, field-test)   → return
-  if conf < OCR_MIN_CONFIDENCE (60, field-test)     → return
+  ── MULTIPLE_BIBS (Cluttered Chest) trigger ──            ← runs on RAW text first
+  blocks = rawText.match(/\d{MULTIPLE_BIBS_MIN_BLOCK_LEN(2),}/g) || []
+  if blocks.length >= MULTIPLE_BIBS_MIN_BLOCKS (2):
+    if tryFireViolation("name:cpId", { violationType:"MULTIPLE_BIBS" }):
+      ocrFailureCount[name] = 0; return
+    (else fall through; cooldown blocked it)
+
+  text = digits-only(rawText)
+
+  ── validation gate → Ghost BIB counter ──
+  failureKind = !text                                  ? "empty"
+              : text.length ∉ [BIB_MIN_LEN, BIB_MAX_LEN] ? "low_quality"
+              : conf < OCR_MIN_CONFIDENCE              ? "low_quality"
+              : null
+  if failureKind:
+    ocrFailureCount[name]++
+    if ocrFailureCount[name] >= NO_BIB_AFTER_FAILURES (5):
+      type = (failureKind=="empty") ? "NO_BIB" : "OBSCURED_BIB"
+      tryFireViolation("name:cpId", { violationType:type })
+    return
+  ocrFailureCount[name] = 0                            ← clear on success
 
   ── majority vote ──
   buf = ocrVotes[name]; push {text, ts, conf}
@@ -292,19 +323,29 @@ runSmartOCR(video, box, name):
   consensus = majority bib
   ocrConsensus[name] = {bib: consensus, ts: now}
 
-  ── violation trigger (consensus mismatch + cooldown) ──
+  ── WRONG_PERSON trigger (consensus mismatch) ──
   if registered[name] AND consensus !== registered[name]:
-    if now - violationCooldowns["name:cpId"] > VIOLATION_COOLDOWN_SEC (60):
-      violationCooldowns["name:cpId"] = now
-      reportViolation(name, expected=registered[name], found=consensus,
-                      violationType="WRONG_PERSON")
+    tryFireViolation("name:cpId", { violationType:"WRONG_PERSON" })
+
+
+tryFireViolation(cooldownKey, payload):
+  if violationCooldowns[cooldownKey] hot (≤ VIOLATION_COOLDOWN_SEC (60)): return false
+  violationCooldowns[cooldownKey] = now
+  reportViolation(payload)                                 ← options-style payload
+  return true
 ```
 
-**Per-CP cooldown keys** use `"<name>:<cpId>"` — this lets a runner
-trigger each station once even if they double back through the camera
-view. Record cooldowns and violation cooldowns live in **separate
-buckets** so reporting a violation does not suppress a legitimate
-timing record (or vice versa).
+**Per-CP cooldown keys** use `"<name>:<cpId>"` (or `"unknown:<cpId>"`
+for `UNREGISTERED`) — this lets a runner trigger each station once even
+if they double back through the camera view. Record cooldowns and
+violation cooldowns live in **separate buckets** so reporting a
+violation does not suppress a legitimate timing record (or vice versa).
+Within the violation bucket, all five violation types — `WRONG_PERSON`,
+`NO_BIB`, `OBSCURED_BIB`, `MULTIPLE_BIBS`, `UNREGISTERED` — share the
+same per-runner+CP key, so the 60 s spam-prevention budget cannot be
+bypassed by stacking different types on the same runner. The shared
+gate lives in `tryFireViolation(cooldownKey, payload)`; every trigger
+site goes through it.
 
 **Smart OCR** crops a region anchored to the smoothed face box, computed
 by `getOCRCropBox(box, video)` — the **single source of truth** for crop
@@ -529,6 +570,23 @@ explicit, justified, and accompanied by an update to this file.
     the operator's visible rectangle drifts away from where Tesseract
     actually looks — defeating the purpose of the debug overlay. Keep
     the helper as the only place crop factors live.
+25. **All violation types share the same per-runner+CP cooldown
+    bucket.** `WRONG_PERSON`, `NO_BIB`, `OBSCURED_BIB`, and
+    `MULTIPLE_BIBS` all key on `"name:cpId"`; `UNREGISTERED` keys on
+    `"unknown:cpId"`. Once any violation fires for a key, no further
+    violation of any type fires on that key for `VIOLATION_COOLDOWN_SEC`
+    (60 s). The single gate is `tryFireViolation(cooldownKey, payload)`
+    — every trigger site MUST go through it. Don't introduce per-type
+    cooldowns without revisiting the spam-prevention budget; a runner
+    whose BIB OCR fails AND whose face matches a wrong registered
+    runner would otherwise fire two violations on the same frame.
+26. **The `MULTIPLE_BIBS` check runs on RAW Tesseract text BEFORE
+    digit-only normalization.** Once
+    `text=String(rawText).replace(/[^0-9]/g,"")` is applied, the
+    whitespace separating distinct BIB blocks is gone and `\d{2,}`
+    matches one giant concatenated number instead of two distinct ones.
+    Keep the regex anchored to `\d{MULTIPLE_BIBS_MIN_BLOCK_LEN,}`
+    against `result.data.text`, not the normalized form.
 
 ---
 
@@ -540,7 +598,52 @@ explicit, justified, and accompanied by an update to this file.
   authoritative changelog for the backend.
 - Frontend templates align with v5 (ViolationType + bulk delete UI).
 
-### 6.2 Recent changes (2026-05-07): CV pipeline overhaul in `checkpoint.html`
+### 6.2 Recent changes
+
+#### 2026-05-08 — Advanced violation triggers in `checkpoint.html`
+
+Frontend-only change; backend `Code.gs` still v5. The pipeline now fires
+four additional violation types autonomously alongside the existing
+`WRONG_PERSON` consensus mismatch:
+
+- **Ghost BIB → `NO_BIB` / `OBSCURED_BIB`**: per-runner counter
+  `ocrFailureCount[name]` increments on every silent-reject from the
+  validation gate (digits-only / length / confidence). At
+  `NO_BIB_AFTER_FAILURES` (5) consecutive failures, `tryFireViolation`
+  fires `NO_BIB` (empty text — no digits at all) or `OBSCURED_BIB`
+  (text but bad length / conf). The counter resets on any successful
+  OCR vote, on a successful `MULTIPLE_BIBS` fire, and when EMA is
+  dropped (10 missing frames).
+- **Intruder → `UNREGISTERED`**: `processLoop` tracks the largest-area
+  unknown face per frame in `largestUnknownBox`. After the detection
+  for-loop, `consecutiveFrames["unknown"]` increments; at
+  `UNREGISTERED_AFTER_FRAMES` (15) `tryFireViolation` fires with a
+  face-cropped image (`captureFaceCrop`, 50 % padding around the face
+  box). The per-frame staleness sweep already resets the counter when
+  no unknown is in view — strict reset matches the known-runner warmup
+  behavior.
+- **Cluttered Chest → `MULTIPLE_BIBS`**: regex
+  `\d{MULTIPLE_BIBS_MIN_BLOCK_LEN(2),}` runs against the **raw**
+  Tesseract text **before** digit-only normalization. ≥
+  `MULTIPLE_BIBS_MIN_BLOCKS` (2) matches → fire, list all blocks in
+  `message`, leave `bib` empty (Apps Script `BIB_PATTERN` rejects
+  commas, see Guardrail 26). If the cooldown blocks the fire, the
+  pipeline falls through to normal validation rather than dropping the
+  frame entirely.
+
+Supporting refactors:
+
+- `reportViolation(name, expected, found, video)` →
+  `reportViolation({ name, bib, message, violationType, image })`. All
+  five trigger sites build their own message and image and pass a
+  uniform options object.
+- New helpers: `captureFullFrame(video)`,
+  `captureFaceCrop(video, box)`, and the cooldown gate
+  `tryFireViolation(cooldownKey, payload)`.
+- All violation types share the same per-runner+CP cooldown bucket
+  (Guardrail 25); `tryFireViolation` is the single gate.
+
+#### 2026-05-07 — CV pipeline overhaul in `checkpoint.html`
 
 Frontend-only change; backend `Code.gs` is still v5. Goal was higher real-
 world accuracy and FPS without blocking the main thread.
@@ -653,6 +756,23 @@ world accuracy and FPS without blocking the main thread.
   are dropped together.
 - **Sample data** in `Data/` (legacy face DB) and `events/test/` is
   retained for reference; both directories are gitignored.
+- **Multiple unknowns in frame**: the `UNREGISTERED` trigger captures
+  only the **largest-area** face for the snapshot. Other unknowns are
+  ignored for that fire — they'll be picked up on the next cooldown
+  window if they remain.
+- **Intruder counter is single-bucket**: `consecutiveFrames["unknown"]`
+  treats all unknowns as one identity. Two different unknowns walking
+  through together are counted as continuous presence; the counter
+  fires once, resets to 0 on fire, and the 60 s cooldown rate-limits
+  any subsequent fires.
+- **Ghost BIB counter is reset on success**: a single passing OCR vote
+  OR a successful `MULTIPLE_BIBS` fire clears `ocrFailureCount[name]`.
+  Failures are also dropped with the EMA after `BBOX_EMA_RESET_FRAMES`
+  (10) consecutive missing frames.
+- **Multiple BIBs may fall through to validation**: when the cooldown
+  blocks `tryFireViolation`, the pipeline still digit-normalizes the
+  text and tries to vote one of the bibs as a normal read. Better to
+  attempt a single read than drop the frame entirely.
 
 ### 6.6 One-off setup helpers (Apps Script editor)
 
@@ -733,6 +853,14 @@ All responses are
 | `BIB_MIN_LEN` / `BIB_MAX_LEN` | `1` / `6` (field-test; nominal `2` / `5`) | Accepted BIB length range |
 | `OCR_VOTE_BUFFER_SIZE` | `5` | Rolling buffer of recent valid reads |
 | `OCR_VOTE_MIN_CONSENSUS` | `3` | Reads-in-agreement required for consensus |
+
+#### `checkpoint.html` — advanced violation triggers
+| Constant | Default | Effect |
+|---|---|---|
+| `NO_BIB_AFTER_FAILURES` | `5` | Consecutive validation-gate failures before firing `NO_BIB` (empty OCR) or `OBSCURED_BIB` (text but bad length / conf) |
+| `UNREGISTERED_AFTER_FRAMES` | `15` | Consecutive frames an unrecognized face must stay visible before firing `UNREGISTERED` |
+| `MULTIPLE_BIBS_MIN_BLOCK_LEN` | `2` | Minimum digits per block for a Tesseract chunk to count as a candidate BIB |
+| `MULTIPLE_BIBS_MIN_BLOCKS` | `2` | Minimum distinct candidate blocks in a single frame to fire `MULTIPLE_BIBS` |
 
 #### `dashboard.html`
 | Constant | Default | Effect |
