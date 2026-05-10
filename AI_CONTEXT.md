@@ -9,16 +9,19 @@
 > cadence, caching, or guardrails MUST update this file in the same change
 > set.
 >
-> **Last updated:** 2026-05-10 — Major architecture shift: the
-> checkpoint role moves from the browser (`templates/checkpoint.html`,
-> face-api.js + Tesseract.js) to a local Python edge node
-> (`checkpoint_camera.py`, YOLOv8 + PaddleOCR). v0 is a thin
-> detect→OCR→display loop using the COCO `yolov8n.pt` placeholder;
-> face recognition, backend POST, consensus voting, and cooldowns are
-> deferred to v0.1+. Browser checkpoint is preserved as a deprecated
-> rollback path. Backend stays at v6 (no changes); Guardrail 16
-> rewritten to clarify edge-AI is fine, only Apps Script AI is
-> prohibited. Earlier today: backend v5→v6 (single thumbnail URL
+> **Last updated:** 2026-05-10 — **Hybrid architecture**: browser
+> checkpoint UI restored as primary; YOLOv8 + PaddleOCR exposed via a
+> local Flask `/analyze` endpoint inside `web_app.py`. Tesseract.js is
+> fully removed. `templates/checkpoint.html` un-deprecated and
+> refactored to fetch the local server every ~400 ms with a base64
+> JPEG; per-detection BIB boxes are paired spatially with face-api
+> faces and feed the existing castVote/cooldown/POST machinery. The
+> standalone `checkpoint_camera.py` script is preserved as an
+> alternative path. Backend stays at v6. Guardrails 8/19/20/24/26
+> rewritten or removed to reflect the Tesseract→PaddleOCR cutover;
+> Guardrail 16 still says edge AI is fine (the local Flask AI
+> qualifies). Earlier the same day: edge-node migration v0
+> (now superseded by hybrid); backend v5→v6 (single thumbnail URL
 > contract; YYYY-MM-DD subfolders; `_migrateHistoricalImages()`
 > replaces `_migrateAllImageUrls`).
 
@@ -32,28 +35,39 @@ wearable hardware. The system is bilingual UI (Thai labels, English
 identifiers). All AI runs at the edge (operator's machine); the
 Google Apps Script backend handles only storage and validation.
 
-As of 2026-05-10 the **checkpoint** role is performed by a local Python
-edge node (`checkpoint_camera.py`, YOLOv8 + PaddleOCR). The
-register and dashboard roles remain browser-based. The previous
-browser checkpoint (`templates/checkpoint.html`) is deprecated but
-preserved as a rollback path.
+As of 2026-05-10 the **checkpoint** role uses a hybrid architecture:
+the browser UI in `templates/checkpoint.html` runs face recognition and
+the operator overlay, while the heavy YOLOv8 + PaddleOCR inference is
+offloaded to a local Flask `/analyze` endpoint hosted alongside the
+templates inside `web_app.py`. Same machine, same Flask process, same
+origin (port 5000) — no CORS. The standalone `checkpoint_camera.py`
+remains as an alternative path; it is no longer the primary loop.
 
 ### High-level architecture
 
 ```
 ┌────────────────────┐  ┌──────────────────────┐  ┌──────────────────────┐
-│ register.html      │  │ checkpoint_camera.py │  │ dashboard.html       │
-│ (browser)          │  │ (Python edge node)   │  │ (browser; +admin)    │
-│ • face-api.js      │  │ • ultralytics YOLOv8 │  │ • polls Apps Script  │
-│ • 5-angle capture  │  │ • PaddleOCR (digits) │  │ • leaderboard+alerts │
-│ • avg 128-d desc   │  │ • cv2 webcam loop    │  │ • CRUD + bulk ops    │
-└──────────┬─────────┘  └──────────┬───────────┘  └──────────┬───────────┘
-           │ POST                  │ POST (planned, v0.1)    │ GET/POST
-           │ registerRunner        │ recordCheckpoint        │ getResults,
-           │                       │ reportViolation         │ getRunners,
-           │                       │ (NOT wired in v0)       │ getVerifiedViolations,
-           │                       │                         │ verify/delete/update…
-           ▼                       ▼                         ▼
+│ register.html      │  │ checkpoint.html      │  │ dashboard.html       │
+│ (browser)          │  │ (browser, primary)   │  │ (browser; +admin)    │
+│ • face-api.js      │  │ • face-api.js        │  │ • polls Apps Script  │
+│ • 5-angle capture  │  │ • POST /analyze      │  │ • leaderboard+alerts │
+│ • avg 128-d desc   │  │   (~400 ms cadence)  │  │ • CRUD + bulk ops    │
+│                    │  │ • spatial pair → vote│  │                      │
+└──────────┬─────────┘  └────────┬─────────────┘  └──────────┬───────────┘
+           │ POST                │ POST /analyze              │ GET/POST
+           │ registerRunner      │ (same-origin, JSON)        │ getResults,
+           │                     ▼                            │ getRunners,
+           │            ┌─────────────────────────────┐       │ getVerifiedViolations,
+           │            │ web_app.py (Flask, :5000)   │       │ verify/delete/update…
+           │            │ • /, /register, /checkpoint │       │
+           │            │ • /dashboard, /admin        │       │
+           │            │ • POST /analyze ← YOLOv8 +  │       │
+           │            │   PaddleOCR (per-detection) │       │
+           │            │ • GET  /health              │       │
+           │            └─────────────────────────────┘       │
+           │                                                  │
+           │ recordCheckpoint, reportViolation                │
+           ▼                                                  ▼
 ┌────────────────────────────────────────────────────────────────────┐
 │  GOOGLE APPS SCRIPT  (apps_script/Code.gs — v6)                    │
 │  • doGet (cache-fronted reads, 12 s TTL)                           │
@@ -69,13 +83,9 @@ preserved as a rollback path.
 │ • Violations         │  │ (ANYONE_WITH_LINK / VIEW; thumbnail)   │
 └──────────────────────┘  └────────────────────────────────────────┘
 
-         Deprecated rollback: templates/checkpoint.html still works as
-         a browser-side checkpoint if the Python edge node is
-         unavailable. Run `pip install flask && python web_app.py` and
-         open `/checkpoint`.
-
-         (Optional) Flask = static HTML host for register/dashboard.
-         Flask is no longer in requirements.txt — install on demand.
+         Alternative: `python checkpoint_camera.py` runs the same AI
+         in a headless cv2 window (no browser, no /analyze HTTP).
+         Useful for kiosk-style deployments without a display server.
 ```
 
 ### Why this architecture
@@ -94,20 +104,22 @@ preserved as a rollback path.
 AI-Runner-Timing-System-YOLOv8/
 ├── AI_CONTEXT.md          ← THIS FILE (system memory for AI agents)
 ├── README.md              ← human-facing project intro (Thai/English)
-├── checkpoint_camera.py   ← Python edge node (YOLOv8 + PaddleOCR, v0)
-├── requirements.txt       ← edge-node deps; flask is NOT included —
-│                            install separately if running web_app.py
-├── web_app.py             ← Flask: serves register/dashboard/checkpoint
-│                            HTML; legacy /checkpoint route still works
+├── checkpoint_camera.py   ← Standalone alternative (YOLOv8 + PaddleOCR,
+│                            headless cv2 loop). Not in primary loop.
+├── requirements.txt       ← all hybrid deps incl. flask, ultralytics,
+│                            paddleocr, paddlepaddle, opencv-python
+├── web_app.py             ← Flask host: serves templates AND the local
+│                            POST /analyze endpoint (YOLOv8 + PaddleOCR);
+│                            also exposes GET /health for the frontend
+│                            ready-poll. Loads models once at import.
 ├── yolov8n-face.pt        ← legacy YOLO weights (used by legacy_v1 only)
 ├── running_results.csv    ← legacy CSV log (gitignored, rarely cleared)
 ├── .gitignore
 │
-├── templates/             ← Browser frontend (register + dashboard active;
-│                            checkpoint deprecated)
+├── templates/             ← Browser frontend (all three active)
 │   ├── register.html      ← Runner registration (5-angle face capture)
-│   ├── checkpoint.html    ← DEPRECATED — see checkpoint_camera.py.
-│   │                        Preserved as a rollback path; still works.
+│   ├── checkpoint.html    ← Primary checkpoint UI; face-api.js +
+│   │                        fetch /analyze (~400 ms cadence)
 │   └── dashboard.html     ← Public leaderboard + Admin portal (login-gated)
 │
 ├── apps_script/
@@ -130,10 +142,10 @@ AI-Runner-Timing-System-YOLOv8/
 
 | File | Role | Touch this when… |
 |---|---|---|
-| `checkpoint_camera.py` | Local edge node — webcam → YOLOv8 → crop → PaddleOCR → annotated display. **Primary checkpoint pipeline as of 2026-05-10.** | Detection model swap, OCR tuning, drawing/UI tweaks, future POST/face-rec wiring |
-| `web_app.py` | Tiny Flask wrapper. Serves `register.html`, `dashboard.html`, and (deprecated) `checkpoint.html`. **Does no AI work.** | Adding/renaming a frontend page (Flask is install-on-demand now) |
+| `web_app.py` | Flask host: serves templates AND `POST /analyze` (YOLOv8 + PaddleOCR) and `GET /health`. Loads models at import; first start ~4-8 s. **Primary AI host as of 2026-05-10.** | Detection model swap, OCR tuning, route changes, request validation |
+| `checkpoint_camera.py` | Headless cv2 alternative (same models, no HTTP). Independent of the primary loop. | Kiosk-mode tweaks, drawing/cv2-window changes |
 | `templates/register.html` | Capture 5 face angles, compute averaged 128-d descriptor, single atomic upload | Changing capture UX, embedding format, registration payload |
-| `templates/checkpoint.html` | **DEPRECATED.** Browser checkpoint (face-api + Tesseract). Preserved as a rollback path; still POSTs cleanly to the v6 backend | Only when fixing the rollback path |
+| `templates/checkpoint.html` | **Primary checkpoint UI.** face-api.js for identity; throttled `fetch('/analyze')` for BIB OCR; spatial face↔BIB pairing; existing castVote / cooldowns / GAS POST contract preserved | OCR cadence, pairing geometry, drawing, violation triggers |
 | `templates/dashboard.html` | Public leaderboard, alerts, admin portal (auth, CRUD, bulk delete, type filter) | UI/UX, admin actions, polling, type taxonomy |
 | `apps_script/Code.gs` | Backend REST + Sheets/Drive I/O + cache + migrations | Schema, endpoints, validation, cleanup logic |
 | `legacy_v1/*` | Offline fallback. **Independent codebase.** | Only when explicitly fixing legacy mode |
@@ -258,26 +270,96 @@ My Drive/
    `Runners` row (or updates in place if `name` already exists),
    invalidates the runners cache.
 
-### 4.2 Checkpoint detection
+### 4.2 Checkpoint detection (hybrid, primary)
 
-The project has TWO checkpoint pipelines:
+The project ships TWO checkpoint pipelines:
 
-- **§4.2.1 — Python edge node** (`checkpoint_camera.py`): primary as of
-  2026-05-10. YOLOv8 + PaddleOCR running locally on the operator's
-  machine. Currently a thin v0 — detect, OCR, display. No backend POST,
-  no face recognition, no consensus voting, no cooldowns yet.
-- **§4.2.2 — Browser checkpoint** (`templates/checkpoint.html`):
-  **deprecated** but preserved as a rollback path. Full-featured: face
-  recognition, OCR consensus voting, per-CP cooldowns, five
-  autonomous violation triggers. Still POSTs cleanly to the v6 backend.
+- **§4.2.1 — Hybrid (browser + local Flask AI)**: primary path as of
+  2026-05-10. `templates/checkpoint.html` runs face-api.js for runner
+  identity and posts every ~400 ms to `web_app.py`'s `/analyze` endpoint
+  (YOLOv8 + PaddleOCR). The browser pairs each server-returned BIB box
+  with a face by spatial proximity (chest region) and feeds the
+  existing castVote / cooldown / GAS POST machinery from those
+  results. Full-featured: face recognition, OCR consensus voting,
+  per-CP cooldowns, five autonomous violation triggers (`NO_BIB`,
+  `OBSCURED_BIB`, `WRONG_PERSON`, `MULTIPLE_BIBS`, `UNREGISTERED`).
+- **§4.2.2 — Standalone Python** (`checkpoint_camera.py`): same AI
+  models in a headless cv2 loop. No HTTP, no browser, no GAS POST —
+  used for kiosk-style deployments. Independent of the primary loop.
 
-The Python edge node will eventually subsume the browser pipeline's
-features (face recognition, consensus voting, cooldowns, POST). Until
-v0.1 lands those, an event running on the Python edge node only logs
-locally — operators who need timing records flowing to the backend
-should use the browser checkpoint.
+The hybrid path is the default; operators run `pip install -r
+requirements.txt && python web_app.py` and open `/checkpoint`. The
+local server loads YOLO+PaddleOCR once at import (~4-8 s on CPU);
+the frontend polls `GET /health` before opening the camera. If the
+local server goes down mid-event, `recordCheckpoint` keeps firing
+(face-only path), the UI shows an "AI offline" banner, and OCR-driven
+violations naturally pause until the server returns.
 
-#### 4.2.1 Python edge node (`checkpoint_camera.py`, v0)
+#### 4.2.1 Hybrid pipeline (`templates/checkpoint.html` + `web_app.py`)
+
+```
+Browser (templates/checkpoint.html)         Local server (web_app.py, :5000)
+─────────────────────────────────────       ─────────────────────────────────
+init():
+  load face-api models @0.22.2
+  GET /?action=getRunners → FaceMatcher
+  await waitForAIServer(/health, 30 s)      GET /health → {"ready": true}
+  start requestAnimationFrame(processLoop)
+
+processLoop (every rAF, ~60 fps):           POST /analyze (every ~400 ms)
+  detectAllFaces().landmarks().descriptors  ────────────────────────────────►
+  if (now - lastAnalyzeAt > 400 ms          {"image": "<base64 jpeg>"}
+      && !analyzeBusy):
+    analyzeFrame()                          → cv2.imdecode → YOLO_MODEL
+                                              → per-box: clamp, crop,
+                                                extract_digits(PADDLE_OCR)
+                                              → drop empty-digit entries
+                                            ◄────────────────────────────────
+                                            {"detections": [
+                                              {"box":{x,y,w,h},
+                                               "text":"67",
+                                               "confidence":0.92,
+                                               "label":"BIB"}, …
+                                            ]}
+
+  isNewCycle = lastAnalyzeAid !== processedAnalyzeId
+  for each face:
+    castFaceVote, smoothBox, recordCP gate (face-only, GR 22)
+    if isNewCycle and consecutiveFrames[name] >= 3:
+      consumeAnalyzeForFace(box, name):
+        pairFaceToBib(box, lastDetections)   ← chest-region geometry
+                                              (lateral ±0.5·faceH,
+                                               vertical 0.6-3.0·faceH)
+        all.length ≥ 2 (≥2 digits each) → MULTIPLE_BIBS
+        primary == null                  → NO_BIB candidate (Ghost BIB)
+        text fails len/conf gate         → OBSCURED_BIB candidate
+        success                          → castVote(name, text, conf)
+                                            consensus mismatch → WRONG_PERSON
+  if isNewCycle: processedAnalyzeId = lastAnalyzeAid
+  draw face boxes + drawDetectionTab(d) for d in lastDetections
+  if serverStatus === "down": draw "AI offline" banner
+```
+
+**Cadence and throughput**: 400 ms server cadence is held by an
+`analyzeBusy` flag — if inference takes longer than the interval, the
+next fetch is skipped (no stacking). YOLOv8n + PaddleOCR English on
+CPU is ~80-120 ms/frame and ~150-300 ms per OCR ROI, so 2-3 BIBs in
+view sit near the budget. Raise `ANALYZE_INTERVAL_MS` before
+downgrading models if the HUD shows `analyzeBusy: true` continuously.
+
+**PaddleOCR confidence is 0-1** (Tesseract was 0-100); `PADDLE_MIN_CONF
+= 0.6` replaces the old `OCR_MIN_CONFIDENCE`. The majority-vote gate
+(3-of-5 over a 15 s window) is unchanged and still the primary
+protection against single-frame misreads (Guardrail 21).
+
+**Face↔BIB pairing**: `pairFaceToBib(faceBox, detections)` computes the
+chest region from the smoothed face box (Guardrail 18) using factors
+`PAIR_LATERAL_FACTOR=0.5`, `PAIR_TOP_FACTOR=0.6`,
+`PAIR_BOTTOM_FACTOR=3.0`. Detections whose center sits inside this
+region pair with the face; the nearest-to-face-center is `primary` and
+feeds the vote, while `all` drives the `MULTIPLE_BIBS` count.
+
+#### 4.2.2 Standalone Python (`checkpoint_camera.py`, v0)
 
 ```
 init_models():
@@ -344,178 +426,18 @@ draw_yolo_label:
   `MODEL_PATH`, OCR runs on every detection's ROI; only digit-bearing
   crops yield non-empty BIBs.
 
-#### 4.2.2 Browser checkpoint (`templates/checkpoint.html`, deprecated; preserved for reference)
-
-> **DEPRECATED as of 2026-05-10** in favor of `checkpoint_camera.py`.
-> The HTML, JavaScript, and POST contract are unchanged — the v6
-> backend continues to accept records and violations from this path
-> verbatim. Operators run `pip install flask && python web_app.py`
-> and open `/checkpoint` to use it as a rollback. The narrative below
-> describes the deprecated implementation; do not extend it.
-
-The pipeline has two **independent triggers**:
-
-- **`recordCheckpoint`** is gated by FACE recognition only — N consecutive
-  matches above the FACE_MATCH_DISTANCE threshold + per-CP cooldown.
-- **`reportViolation`** is gated by FACE recognition AND OCR consensus —
-  consensus BIB must disagree with the registered BIB AND a separate
-  per-CP violation cooldown must be elapsed.
-
-```
-init():
-  load face-api models           (TinyFaceDetector + Landmark68 + Recognition)
-  GET /?action=getRunners
-    → build FaceMatcher(labels, FACE_MATCH_DISTANCE = 0.45)
-    → runnerRegistry[name] = bibNumber
-  getUserMedia(VIDEO_WIDTH × VIDEO_HEIGHT = 1280×720)
-    NotAllowedError surfaced as friendly Thai message
-  Tesseract.createWorker("eng") + setParameters({
-    tessedit_char_whitelist: '0123456789',
-    tessedit_pageseg_mode:   '7'        // single text line
-  })
-  start requestAnimationFrame(processLoop)
-
-processLoop (every frame):
-  detectorOptions = TinyFaceDetectorOptions({
-    inputSize: FACE_DETECTOR_INPUT_SIZE (320),
-    scoreThreshold: FACE_DETECTOR_SCORE_THRESHOLD (0.5)
-  })
-  detectAllFaces(video, detectorOptions).withFaceLandmarks().withFaceDescriptors()
-
-  largestUnknownBox = null, largestUnknownArea = 0          ← per-frame intruder tracker
-
-  for each detection:
-    match = faceMatcher.findBestMatch(descriptor)
-    isKnown = match.label !== "unknown" AND match.distance <= FACE_MATCH_DISTANCE
-    box = isKnown ? smoothBox(name, rawBox) : rawBox      ← EMA: α=0.35
-
-    if isKnown:
-      consecutiveFrames[name]++
-
-      ── recordCheckpoint trigger (face-only) ──
-      if consecutiveFrames[name] >= RECORD_AFTER_FRAMES (5)
-         AND now - cooldowns["name:cpId"] > COOLDOWN_SEC (30):
-           cooldowns["name:cpId"] = now
-           POST recordCheckpoint
-
-      ── OCR trigger ──
-      if consecutiveFrames[name] >= OCR_AFTER_FRAMES (10) AND !ocrBusy:
-           runSmartOCR(video, box, name)   ← uses SMOOTHED box
-
-    else:                                                    ← intruder candidate
-      area = rawBox.width * rawBox.height
-      if area > largestUnknownArea: largestUnknownBox = rawBox
-
-    draw rect (using box), label "name (XX%)", BIB consensusBib(name) || expected
-    if isKnown:
-      draw dashed-red OCR debug rect at getOCRCropBox(box, video)   ← operator visibility
-
-  ── post-loop: UNREGISTERED (Intruder) trigger ──
-  if largestUnknownBox:
-    consecutiveFrames["unknown"]++
-    if consecutiveFrames["unknown"] >= UNREGISTERED_AFTER_FRAMES (15):
-      tryFireViolation("unknown:cpId", { violationType:"UNREGISTERED",
-                                          image:captureFaceCrop(...) })
-
-  ── per-frame staleness sweep ──
-  consecutiveFrames[n] = 0 for n not in currentNames        ← also resets "unknown"
-  bboxEMA[n].missingFrames++ for n not in currentNames
-  if missingFrames > BBOX_EMA_RESET_FRAMES (10):
-    delete bboxEMA[n]; delete ocrVotes[n]; delete ocrConsensus[n]
-    delete ocrFailureCount[n]; delete ocrLastFailureKind[n]
-
-
-runSmartOCR(video, box, name):
-  {bx, by, bw, bh} = getOCRCropBox(box, video)              ← shared with overlay
-  crop chest region using SMOOTHED box (3×faceH tall, starts at chin)
-  preprocessForOCR(crop):
-    grayscale (BT.601) → integral image →
-    adaptive threshold (mean − ADAPTIVE_THRESHOLD_C, ADAPTIVE_THRESHOLD_BLOCK² window) →
-    nearest-neighbor 2× upscale
-  result = tesseractWorker.recognize(processed)            ← async, off-thread
-  rawText = result.data.text                               ← keep raw for MULTIPLE_BIBS
-  conf = result.data.confidence
-
-  ── MULTIPLE_BIBS (Cluttered Chest) trigger ──            ← runs on RAW text first
-  blocks = rawText.match(/\d{MULTIPLE_BIBS_MIN_BLOCK_LEN(2),}/g) || []
-  if blocks.length >= MULTIPLE_BIBS_MIN_BLOCKS (2):
-    if tryFireViolation("name:cpId", { violationType:"MULTIPLE_BIBS" }):
-      ocrFailureCount[name] = 0; return
-    (else fall through; cooldown blocked it)
-
-  text = digits-only(rawText)
-
-  ── validation gate → Ghost BIB counter ──
-  failureKind = !text                                  ? "empty"
-              : text.length ∉ [BIB_MIN_LEN, BIB_MAX_LEN] ? "low_quality"
-              : conf < OCR_MIN_CONFIDENCE              ? "low_quality"
-              : null
-  if failureKind:
-    ocrFailureCount[name]++
-    if ocrFailureCount[name] >= NO_BIB_AFTER_FAILURES (5):
-      type = (failureKind=="empty") ? "NO_BIB" : "OBSCURED_BIB"
-      tryFireViolation("name:cpId", { violationType:type })
-    return
-  ocrFailureCount[name] = 0                            ← clear on success
-
-  ── majority vote ──
-  buf = ocrVotes[name]; push {text, ts, conf}
-  evict entries older than OCR_CACHE_TTL_MS (15s)
-  cap buf at OCR_VOTE_BUFFER_SIZE (5)
-  if max-tally(buf) < OCR_VOTE_MIN_CONSENSUS (3)    → return  (no consensus yet)
-
-  consensus = majority bib
-  ocrConsensus[name] = {bib: consensus, ts: now}
-
-  ── WRONG_PERSON trigger (consensus mismatch) ──
-  if registered[name] AND consensus !== registered[name]:
-    tryFireViolation("name:cpId", { violationType:"WRONG_PERSON" })
-
-
-tryFireViolation(cooldownKey, payload):
-  if violationCooldowns[cooldownKey] hot (≤ VIOLATION_COOLDOWN_SEC (60)): return false
-  violationCooldowns[cooldownKey] = now
-  reportViolation(payload)                                 ← options-style payload
-  return true
-```
-
-**Per-CP cooldown keys** use `"<name>:<cpId>"` (or `"unknown:<cpId>"`
-for `UNREGISTERED`) — this lets a runner trigger each station once even
-if they double back through the camera view. Record cooldowns and
-violation cooldowns live in **separate buckets** so reporting a
-violation does not suppress a legitimate timing record (or vice versa).
-Within the violation bucket, all five violation types — `WRONG_PERSON`,
-`NO_BIB`, `OBSCURED_BIB`, `MULTIPLE_BIBS`, `UNREGISTERED` — share the
-same per-runner+CP key, so the 60 s spam-prevention budget cannot be
-bypassed by stacking different types on the same runner. The shared
-gate lives in `tryFireViolation(cooldownKey, payload)`; every trigger
-site goes through it.
-
-**Smart OCR** crops a region anchored to the smoothed face box, computed
-by `getOCRCropBox(box, video)` — the **single source of truth** for crop
-geometry, used by both `runSmartOCR` and the dashed-red OCR debug overlay
-in `processLoop`. Current factors (post-field-test tuning):
-
-- `bx = box.x − 0.5·faceH`         (lateral pad)
-- `by = box.y + 0.6·faceH`         (start at chin level — catches BIBs
-                                     held by hand near neck)
-- `bw = box.width + 1.0·faceH`     (~2× face width)
-- `bh = 3.0·faceH`                 (extends well below the chest)
-
-The crop is taken from the **EMA-smoothed** box; using the raw detection
-box made the crop jitter and tanked Tesseract confidence.
-
-The OCR debug overlay (dashed red rectangle labeled `OCR`) is drawn on
-the overlay canvas for known runners only — it lets the field operator
-see exactly where Tesseract will look, so they can correct how a runner
-holds the BIB. Skipped for `Unknown` (we never OCR them).
-
-**Preprocessing runs on the main thread** (not in a Web Worker) because
-the typical 200×150 px crop costs <1 ms via integral image, while a
-worker round-trip would add postMessage / structured-clone overhead
-larger than the work itself. **Tesseract itself runs in its own Web
-Worker** (Tesseract.js v5 default), so the actual recognition step
-never blocks the render loop.
+**Per-CP cooldown keys** (preserved across pipelines) use
+`"<name>:<cpId>"` (or `"unknown:<cpId>"` for `UNREGISTERED`) — a runner
+trips each station once even if they double back through the camera
+view. Record cooldowns and violation cooldowns live in **separate
+buckets** so reporting a violation does not suppress a legitimate
+timing record (or vice versa). Within the violation bucket, all five
+violation types — `WRONG_PERSON`, `NO_BIB`, `OBSCURED_BIB`,
+`MULTIPLE_BIBS`, `UNREGISTERED` — share the same per-runner+CP key,
+so the 60 s spam-prevention budget cannot be bypassed by stacking
+different types on the same runner. The shared gate lives in
+`tryFireViolation(cooldownKey, payload)`; every trigger site goes
+through it.
 
 ### 4.3 Dashboard polling (`dashboard.html`)
 
@@ -639,9 +561,10 @@ explicit, justified, and accompanied by an update to this file.
    user-supplied field (Name, Message, BibNumber, ImageUrl) MUST go
    through `esc()` / `attr()` before being concatenated into
    `innerHTML`. Rendering raw values is the most likely XSS path here.
-8. **CDN versions are pinned.** `face-api.js@0.22.2` and
-   `tesseract.js@5` and the model weights URL must stay pinned. `@master`
-   was tried once and silently broke face matching.
+8. **CDN versions are pinned.** `face-api.js@0.22.2` and the model weights
+   URL must stay pinned. `@master` was tried once and silently broke face
+   matching. Tesseract.js was retired in the 2026-05-10 hybrid migration —
+   no longer pinned because it's no longer loaded.
 9. **Admin token is not in source.** It lives in
    `PropertiesService.ScriptProperties`. If you must change the default,
    edit `_setupAdminToken()` and re-run it from the editor — never hard-
@@ -677,38 +600,41 @@ explicit, justified, and accompanied by an update to this file.
     one-shot migration helper (template:
     `_migrateViolationTypeColumn`). Existing sheets must not be
     rewritten just by deploying new code.
-16. **AI runs at the edge, never in Apps Script.** All face/OCR work
-    runs on the operator's machine — historically in the browser
-    (`templates/checkpoint.html`, face-api.js + Tesseract.js), and as
-    of 2026-05-10 in a local Python edge node (`checkpoint_camera.py`,
-    YOLOv8 + PaddleOCR; primary path going forward). Apps Script
-    remains storage + validation only. Do not introduce server-side
-    inference: the GAS execution-time quota (~6 h/day on consumer
-    accounts) makes it economically unviable, and the architecture
-    intentionally scales to N edge devices for free.
+16. **AI runs at the edge, never in Apps Script.** "Edge" means the
+    operator's machine — face-api.js in the browser AND YOLOv8 +
+    PaddleOCR in the local Flask process (`web_app.py`) hosted on the
+    same machine. The hybrid arrangement is fine: same machine, no
+    cloud inference. Apps Script remains storage + validation only.
+    Do not introduce server-side inference *in Apps Script*: the GAS
+    execution-time quota (~6 h/day on consumer accounts) makes it
+    economically unviable, and the architecture intentionally scales
+    to N operator machines for free.
 17. **`legacy_v1/` is frozen.** Do not refactor it as part of v2 work.
     It only changes when the user explicitly asks for offline-mode
     fixes.
-18. **The EMA-smoothed bbox MUST be passed to `runSmartOCR`.** Cropping
-    from the raw detection box reintroduces frame-to-frame jitter and
-    Tesseract confidence collapses. `processLoop` builds `box =
-    smoothBox(name, rawBox)` once per detection and uses it for both
-    the overlay and the OCR crop — preserve that contract.
-19. **OCR preprocessing is `grayscale → adaptive threshold → 2×
-    nearest-neighbor`, in that order, on the main thread.** Don't swap
-    in bilinear upscale (introduces gray pixels Tesseract mistreats).
-    Don't move it to a Web Worker (the postMessage round-trip is
-    larger than the work). Don't drop the threshold step (gray text on
-    gray jersey is the dominant failure mode without it).
-20. **Tesseract worker config is part of the contract.** `tessedit_char_whitelist
-    = '0123456789'` and `tessedit_pageseg_mode = '7'` are set once at
-    init and assumed by the validation gate. Do not change these
-    without re-deriving the BIB length and confidence thresholds.
+18. **The EMA-smoothed bbox MUST drive face↔BIB pairing.** Pairing
+    against the raw detection box reintroduces frame-to-frame jitter
+    and the chest-region rectangle drifts off the BIB. `processLoop`
+    builds `box = smoothBox(name, rawBox)` once per detection and
+    passes that to `pairFaceToBib` (and to the on-canvas overlay) —
+    preserve that contract.
+19. *(retired 2026-05-10)* Was: "OCR preprocessing is grayscale →
+    adaptive threshold → 2× nearest-neighbor on the main thread."
+    PaddleOCR has its own preprocessing pipeline; the hybrid migration
+    deleted `preprocessForOCR` from `checkpoint.html`. No replacement
+    rule needed — the server is the OCR contract.
+20. *(retired 2026-05-10)* Was: "Tesseract worker config is part of
+    the contract." Tesseract.js is gone. The PaddleOCR equivalent
+    (`use_angle_cls=True, lang="en"`) lives in `web_app.py` and
+    `checkpoint_camera.py`; do not change without re-deriving the
+    `BIB_MIN_LEN` / `BIB_MAX_LEN` / `PADDLE_MIN_CONF` validation gate.
 21. **Violations require majority consensus, not a single read.** The
     `castVote` → consensus gate exists because single-frame OCR
     misreads were generating false-positive `WRONG_PERSON` reports.
-    Don't bypass it (e.g., by calling `reportViolation` directly from
-    `runSmartOCR` on the first read).
+    The vote source is now the `/analyze` response (one `castVote`
+    call per fetch, gated by `isNewCycle` in `processLoop`). Don't
+    bypass the consensus gate (e.g., by firing `reportViolation`
+    directly from `consumeAnalyzeForFace` on the first detection).
 22. **Recording vs violation triggers are independent.** `recordCheckpoint`
     is gated on **face** consecutive frames + record cooldown only — it
     must NOT depend on OCR consensus, because operators want timing
@@ -722,12 +648,16 @@ explicit, justified, and accompanied by an update to this file.
     the new fetch on the floor** — under an Apps Script cold start that
     leaves the UI stale for 30 + s. A queue introduces tail latency.
     Abort-and-restart gives the freshest data with no pile-up.
-24. **`getOCRCropBox` is the single source of truth for chest crop
-    geometry.** Both `runSmartOCR` and the dashed-red OCR debug overlay
-    in `processLoop` call it. If either path computes the crop inline,
-    the operator's visible rectangle drifts away from where Tesseract
-    actually looks — defeating the purpose of the debug overlay. Keep
-    the helper as the only place crop factors live.
+24. **Server-returned BIB box is the source of truth for OCR text;
+    chest-region geometry is only the pairing rule.** YOLO on the
+    server decides where the BIB actually is. The browser's
+    chest-region (`PAIR_LATERAL_FACTOR`, `PAIR_TOP_FACTOR`,
+    `PAIR_BOTTOM_FACTOR`) is used solely by `pairFaceToBib` to decide
+    which detection belongs to which face — it must NOT be used to
+    pre-crop the frame before sending to `/analyze` (the server needs
+    the full frame to find BIBs that drift outside one face's chest
+    region). The on-canvas tab is drawn at the server-returned box,
+    not at the chest rect.
 25. **All violation types share the same per-runner+CP cooldown
     bucket.** `WRONG_PERSON`, `NO_BIB`, `OBSCURED_BIB`, and
     `MULTIPLE_BIBS` all key on `"name:cpId"`; `UNREGISTERED` keys on
@@ -738,13 +668,15 @@ explicit, justified, and accompanied by an update to this file.
     cooldowns without revisiting the spam-prevention budget; a runner
     whose BIB OCR fails AND whose face matches a wrong registered
     runner would otherwise fire two violations on the same frame.
-26. **The `MULTIPLE_BIBS` check runs on RAW Tesseract text BEFORE
-    digit-only normalization.** Once
-    `text=String(rawText).replace(/[^0-9]/g,"")` is applied, the
-    whitespace separating distinct BIB blocks is gone and `\d{2,}`
-    matches one giant concatenated number instead of two distinct ones.
-    Keep the regex anchored to `\d{MULTIPLE_BIBS_MIN_BLOCK_LEN,}`
-    against `result.data.text`, not the normalized form.
+26. **`MULTIPLE_BIBS` fires on multi-detection clustering, not raw
+    OCR text.** In hybrid mode each "block" is one server-returned
+    detection. `pairFaceToBib` returns `all` (every in-region
+    detection); `consumeAnalyzeForFace` filters that to entries with
+    `text.length >= MULTIPLE_BIBS_MIN_BLOCK_LEN` and fires when the
+    count is ≥ `MULTIPLE_BIBS_MIN_BLOCKS`. Don't collapse the multi-
+    detection signal into a single concatenated text field — YOLO
+    multi-box is more reliable than splitting whitespace in OCR
+    output (which the previous Tesseract pipeline had to do).
 
 ---
 
@@ -754,19 +686,76 @@ explicit, justified, and accompanied by an update to this file.
 
 - **Backend `Code.gs` is at v6.** Header comment block in `Code.gs`
   is the authoritative changelog for the backend.
-- **Edge node `checkpoint_camera.py` is at v0** — placeholder COCO
-  YOLO weights (`yolov8n.pt`), PaddleOCR digit extraction, local
-  display only. No backend POST yet.
+- **Hybrid checkpoint pipeline is primary** as of 2026-05-10.
+  `web_app.py` hosts both the templates and `POST /analyze` (YOLOv8 +
+  PaddleOCR) on port 5000. `templates/checkpoint.html` runs face-api.js
+  in the browser and posts frames at ~400 ms cadence.
+- **`checkpoint_camera.py` (v0)** remains as the headless cv2
+  alternative — same models, no HTTP, no GAS POST.
 - Frontend templates align with v5 (ViolationType + bulk delete UI).
   v6 is backend-only — no frontend payload, schema, or endpoint
   shape changed; the dashboard simply receives URLs that all render.
-- `templates/checkpoint.html` is **deprecated** as of 2026-05-10 but
-  preserved as a rollback path; its POST contract to v6 backend is
-  unchanged.
 
 ### 6.2 Recent changes
 
-#### 2026-05-10 — Edge-node migration v0: YOLOv8 + PaddleOCR replaces browser checkpoint
+#### 2026-05-10 — Hybrid checkpoint: browser UI + local Flask AI
+
+The checkpoint role swaps back to the browser as the operator UI,
+but YOLOv8 + PaddleOCR move from a standalone Python loop to a
+Flask `/analyze` endpoint hosted alongside the templates inside
+`web_app.py`. Tesseract.js is fully removed.
+
+**What changed (this commit):**
+- `web_app.py` rewritten: loads YOLO + PaddleOCR once at import,
+  exposes `POST /analyze` (base64 JPEG → per-detection BIB JSON) and
+  `GET /health`. `debug=False` so the reloader does not pay the
+  cold-load on every save.
+- `templates/checkpoint.html` refactored: Tesseract.js script tag,
+  worker, `preprocessForOCR`, `getOCRCropBox`, and `runSmartOCR`
+  removed. Added `analyzeFrame`, `pairFaceToBib`, `drawDetectionTab`,
+  `consumeAnalyzeForFace`, and `maybeFireGhostBib`. `processLoop`
+  now throttles a `/analyze` fetch at `ANALYZE_INTERVAL_MS = 400`,
+  consumes results once per response (`isNewCycle` gate, Guardrail 21),
+  pairs faces to BIBs spatially, and feeds the existing castVote /
+  cooldown / GAS POST machinery. New `serverStatus` HUD field +
+  permanent "AI offline" banner when `/analyze` is unreachable.
+- `requirements.txt` adds `flask`. `flask-cors` is NOT added — the
+  browser fetches the same origin that served the page.
+- Guardrails 8, 16, 18, 21, 24, 26 rewritten to match hybrid
+  semantics; Guardrails 19 and 20 retired (Tesseract preprocessing
+  and worker config no longer apply).
+
+**Why:**
+- **Operator UI.** The browser checkpoint had a polished init flow,
+  sidebar log, debug HUD, init progress, and CP selector that users
+  invested in. The headless cv2 window of `checkpoint_camera.py` was
+  not a viable replacement for live race operations.
+- **OCR accuracy.** PaddleOCR with `use_angle_cls=True` is more
+  resilient than Tesseract.js to runner-held BIBs and rotated text.
+- **No CDN AI.** Tesseract.js was a 4 MB CDN dep loaded into every
+  operator's browser; with PaddleOCR running locally this is gone.
+- **Single AI surface.** Both the headless script and the hybrid
+  endpoint share `extract_digits` semantics; future fine-tuned weights
+  drop into both via `MODEL_PATH = "yolov8n.pt"`.
+
+**Edge node hosts:** the same machine that runs `web_app.py` is the
+operator's laptop — no separate "AI box". The hybrid keeps the "AI at
+the edge" property of Guardrail 16. If the local server crashes,
+`recordCheckpoint` keeps firing on face-only matches; OCR-driven
+violations pause until restart.
+
+**Run:** `pip install -r requirements.txt && python web_app.py`,
+then open `http://localhost:5000/checkpoint`. First start downloads
+YOLO weights (~6 MB) + PaddleOCR detection / recognition / angle-cls
+models (~10-15 MB).
+
+#### 2026-05-10 — Edge-node migration v0 (superseded by hybrid)
+
+(Earlier on 2026-05-10.) Standalone `checkpoint_camera.py` introduced
+as the would-be primary path. The hybrid migration above re-establishes
+the browser as primary; `checkpoint_camera.py` remains as the headless
+alternative. Original v0 scope description preserved below for
+historical context.
 
 Major architecture shift. The checkpoint role moves from
 `templates/checkpoint.html` (browser, face-api.js + Tesseract.js) to a
@@ -1216,15 +1205,19 @@ All responses are
 | `COOLDOWN_SEC` | `30` | Per-CP per-runner record cooldown |
 | `VIOLATION_COOLDOWN_SEC` | `60` | Per-CP per-runner violation cooldown (separate bucket) |
 
-#### `checkpoint.html` — OCR pipeline
+#### `checkpoint.html` — OCR pipeline (hybrid)
 | Constant | Default | Effect |
 |---|---|---|
-| `OCR_AFTER_FRAMES` | `10` | Consecutive recognitions before triggering Tesseract |
+| `ANALYZE_URL` | `"/analyze"` | Local Flask AI endpoint (same origin as page) |
+| `ANALYZE_HEALTH_URL` | `"/health"` | Frontend ready-poll target |
+| `ANALYZE_INTERVAL_MS` | `400` | Throttle between `/analyze` POSTs (~2.5 fps server-side) |
+| `ANALYZE_TIMEOUT_MS` | `1500` | AbortController bound; treats slow inference as "down" |
+| `JPEG_QUALITY` | `0.8` | Capture-canvas JPEG quality for `/analyze` payload |
 | `OCR_CACHE_TTL_MS` | `15000` | Vote-buffer + consensus expiry |
-| `ADAPTIVE_THRESHOLD_BLOCK` | `15` | Local-window size for adaptive threshold (odd; 11–19 typical) |
-| `ADAPTIVE_THRESHOLD_C` | `10` | Mean offset; higher = more aggressive thresholding |
-| `OCR_UPSCALE` | `2` | Nearest-neighbor scale factor before OCR |
-| `OCR_MIN_CONFIDENCE` | `60` (field-test; nominal `70`) | Tesseract overall-confidence floor |
+| `PAIR_LATERAL_FACTOR` | `0.5` | Chest region lateral pad (×faceH) |
+| `PAIR_TOP_FACTOR` | `0.6` | Chest region top offset (×faceH below face top) |
+| `PAIR_BOTTOM_FACTOR` | `3.0` | Chest region bottom offset (×faceH below face bottom) |
+| `PADDLE_MIN_CONF` | `0.6` | PaddleOCR confidence floor (0–1) for `primary` detection |
 | `BIB_MIN_LEN` / `BIB_MAX_LEN` | `1` / `6` (field-test; nominal `2` / `5`) | Accepted BIB length range |
 | `OCR_VOTE_BUFFER_SIZE` | `5` | Rolling buffer of recent valid reads |
 | `OCR_VOTE_MIN_CONSENSUS` | `3` | Reads-in-agreement required for consensus |
@@ -1232,10 +1225,10 @@ All responses are
 #### `checkpoint.html` — advanced violation triggers
 | Constant | Default | Effect |
 |---|---|---|
-| `NO_BIB_AFTER_FAILURES` | `5` | Consecutive validation-gate failures before firing `NO_BIB` (empty OCR) or `OBSCURED_BIB` (text but bad length / conf) |
+| `NO_BIB_AFTER_FAILURES` | `5` | Consecutive analyze-cycles without a paired in-region BIB before firing `NO_BIB` (empty) or `OBSCURED_BIB` (paired but failed length/conf) |
 | `UNREGISTERED_AFTER_FRAMES` | `15` | Consecutive frames an unrecognized face must stay visible before firing `UNREGISTERED` |
-| `MULTIPLE_BIBS_MIN_BLOCK_LEN` | `2` | Minimum digits per block for a Tesseract chunk to count as a candidate BIB |
-| `MULTIPLE_BIBS_MIN_BLOCKS` | `2` | Minimum distinct candidate blocks in a single frame to fire `MULTIPLE_BIBS` |
+| `MULTIPLE_BIBS_MIN_BLOCK_LEN` | `2` | Minimum digits per server detection to count as a candidate BIB |
+| `MULTIPLE_BIBS_MIN_BLOCKS` | `2` | Minimum candidate detections inside one chest region to fire `MULTIPLE_BIBS` |
 
 #### `dashboard.html`
 | Constant | Default | Effect |

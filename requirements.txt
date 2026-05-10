@@ -1,8 +1,11 @@
-# RunnerTrack AI — Edge Node Dependencies
-# Backend: GAS v6 (apps_script/Code.gs); Edge node: checkpoint_camera.py (v0)
+# RunnerTrack AI — Hybrid-Mode Dependencies
+# Backend: GAS v6 (apps_script/Code.gs).
+# Local server: web_app.py serves templates AND POST /analyze (YOLOv8 + PaddleOCR).
+# Standalone alternative: checkpoint_camera.py (same AI, headless cv2 loop).
 # Install: pip install -r requirements.txt
 
 opencv-python
+flask
 ultralytics
 paddleocr
 

@@ -99,16 +99,15 @@ body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--txt);min-
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 <script>
 const API="https://script.google.com/macros/s/AKfycbyI4vNBRqjO5f00DN7VDCTaMKUoDqN2L10JHtQtM4tW5A-Uca_btGkOW1ei6OTBcf8g0g/exec";
 // Pinned to a release tag — `@master` would silently change at any time.
 const MODEL_URL="https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js@0.22.2/weights/";
 
 // ── DEBUG MODE ─────────────────────────────────────────────────
-// Append `?debug=1` to the URL to enable verbose OCR/vote console
-// logs and an overlay HUD showing tracked-runner / vote / cooldown /
-// ocrBusy state. Side-effect-free: production paths are unchanged.
+// Append `?debug=1` to the URL to enable verbose OCR/vote console logs
+// and an overlay HUD showing tracked-runner / vote / cooldown / AI-server
+// state. Side-effect-free: production paths are unchanged.
 const DEBUG = new URLSearchParams(location.search).get("debug") === "1";
 
 // ── VIDEO ──────────────────────────────────────────────────────
@@ -133,9 +132,9 @@ const FACE_MATCH_DISTANCE = 0.45;
 
 // ── BBOX SMOOTHING (EMA) ───────────────────────────────────────
 // Per-runner exponential moving average. α=0.35 → ~3-frame half-life.
-// Lower α = smoother but laggier. The smoothed box drives BOTH the
-// overlay rectangle AND the OCR chest crop — without this, every
-// detection-frame jitter shakes the crop and Tesseract reads garbage.
+// Lower α = smoother but laggier. The smoothed box drives the overlay
+// rectangle and the chest-region pairing geometry — without it, every
+// detection-frame jitter shakes the BIB pairing window and pairs drift.
 const BBOX_EMA_ALPHA = 0.35;
 const BBOX_EMA_RESET_FRAMES = 10;           // drop EMA after N missing frames
 
@@ -144,22 +143,29 @@ const RECORD_AFTER_FRAMES = 5;              // consecutive recognitions before l
 const COOLDOWN_SEC = 30;                    // per-CP per-runner record cooldown
 const VIOLATION_COOLDOWN_SEC = 60;          // per-CP per-runner violation cooldown
 
-// ── OCR PIPELINE ───────────────────────────────────────────────
-const OCR_AFTER_FRAMES = 10;                // consecutive recognitions before triggering OCR
+// ── OCR PIPELINE (HYBRID — local AI server) ────────────────────
+// OCR runs server-side via POST /analyze (web_app.py: YOLOv8 + PaddleOCR).
+// The browser captures the frame to a base64 JPEG, posts at ANALYZE_INTERVAL_MS
+// cadence, and consumes the per-detection results once per fetch (not once
+// per rAF tick — that would re-feed the same vote multiple times).
+const ANALYZE_URL = "/analyze";
+const ANALYZE_HEALTH_URL = "/health";
+const ANALYZE_INTERVAL_MS = 400;            // ~2.5 fps server-side
+const ANALYZE_TIMEOUT_MS = 1500;
+const JPEG_QUALITY = 0.8;
 const OCR_CACHE_TTL_MS = 15000;             // stale read purge AND vote-buffer expiry
 
-// Adaptive threshold: each pixel compared to the mean of an
-// (ADAPTIVE_THRESHOLD_BLOCK²)-pixel local window minus C. Computed via
-// integral image so cost is O(1) per pixel regardless of block size.
-const ADAPTIVE_THRESHOLD_BLOCK = 15;        // odd; 11–19 typical
-const ADAPTIVE_THRESHOLD_C = 10;
-const OCR_UPSCALE = 2;                      // nearest-neighbor; preserves binary edges
+// Face↔BIB pairing geometry. Mirrors the chest-region factors of the former
+// getOCRCropBox so behavior is preserved: the BIB is expected ~0.6-3.0×faceH
+// below the chin, ±0.5×faceH lateral.
+const PAIR_LATERAL_FACTOR = 0.5;
+const PAIR_TOP_FACTOR = 0.6;
+const PAIR_BOTTOM_FACTOR = 3.0;
 
-// FIELD-TEST: relaxed for indoor lighting + short BIBs.
-// Revert to 70 / 2 / 5 once real-world setups are validated. The
-// majority-vote gate (OCR_VOTE_MIN_CONSENSUS=3) still requires three
-// agreeing reads, so loosening these doesn't lower the violation bar.
-const OCR_MIN_CONFIDENCE = 60;
+// PaddleOCR confidence is 0-1 (Tesseract was 0-100). The majority-vote gate
+// (OCR_VOTE_MIN_CONSENSUS=3) is still the primary protection against
+// single-frame misreads, so this gate is set permissively.
+const PADDLE_MIN_CONF = 0.6;
 const BIB_MIN_LEN = 1;
 const BIB_MAX_LEN = 6;
 
@@ -182,8 +188,8 @@ const NO_BIB_AFTER_FAILURES = 5;
 const UNREGISTERED_AFTER_FRAMES = 15;
 
 // Multiple BIBs: minimum digits per block, minimum block count.
-// 2 digits per block filters Tesseract single-digit fragments;
-// 2 blocks is the trigger.
+// In hybrid mode each "block" = one server-returned detection within the
+// runner's chest region; ≥2 digits filters single-digit YOLO false positives.
 const MULTIPLE_BIBS_MIN_BLOCK_LEN = 2;
 const MULTIPLE_BIBS_MIN_BLOCKS = 2;
 
@@ -200,12 +206,22 @@ let ocrConsensus = {};                      // name → { bib, ts }
 let ocrFailureCount = {};                   // name → consecutive validation failures (Ghost BIB)
 let ocrLastFailureKind = {};                // name → "empty" | "low_quality" — drives NO_BIB vs OBSCURED_BIB
 let fpsCounter = 0, lastFpsTime = performance.now();
-let ocrBusy = false;
-let tesseractWorker = null;
-let ocrReady = false;
+let ocrReady = false;                       // true once /health returns ready:true
 let videoStream = null;
 let loopRunning = false;
 let rafId = null;
+
+// ── HYBRID INFERENCE STATE ─────────────────────────────────────
+// `lastDetections` holds the most recent /analyze response. Each entry
+// carries an `aid` (analyze-id) — the rAF loop consumes a result exactly
+// once per fetch by gating on `processedAnalyzeId` (Guardrail 21: votes
+// must not be re-fed from the same OCR read on every frame).
+let lastAnalyzeAt = 0, analyzeBusy = false;
+let lastDetections = [];                    // [{box, text, confidence, label}]
+let serverStatus = "unknown";               // "ok" | "down" | "unknown"
+let analyzeIdCounter = 0;
+let lastAnalyzeAid = -1;                    // aid of most recent SUCCESSFUL response (incl. empty)
+let processedAnalyzeId = -1;                // last aid the rAF loop has consumed
 const CP_BUTTONS = ['start', 1, 2, 3, 4, 'finish'];
 
 // ── CP SELECTOR ──
@@ -279,18 +295,18 @@ async function init(){
   window.addEventListener("pagehide",stopCamera);
   markStep("step-camera","done");
 
-  // 4) Init Tesseract — Tesseract.js v5 runs the engine in its own
-  // Web Worker so recognize() is non-blocking from the main thread.
-  // Whitelist + PSM 7 (single text line) optimize for short numeric
-  // BIB strings.
+  // 4) Probe the local AI server. POST /analyze is hosted in the same
+  // Flask process that served this page (web_app.py); GET /health is a
+  // fast readiness ping. Loading YOLO + PaddleOCR at server boot takes
+  // ~4-8 s on CPU, so we poll for up to 30 s before giving up. The
+  // checkpoint UI keeps running even if the AI server never comes up:
+  // face recognition + recordCheckpoint still work (face-only path).
   try{
-   tesseractWorker=await Tesseract.createWorker("eng");
-   await tesseractWorker.setParameters({
-    tessedit_char_whitelist:'0123456789',
-    tessedit_pageseg_mode:'7'
-   });
-   ocrReady=true;
-  }catch(e){console.warn("Tesseract init failed, OCR disabled:",e);ocrReady=false;}
+   const ok = await waitForAIServer(30000, 500);
+   ocrReady = ok;
+   serverStatus = ok ? "ok" : "down";
+   if(!ok) console.warn("AI server not ready after 30 s; OCR disabled.");
+  }catch(e){console.warn("AI server probe failed:",e); ocrReady=false; serverStatus="down";}
 
   setStatus("ok","🟢 Connected");
   document.getElementById("init-screen").classList.add("hidden");
@@ -327,7 +343,7 @@ function setStatus(type,text){
 // Per-runner exponential moving average on the detection box. Returns
 // the same persistent object so callers can read the latest smoothed
 // values without re-allocating. Without smoothing, every detection-
-// frame jitter shakes the chest crop and Tesseract confidence collapses.
+// frame jitter shakes the chest pairing region and BIB matches drift.
 function smoothBox(name, raw){
  const a=BBOX_EMA_ALPHA;
  const prev=bboxEMA[name];
@@ -343,78 +359,69 @@ function smoothBox(name, raw){
  return prev;
 }
 
-// ── OCR PREPROCESSING ───────────────────────────────────────
-// Pipeline: grayscale (BT.601 luma) → integral-image-based adaptive
-// threshold (mean − C) → nearest-neighbor 2× upscale.
-//
-// Runs on the main thread because the crop is small (~200×150 px) and
-// the integral-image formulation is <1 ms total. A Web Worker would add
-// postMessage / structured-clone overhead larger than the work itself.
-//
-// Nearest-neighbor (not bilinear) is intentional: the threshold output
-// is binary, and bilinear would introduce gray pixels that Tesseract
-// occasionally mistreats as noise.
-function preprocessForOCR(srcCanvas){
- const w=srcCanvas.width, h=srcCanvas.height;
- const ctx=srcCanvas.getContext("2d");
- const imgData=ctx.getImageData(0,0,w,h);
- const src=imgData.data;
+// ── HYBRID AI: SERVER PROBE + FRAME ANALYZE ─────────────────
+// All OCR runs server-side in web_app.py (YOLOv8 + PaddleOCR). The browser
+// posts a base64 JPEG every ANALYZE_INTERVAL_MS and stores the per-detection
+// results in `lastDetections` for the rAF loop to consume.
 
- // Grayscale
- const gray=new Uint8ClampedArray(w*h);
- for(let i=0,j=0;i<src.length;i+=4,j++){
-  gray[j]=(src[i]*0.299 + src[i+1]*0.587 + src[i+2]*0.114)|0;
+async function waitForAIServer(timeoutMs, intervalMs){
+ const deadline = Date.now() + timeoutMs;
+ while(Date.now() < deadline){
+  try{
+   const r = await fetch(ANALYZE_HEALTH_URL, {cache:"no-store"});
+   if(r.ok){
+    const d = await r.json();
+    if(d && d.ready) return true;
+   }
+  }catch(_){/* server not up yet */}
+  await new Promise(r => setTimeout(r, intervalMs));
  }
+ return false;
+}
 
- // Integral image — Uint32Array; padded by one row/col so the local-
- // window query doesn't need boundary checks.
- const stride=w+1;
- const integral=new Uint32Array(stride*(h+1));
- for(let y=1;y<=h;y++){
-  let rowSum=0;
-  for(let x=1;x<=w;x++){
-   rowSum += gray[(y-1)*w + (x-1)];
-   integral[y*stride + x] = integral[(y-1)*stride + x] + rowSum;
-  }
- }
+// Convert the live <video> frame to a base64 JPEG (no data: prefix).
+// Reuses one offscreen canvas to avoid per-call allocations.
+const _captureCanvas = document.createElement("canvas");
+function captureFrameJpegBase64(video){
+ if(_captureCanvas.width !== video.videoWidth) _captureCanvas.width = video.videoWidth;
+ if(_captureCanvas.height !== video.videoHeight) _captureCanvas.height = video.videoHeight;
+ const ctx = _captureCanvas.getContext("2d");
+ ctx.drawImage(video, 0, 0);
+ const dataUrl = _captureCanvas.toDataURL("image/jpeg", JPEG_QUALITY);
+ const comma = dataUrl.indexOf(",");
+ return comma >= 0 ? dataUrl.slice(comma+1) : dataUrl;
+}
 
- // Adaptive threshold (mean − C) using the integral image. O(1) per pixel.
- const block=ADAPTIVE_THRESHOLD_BLOCK;
- const half=block>>1;
- const C=ADAPTIVE_THRESHOLD_C;
- const out=new Uint8ClampedArray(w*h);
- for(let y=0;y<h;y++){
-  const y0=Math.max(0,y-half), y1=Math.min(h,y+half+1);
-  for(let x=0;x<w;x++){
-   const x0=Math.max(0,x-half), x1=Math.min(w,x+half+1);
-   const area=(y1-y0)*(x1-x0);
-   const sum = integral[y1*stride+x1]
-             - integral[y0*stride+x1]
-             - integral[y1*stride+x0]
-             + integral[y0*stride+x0];
-   out[y*w + x] = (gray[y*w + x] < (sum/area) - C) ? 0 : 255;
-  }
+// Fire-and-forget POST. Updates module state; never throws to caller.
+// AbortController bounds the request to ANALYZE_TIMEOUT_MS — beyond that
+// the server is treated as down so the UI doesn't pile up requests behind
+// a slow inference.
+async function analyzeFrame(video){
+ const ctl = new AbortController();
+ const t = setTimeout(()=>ctl.abort(), ANALYZE_TIMEOUT_MS);
+ try{
+  const body = JSON.stringify({image: captureFrameJpegBase64(video)});
+  const r = await fetch(ANALYZE_URL, {
+   method:"POST",
+   headers:{"Content-Type":"application/json"},
+   body, signal: ctl.signal,
+  });
+  if(!r.ok){ throw new Error("HTTP "+r.status); }
+  const d = await r.json();
+  const dets = Array.isArray(d.detections) ? d.detections : [];
+  analyzeIdCounter++;
+  // Track the aid even when dets is empty so NO_BIB tracking ticks each
+  // cycle the runner is visible without a BIB.
+  lastAnalyzeAid = analyzeIdCounter;
+  lastDetections = dets;
+  serverStatus = "ok";
+  if(DEBUG) console.log("[debug] analyze", { aid: analyzeIdCounter, count: dets.length });
+ }catch(e){
+  serverStatus = "down";
+  if(DEBUG) console.warn("[debug] analyze failed", e);
+ }finally{
+  clearTimeout(t);
  }
-
- // Nearest-neighbor 2× upscale.
- const s=OCR_UPSCALE;
- const w2=w*s, h2=h*s;
- const dst=document.createElement("canvas");
- dst.width=w2; dst.height=h2;
- const dstCtx=dst.getContext("2d");
- const dstImg=dstCtx.createImageData(w2,h2);
- const dPix=dstImg.data;
- for(let y=0;y<h2;y++){
-  const sy=(y/s)|0;
-  for(let x=0;x<w2;x++){
-   const sx=(x/s)|0;
-   const v=out[sy*w + sx];
-   const di=(y*w2 + x)*4;
-   dPix[di]=v; dPix[di+1]=v; dPix[di+2]=v; dPix[di+3]=255;
-  }
- }
- dstCtx.putImageData(dstImg,0,0);
- return dst;
 }
 
 // ── OCR MAJORITY VOTE ───────────────────────────────────────
@@ -454,26 +461,81 @@ function consensusBib(name){
  return c.bib;
 }
 
-// ── OCR CROP GEOMETRY ───────────────────────────────────────
-// Single source of truth for the chest-region crop. Used by BOTH
-// processLoop (for the dashed red OCR-debug overlay) AND runSmartOCR
-// (for the actual Tesseract input). Identical geometry is critical —
-// otherwise the operator's visible OCR rectangle would not match where
-// Tesseract is actually looking.
+// ── FACE↔BIB SPATIAL PAIRING ────────────────────────────────
+// Server returns BIB boxes in the full-frame coordinate system; the browser
+// associates each BIB with a face by checking whether the BIB's center sits
+// inside that face's chest region. The chest region is the same geometry
+// the former getOCRCropBox used (lateral ±0.5·faceH, vertical 0.6-3.0·faceH
+// below chin) so the behavior the field operators learned is preserved.
 //
-// Factors are tuned for hand-held BIBs near chin/neck height (field
-// observation: BIBs were missed when held above the chest region).
-//   bx = box.x − 0.5·faceH         ← wider than the face
-//   by = box.y + 0.6·faceH         ← starts in the chin region
-//   bw = box.width + 1.0·faceH     ← roughly 2× face width
-//   bh = 3.0·faceH                 ← extends well below the chest
-function getOCRCropBox(box, video){
- const faceH = box.height;
- const bx = Math.max(0, box.x - faceH * 0.5);
- const by = Math.max(0, box.y + faceH * 0.6);
- const bw = Math.min(box.width + faceH * 1.0, video.videoWidth - bx);
- const bh = Math.min(faceH * 3.0, video.videoHeight - by);
- return {bx:bx, by:by, bw:bw, bh:bh};
+// Returns:
+//   primary: the in-region detection nearest the face center (or null)
+//   all:     every in-region detection (for MULTIPLE_BIBS counting)
+function pairFaceToBib(faceBox, detections){
+ const fh = faceBox.height;
+ const left   = faceBox.x - fh * PAIR_LATERAL_FACTOR;
+ const right  = faceBox.x + faceBox.width + fh * PAIR_LATERAL_FACTOR;
+ const top    = faceBox.y + fh * PAIR_TOP_FACTOR;
+ const bottom = faceBox.y + faceBox.height + fh * PAIR_BOTTOM_FACTOR;
+ const fcx = faceBox.x + faceBox.width/2;
+ const fcy = faceBox.y + faceBox.height/2;
+ const matches = [];
+ for(const d of (detections||[])){
+  const cx = d.box.x + d.box.w/2;
+  const cy = d.box.y + d.box.h/2;
+  if(cx >= left && cx <= right && cy >= top && cy <= bottom){
+   const dx = cx - fcx, dy = cy - fcy;
+   matches.push({d, dist2: dx*dx + dy*dy});
+  }
+ }
+ if(!matches.length) return {primary: null, all: []};
+ matches.sort((a,b)=>a.dist2-b.dist2);
+ return {primary: matches[0].d, all: matches.map(m=>m.d)};
+}
+
+// ── DRAW SERVER DETECTION TAB ───────────────────────────────
+// Mirrors checkpoint_camera.py:103 (draw_yolo_label). Solid filled tab
+// anchored above the bbox with white text and confidence; flips inside
+// the bbox if anchoring above would clip the frame's top edge.
+function drawDetectionTab(ctx, det){
+ const b = det.box;
+ ctx.save();
+ ctx.strokeStyle = "#00FF00";
+ ctx.lineWidth = 2;
+ ctx.strokeRect(b.x, b.y, b.w, b.h);
+
+ const text = `BIB ${det.text} ${(det.confidence||0).toFixed(2)}`;
+ ctx.font = "bold 12px 'JetBrains Mono',monospace";
+ const tabH = 18, pad = 4;
+ const tabW = Math.max(ctx.measureText(text).width + pad*2, 40);
+
+ const aboveTop = b.y - tabH;
+ const tabY = aboveTop >= 0 ? aboveTop : b.y;
+ ctx.fillStyle = "#00FF00";
+ ctx.fillRect(b.x, tabY, tabW, tabH);
+ ctx.fillStyle = "#000";
+ ctx.textBaseline = "top";
+ ctx.fillText(text, b.x + pad, tabY + 3);
+ ctx.restore();
+}
+
+// ── GHOST BIB HELPER ────────────────────────────────────────
+// Lifted from the old runSmartOCR — fires NO_BIB / OBSCURED_BIB once
+// `ocrFailureCount[name]` crosses NO_BIB_AFTER_FAILURES. Caller is
+// responsible for setting `ocrLastFailureKind[name]` before each call.
+function maybeFireGhostBib(name, video){
+ if((ocrFailureCount[name]||0) < NO_BIB_AFTER_FAILURES) return;
+ const expected = runnerRegistry[name] || "";
+ const violationType = ocrLastFailureKind[name] === "empty" ? "NO_BIB" : "OBSCURED_BIB";
+ const fired = tryFireViolation(name+":"+checkpointId, {
+  name, bib: expected,
+  message: violationType==="NO_BIB"
+   ? `BIB not visible for ${name}`
+   : `BIB unreadable for ${name} (low confidence / wrong length)`,
+  violationType,
+  image: captureFullFrame(video),
+ });
+ if(fired) ocrFailureCount[name] = 0;       // reset; next 5 failures can re-trigger after the 60 s cooldown
 }
 
 // ── DEBUG HUD ──────────────────────────────────────────────────
@@ -491,11 +553,13 @@ function drawDebugHUD(ctx){
   `tracked: ${Object.keys(bboxEMA).length}`,
   `votes: ${totalVotes}`,
   `cooldowns: ${activeCooldowns}`,
-  `ocrBusy: ${ocrBusy}`,
+  `server: ${serverStatus}`,
+  `detections: ${lastDetections.length}`,
+  `analyzeBusy: ${analyzeBusy}`,
  ];
  ctx.save();
  ctx.fillStyle = "rgba(0,0,0,.65)";
- ctx.fillRect(8, 8, 180, 18*lines.length + 8);
+ ctx.fillRect(8, 8, 200, 18*lines.length + 8);
  ctx.fillStyle = "#fff";
  ctx.font = "11px 'JetBrains Mono',monospace";
  for(let i=0;i<lines.length;i++) ctx.fillText(lines[i], 14, 24 + i*18);
@@ -530,6 +594,16 @@ async function processLoop(){
 
   ctx.clearRect(0,0,overlay.width,overlay.height);
 
+  // Throttled call to the local AI server. The fetch is fire-and-forget;
+  // results land in `lastDetections` and are consumed once per fetch via
+  // `isNewCycle` below.  `analyzeBusy` prevents stacking when inference
+  // takes longer than ANALYZE_INTERVAL_MS.
+  if(ocrReady && !analyzeBusy && (now - lastAnalyzeAt) > ANALYZE_INTERVAL_MS){
+   lastAnalyzeAt = now;
+   analyzeBusy = true;
+   analyzeFrame(video).finally(()=>{ analyzeBusy = false; });
+  }
+
   if(!faceMatcher){rafId=requestAnimationFrame(frame);return}
 
   try{
@@ -542,6 +616,14 @@ async function processLoop(){
    // closest face — most likely the actual intruder rather than a
    // bystander in the background of a registered runner's frame.
    let largestUnknownBox = null, largestUnknownArea = 0;
+
+   // Once-per-fetch consume guard. The rAF loop runs ~60×/s but a single
+   // /analyze response should feed the vote buffer exactly once — feeding
+   // it on every redraw would re-cast the same vote dozens of times and
+   // collapse the consensus gate (Guardrail 21). The aid is bumped on
+   // every successful response (even empty) so NO_BIB still ticks while
+   // the runner is visible without a BIB.
+   const isNewCycle = lastAnalyzeAid !== -1 && lastAnalyzeAid !== processedAnalyzeId;
 
    for(const det of detections){
     const match=faceMatcher.findBestMatch(det.descriptor);
@@ -572,10 +654,12 @@ async function processLoop(){
       }
      }
 
-     if(consecutiveFrames[name]>=OCR_AFTER_FRAMES && !ocrBusy){
-      // Pass the SMOOTHED box — the chest crop must not jitter or
-      // Tesseract's confidence collapses.
-      runSmartOCR(video, box, name);
+     // Hybrid OCR consume: feed votes / fire violations once per /analyze
+     // response. Pairs the SMOOTHED face box with detections from the
+     // server using the chest-region geometry preserved from the former
+     // getOCRCropBox.
+     if(isNewCycle && consecutiveFrames[name] >= 3){
+      consumeAnalyzeForFace(video, box, name);
      }
     } else {
      // Track the largest unknown face for the post-loop UNREGISTERED
@@ -616,26 +700,11 @@ async function processLoop(){
      ctx.fillText(bibText, box.x+4, box.y+box.height+14);
     }
 
-    // OCR debug overlay — dashed red rect labeled "OCR" showing the
-    // exact region runSmartOCR will crop. Lets the field operator see
-    // whether the BIB they're holding falls inside the AI's chest
-    // region. Drawn for known runners only — we never OCR Unknowns.
-    if(isKnown){
-     const oc = getOCRCropBox(box, video);
-     ctx.save();
-     ctx.strokeStyle = "#ff3b30";
-     ctx.lineWidth = 2;
-     ctx.setLineDash([6, 4]);
-     ctx.strokeRect(oc.bx, oc.by, oc.bw, oc.bh);
-     ctx.setLineDash([]);
-     ctx.fillStyle = "rgba(255,59,48,.85)";
-     ctx.fillRect(oc.bx, oc.by, 32, 16);
-     ctx.fillStyle = "#fff";
-     ctx.font = "bold 11px 'JetBrains Mono',monospace";
-     ctx.fillText("OCR", oc.bx + 4, oc.by + 12);
-     ctx.restore();
-    }
    }
+
+   // Mark this analyze response as consumed so the per-face block above
+   // doesn't re-feed votes on subsequent rAF ticks for the same fetch.
+   if(isNewCycle) processedAnalyzeId = lastAnalyzeAid;
 
    // ── POST-LOOP: UNREGISTERED (Intruder) trigger ──
    // Increments at most once per frame regardless of how many unknowns
@@ -682,6 +751,25 @@ async function processLoop(){
     }
    }
 
+   // Draw every server-returned BIB box as a YOLO-style tab. Independent
+   // of face boxes — the operator sees both the runner identity (face-api)
+   // and the actual BIB the AI server detected.
+   for(const d of lastDetections) drawDetectionTab(ctx, d);
+
+   // Permanent "AI offline" banner when the local /analyze endpoint is
+   // unreachable. recordCheckpoint still fires (face-only path), but
+   // OCR-driven violations naturally pause until the server returns.
+   if(serverStatus === "down"){
+    ctx.save();
+    ctx.fillStyle = "rgba(229,62,62,.85)";
+    ctx.fillRect(overlay.width - 110, 8, 102, 22);
+    ctx.fillStyle = "#fff";
+    ctx.font = "bold 12px 'DM Sans',sans-serif";
+    ctx.textBaseline = "alphabetic";
+    ctx.fillText("AI offline", overlay.width - 100, 24);
+    ctx.restore();
+   }
+
    drawDebugHUD(ctx);
   }catch(e){console.error("Detection error:",e)}
 
@@ -690,120 +778,89 @@ async function processLoop(){
  rafId=requestAnimationFrame(frame);
 }
 
-// ── SMART OCR ──
-// Pipeline (all on top of an EMA-stable box):
-//   1. Crop chest region below the face
-//   2. preprocessForOCR: grayscale → adaptive threshold → 2× upscale
-//   3. Tesseract recognize (worker-thread; non-blocking)
-//   4. Validate: digits-only ∧ length ∈ [BIB_MIN_LEN, BIB_MAX_LEN]
-//      ∧ confidence ≥ OCR_MIN_CONFIDENCE
-//   5. castVote — accumulate per-runner votes; consensus only when
-//      ≥OCR_VOTE_MIN_CONSENSUS of the last OCR_VOTE_BUFFER_SIZE agree
-//   6. On consensus mismatch with the registered BIB AND no recent
-//      violation report on this CP, fire reportViolation
+// ── HYBRID OCR CONSUME ──
+// Once-per-fetch consumer: pairs the smoothed face box with server-returned
+// detections, feeds the per-runner vote buffer, and fires the four
+// OCR-driven violations (NO_BIB, OBSCURED_BIB, MULTIPLE_BIBS, WRONG_PERSON).
+// Caller (processLoop) gates on `isNewCycle` — calling consume on every
+// rAF tick would re-cast the same vote (Guardrail 21).
 //
-// ocrBusy is a single global guard: at most one OCR runs at a time so
-// Tesseract can't queue up and drift behind real time. The face-api
-// detection loop continues unblocked because tesseractWorker.recognize
-// is async and runs in its own Web Worker.
-async function runSmartOCR(video, box, name){
- if(ocrBusy || !ocrReady || !tesseractWorker) return;
- ocrBusy=true;
- try{
-  // Crop geometry shared with the OCR debug overlay in processLoop
-  // via getOCRCropBox — must remain identical or the operator's
-  // visible rectangle won't match what Tesseract actually sees.
-  const {bx, by, bw, bh} = getOCRCropBox(box, video);
-  if(bw<=0 || bh<=0) return;
+// Pipeline:
+//   1. pairFaceToBib — chest-region geometry from the deleted getOCRCropBox
+//   2. ≥2 in-region detections with text length ≥ MULTIPLE_BIBS_MIN_BLOCK_LEN → MULTIPLE_BIBS
+//   3. zero in-region detections → NO_BIB candidate (Ghost BIB counter)
+//   4. validation gate (length, PaddleOCR conf) on `primary` → OBSCURED_BIB candidate
+//   5. on success → castVote; consensus mismatch with registered BIB → WRONG_PERSON
+function consumeAnalyzeForFace(video, faceBox, name){
+ const {primary, all} = pairFaceToBib(faceBox, lastDetections);
 
-  const cropCanvas=document.createElement("canvas");
-  cropCanvas.width=bw; cropCanvas.height=bh;
-  cropCanvas.getContext("2d").drawImage(video, bx, by, bw, bh, 0, 0, bw, bh);
-
-  // Adaptive threshold + 2× nearest-neighbor upscale on the crop. <1 ms.
-  const processed=preprocessForOCR(cropCanvas);
-
-  const result=await tesseractWorker.recognize(processed);
-  const rawText=String(result.data.text||"");
-  const conf=Number(result.data.confidence||0);
-
-  if(DEBUG) console.log("[debug] OCR", { name, rawText, conf });
-
-  // ── MULTIPLE BIBS (Cluttered Chest) ──
-  // Run on RAW text BEFORE digit-only normalization — once normalized,
-  // the whitespace separating distinct BIB blocks is gone (Guardrail 26).
-  // Two-or-more digits per block filters Tesseract single-digit
-  // artefacts; ≥2 distinct blocks fires the violation.
-  const blockRe = new RegExp("\\d{"+MULTIPLE_BIBS_MIN_BLOCK_LEN+",}", "g");
-  const blocks = rawText.match(blockRe) || [];
-  if (blocks.length >= MULTIPLE_BIBS_MIN_BLOCKS){
-   const fired = tryFireViolation(name+":"+checkpointId, {
-    name,
-    bib: "",                                          // BIB_PATTERN rejects commas; full list lives in message
-    message: `Multiple BIBs detected on ${name}: ${blocks.join(", ")}`,
-    violationType: "MULTIPLE_BIBS",
-    image: captureFullFrame(video),
-   });
-   if (fired){
-    ocrFailureCount[name] = 0;                       // a multi-bib read isn't a "failure"
-    return;
-   }
-   // Cooldown blocked it — fall through to normal validation. Better to
-   // try voting one of the bibs than drop the frame entirely.
-  }
-
-  const text=rawText.replace(/[^0-9]/g,"").trim();
-
-  // ── VALIDATION GATE → Ghost BIB counter ──
-  // Failures used to silently return; now they feed the Ghost BIB counter.
-  // Empty text → NO_BIB; length/confidence fail → OBSCURED_BIB.
-  let failureKind = null;
-  if (!text) failureKind = "empty";
-  else if (text.length < BIB_MIN_LEN || text.length > BIB_MAX_LEN || conf < OCR_MIN_CONFIDENCE)
-   failureKind = "low_quality";
-
-  if (failureKind){
-   ocrFailureCount[name] = (ocrFailureCount[name]||0) + 1;
-   ocrLastFailureKind[name] = failureKind;
-   if (ocrFailureCount[name] >= NO_BIB_AFTER_FAILURES){
-    const expected = runnerRegistry[name] || "";
-    const violationType = ocrLastFailureKind[name] === "empty" ? "NO_BIB" : "OBSCURED_BIB";
-    const fired = tryFireViolation(name+":"+checkpointId, {
-     name, bib: expected,
-     message: violationType==="NO_BIB"
-      ? `BIB not visible for ${name}`
-      : `BIB unreadable for ${name} (low confidence / wrong length)`,
-     violationType,
-     image: captureFullFrame(video),
-    });
-    if (fired) ocrFailureCount[name] = 0;            // reset; next 5 failures can re-trigger after the 60 s cooldown
-   }
+ // ── MULTIPLE BIBS (Cluttered Chest) ──
+ // The server returns one detection per BIB region; ≥2 inside the same
+ // chest region with non-trivial digit length fires the violation
+ // (replaces the old raw-text-blocks regex; Guardrail 26 rewritten).
+ const longBlocks = all.filter(d => (d.text||"").length >= MULTIPLE_BIBS_MIN_BLOCK_LEN);
+ if(longBlocks.length >= MULTIPLE_BIBS_MIN_BLOCKS){
+  const fired = tryFireViolation(name+":"+checkpointId, {
+   name,
+   bib: "",                                          // BIB_PATTERN rejects commas; full list lives in message
+   message: `Multiple BIBs detected on ${name}: ${longBlocks.map(d=>d.text).join(", ")}`,
+   violationType: "MULTIPLE_BIBS",
+   image: captureFullFrame(video),
+  });
+  if(fired){
+   ocrFailureCount[name] = 0;                        // a multi-bib read isn't a "failure"
    return;
   }
+  // Cooldown blocked it — fall through to normal validation.
+ }
 
-  // Validation passed — clear failure state before the vote.
-  ocrFailureCount[name] = 0;
-  ocrLastFailureKind[name] = null;
+ // ── NO BIB (no detection inside the chest region) ──
+ if(!primary){
+  ocrFailureCount[name] = (ocrFailureCount[name]||0) + 1;
+  ocrLastFailureKind[name] = "empty";
+  if(DEBUG) console.log("[debug] no-bib", {name, count: ocrFailureCount[name]});
+  maybeFireGhostBib(name, video);
+  return;
+ }
 
-  // Cast vote. Returns the consensus BIB (or null if not yet reached).
-  const consensus=castVote(name, text, conf);
-  if(DEBUG) console.log("[debug] vote", { name, text, conf,
-   buffer: (ocrVotes[name]||[]).length, consensus });
-  if(!consensus) return;
+ const text = String(primary.text || "");
+ const conf = Number(primary.confidence || 0);
+ if(DEBUG) console.log("[debug] OCR", { name, text, conf, candidates: all.length });
 
-  const expectedBib=runnerRegistry[name];
-  if(expectedBib && consensus !== expectedBib){
-   // WRONG_PERSON shares the same name+cpId cooldown bucket with NO_BIB,
-   // OBSCURED_BIB, MULTIPLE_BIBS — see Guardrail 25.
-   tryFireViolation(name+":"+checkpointId, {
-    name, bib: consensus,
-    message: `Expected BIB ${expectedBib}, Found ${consensus}`,
-    violationType: "WRONG_PERSON",
-    image: captureFullFrame(video),
-   });
-  }
- }catch(e){console.warn("OCR error:",e)}
- finally{ocrBusy=false}
+ // ── VALIDATION GATE → Ghost BIB counter ──
+ // Empty text → NO_BIB; length/confidence fail → OBSCURED_BIB.
+ let failureKind = null;
+ if(!text) failureKind = "empty";
+ else if(text.length < BIB_MIN_LEN || text.length > BIB_MAX_LEN || conf < PADDLE_MIN_CONF)
+  failureKind = "low_quality";
+
+ if(failureKind){
+  ocrFailureCount[name] = (ocrFailureCount[name]||0) + 1;
+  ocrLastFailureKind[name] = failureKind;
+  maybeFireGhostBib(name, video);
+  return;
+ }
+
+ // Validation passed — clear failure state before the vote.
+ ocrFailureCount[name] = 0;
+ ocrLastFailureKind[name] = null;
+
+ const consensus = castVote(name, text, conf);
+ if(DEBUG) console.log("[debug] vote", { name, text, conf,
+  buffer: (ocrVotes[name]||[]).length, consensus });
+ if(!consensus) return;
+
+ const expectedBib = runnerRegistry[name];
+ if(expectedBib && consensus !== expectedBib){
+  // WRONG_PERSON shares the same name+cpId cooldown bucket with NO_BIB,
+  // OBSCURED_BIB, MULTIPLE_BIBS — see Guardrail 25.
+  tryFireViolation(name+":"+checkpointId, {
+   name, bib: consensus,
+   message: `Expected BIB ${expectedBib}, Found ${consensus}`,
+   violationType: "WRONG_PERSON",
+   image: captureFullFrame(video),
+  });
+ }
 }
 
 // ── CHECKPOINT RECORDING ──
