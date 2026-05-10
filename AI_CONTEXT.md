@@ -710,6 +710,17 @@ explicit, justified, and accompanied by an update to this file.
 
 ### 6.2 Recent changes
 
+#### 2026-05-10 (later) — Tune cadence/timeout for EasyOCR; favicon 204
+
+Field test after the EasyOCR swap surfaced `AbortError: signal is aborted without reason` spam in DevTools when the runner stood in front of the camera. Root cause: `ANALYZE_TIMEOUT_MS = 1500` was tuned for PaddleOCR; EasyOCR with COCO `yolov8n.pt` often gets a large `person`-class box and runs OCR on a giant crop, pushing single-call latency past 2 s.
+
+- `ANALYZE_TIMEOUT_MS`: 1500 → **8000**
+- `ANALYZE_INTERVAL_MS`: 400 → **1000** (matches realistic CPU throughput; prevents the rAF loop from issuing a new fetch before the in-flight one returns)
+- `analyzeFrame` now distinguishes `AbortError` (timeout — server may still be processing; do **not** flip the UI to "AI offline") from genuine network/HTTP errors (which still flag offline). The next successful `/analyze` clears state.
+- Added `GET /favicon.ico` returning 204 in `web_app.py` to silence the `/favicon.ico` 404 in the console.
+
+No behavior change to the consensus vote, the violation triggers, or the GAS POST contract.
+
 #### 2026-05-10 (later) — PaddleOCR → EasyOCR (Python 3.14 fix)
 
 Operator runs Python 3.14 where `paddlepaddle` does not yet publish a
@@ -1258,8 +1269,8 @@ All responses are
 |---|---|---|
 | `ANALYZE_URL` | `"/analyze"` | Local Flask AI endpoint (same origin as page) |
 | `ANALYZE_HEALTH_URL` | `"/health"` | Frontend ready-poll target |
-| `ANALYZE_INTERVAL_MS` | `400` | Throttle between `/analyze` POSTs (~2.5 fps server-side) |
-| `ANALYZE_TIMEOUT_MS` | `1500` | AbortController bound; treats slow inference as "down" |
+| `ANALYZE_INTERVAL_MS` | `1000` | Throttle between `/analyze` POSTs (~1 fps server-side; tuned for EasyOCR on CPU) |
+| `ANALYZE_TIMEOUT_MS` | `8000` | AbortController bound; covers a single slow inference. Timeouts no longer flip the UI to "AI offline" — only genuine network/HTTP errors do. |
 | `JPEG_QUALITY` | `0.8` | Capture-canvas JPEG quality for `/analyze` payload |
 | `OCR_CACHE_TTL_MS` | `15000` | Vote-buffer + consensus expiry |
 | `PAIR_LATERAL_FACTOR` | `0.5` | Chest region lateral pad (×faceH) |

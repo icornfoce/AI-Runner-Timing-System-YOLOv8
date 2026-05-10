@@ -120,6 +120,13 @@ def admin():
     return render_template('dashboard.html')
 
 
+@app.route('/favicon.ico')
+def favicon():
+    """Browser asks for /favicon.ico on every page load; return 204 to
+    silence the 404 in DevTools rather than ship a real icon."""
+    return ('', 204)
+
+
 # === LOCAL AI API ===
 @app.route('/health', methods=['GET'])
 def health():

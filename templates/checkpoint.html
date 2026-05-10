@@ -150,8 +150,14 @@ const VIOLATION_COOLDOWN_SEC = 60;          // per-CP per-runner violation coold
 // per rAF tick — that would re-feed the same vote multiple times).
 const ANALYZE_URL = "/analyze";
 const ANALYZE_HEALTH_URL = "/health";
-const ANALYZE_INTERVAL_MS = 400;            // ~2.5 fps server-side
-const ANALYZE_TIMEOUT_MS = 1500;
+// EasyOCR on CPU runs ~150-400 ms per ROI, and YOLOv8n with COCO weights
+// often returns large person/object boxes that drive a single inference
+// past 2 s. Cadence + timeout were originally tuned for PaddleOCR; both
+// were raised after the EasyOCR swap to stop AbortError spam in the
+// console (failed at 1500 ms, cadence at 400 ms re-fired before the
+// previous request's response arrived).
+const ANALYZE_INTERVAL_MS = 1000;           // ~1 fps server-side; matches EasyOCR CPU throughput
+const ANALYZE_TIMEOUT_MS = 8000;            // generous enough for huge person-crop OCR
 const JPEG_QUALITY = 0.8;
 const OCR_CACHE_TTL_MS = 15000;             // stale read purge AND vote-buffer expiry
 
@@ -417,8 +423,16 @@ async function analyzeFrame(video){
   serverStatus = "ok";
   if(DEBUG) console.log("[debug] analyze", { aid: analyzeIdCounter, count: dets.length });
  }catch(e){
-  serverStatus = "down";
-  if(DEBUG) console.warn("[debug] analyze failed", e);
+  // AbortError = our timeout fired; the server may still be slowly
+  // processing. Don't immediately flip the UI to "AI offline" — let the
+  // next /analyze attempt confirm. Genuine network/HTTP errors do flag
+  // it offline, since they fail fast (connection refused, 5xx, etc.).
+  if(e && e.name === "AbortError"){
+   if(DEBUG) console.warn("[debug] analyze timed out (server slow)");
+  } else {
+   serverStatus = "down";
+   if(DEBUG) console.warn("[debug] analyze failed", e && e.message || e);
+  }
  }finally{
   clearTimeout(t);
  }
