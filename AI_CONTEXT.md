@@ -9,60 +9,73 @@
 > cadence, caching, or guardrails MUST update this file in the same change
 > set.
 >
-> **Last updated:** 2026-05-10 — Backend bumped to **v6**: every Drive
-> image URL (Runners.Photo_* AND Violations.ImageUrl) now writes the
-> thumbnail form (`thumbnail?id=…&sz=w800`); the embed form
-> (`uc?export=view`) is retired. New uploads land in a `YYYY-MM-DD`
-> subfolder under their parent (`RunnerFaces/<name>/<date>/`,
-> `ViolationEvidence/<date>/`) so Drive stays browseable. New
-> `_migrateHistoricalImages()` rewrites every legacy URL to the
-> thumbnail form and replaces the v3 `_migrateAllImageUrls` helper.
+> **Last updated:** 2026-05-10 — Major architecture shift: the
+> checkpoint role moves from the browser (`templates/checkpoint.html`,
+> face-api.js + Tesseract.js) to a local Python edge node
+> (`checkpoint_camera.py`, YOLOv8 + PaddleOCR). v0 is a thin
+> detect→OCR→display loop using the COCO `yolov8n.pt` placeholder;
+> face recognition, backend POST, consensus voting, and cooldowns are
+> deferred to v0.1+. Browser checkpoint is preserved as a deprecated
+> rollback path. Backend stays at v6 (no changes); Guardrail 16
+> rewritten to clarify edge-AI is fine, only Apps Script AI is
+> prohibited. Earlier today: backend v5→v6 (single thumbnail URL
+> contract; YYYY-MM-DD subfolders; `_migrateHistoricalImages()`
+> replaces `_migrateAllImageUrls`).
 
 ---
 
 ## 1. Project Overview & Architecture
 
-**RunnerTrack AI** is a chip-less, browser-based runner timing system that
-identifies runners by face recognition and reads BIB numbers via OCR — no
-RFID, no wearable hardware. The system is bilingual UI (Thai labels, English
-identifiers) and runs entirely in the browser plus a Google Apps Script
-backend.
+**RunnerTrack AI** is a chip-less runner timing system that identifies
+runners by face recognition and reads BIB numbers via OCR — no RFID, no
+wearable hardware. The system is bilingual UI (Thai labels, English
+identifiers). All AI runs at the edge (operator's machine); the
+Google Apps Script backend handles only storage and validation.
+
+As of 2026-05-10 the **checkpoint** role is performed by a local Python
+edge node (`checkpoint_camera.py`, YOLOv8 + PaddleOCR). The
+register and dashboard roles remain browser-based. The previous
+browser checkpoint (`templates/checkpoint.html`) is deprecated but
+preserved as a rollback path.
 
 ### High-level architecture
 
 ```
-┌────────────────────────────────────────────────────────────────────┐
-│  BROWSER (all AI runs here)                                        │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────────┐  │
-│  │ register.html│  │checkpoint.htm│  │ dashboard.html (+admin)  │  │
-│  │ • face-api.js│  │ • face-api.js│  │ • polls Apps Script      │  │
-│  │ • 5-angle    │  │ • Tesseract  │  │ • leaderboard + alerts   │  │
-│  │   capture    │  │ • per-CP     │  │ • admin CRUD + bulk ops  │  │
-│  └──────┬───────┘  └──────┬───────┘  └──────────┬───────────────┘  │
-└─────────┼─────────────────┼─────────────────────┼──────────────────┘
-          │ POST            │ POST/GET            │ GET/POST
-          │ registerRunner  │ recordCheckpoint    │ getResults, getRunners,
-          │                 │ reportViolation     │ getVerifiedViolations,
-          │                 │                     │ verify/delete/update…
-          ▼                 ▼                     ▼
+┌────────────────────┐  ┌──────────────────────┐  ┌──────────────────────┐
+│ register.html      │  │ checkpoint_camera.py │  │ dashboard.html       │
+│ (browser)          │  │ (Python edge node)   │  │ (browser; +admin)    │
+│ • face-api.js      │  │ • ultralytics YOLOv8 │  │ • polls Apps Script  │
+│ • 5-angle capture  │  │ • PaddleOCR (digits) │  │ • leaderboard+alerts │
+│ • avg 128-d desc   │  │ • cv2 webcam loop    │  │ • CRUD + bulk ops    │
+└──────────┬─────────┘  └──────────┬───────────┘  └──────────┬───────────┘
+           │ POST                  │ POST (planned, v0.1)    │ GET/POST
+           │ registerRunner        │ recordCheckpoint        │ getResults,
+           │                       │ reportViolation         │ getRunners,
+           │                       │ (NOT wired in v0)       │ getVerifiedViolations,
+           │                       │                         │ verify/delete/update…
+           ▼                       ▼                         ▼
 ┌────────────────────────────────────────────────────────────────────┐
 │  GOOGLE APPS SCRIPT  (apps_script/Code.gs — v6)                    │
 │  • doGet (cache-fronted reads, 12 s TTL)                           │
 │  • doPost (writes; invalidate cache on success)                    │
 │  • Drive cleanup on delete (synchronous, try-catch isolated)       │
 └────────────────────────────────────────────────────────────────────┘
-          │                 │                     │
-          ▼                 ▼                     ▼
+          │                                                  │
+          ▼                                                  ▼
 ┌──────────────────────┐  ┌────────────────────────────────────────┐
 │ Google Sheets        │  │ Google Drive                           │
-│ • Runners            │  │ • RunnerFaces/<name>/<angle>_<ts>.jpg  │
-│ • Results            │  │ • ViolationEvidence/violation_<ts>.jpg │
-│ • Violations         │  │ (ANYONE_WITH_LINK / VIEW)              │
+│ • Runners            │  │ • RunnerFaces/<name>/<date>/<file>.jpg │
+│ • Results            │  │ • ViolationEvidence/<date>/<file>.jpg  │
+│ • Violations         │  │ (ANYONE_WITH_LINK / VIEW; thumbnail)   │
 └──────────────────────┘  └────────────────────────────────────────┘
 
-         (Optional) Flask = static HTML host for the 3 templates.
-         Flask does NO AI work and is NOT required if templates are
-         hosted on a static site (GitHub Pages, Netlify, etc.).
+         Deprecated rollback: templates/checkpoint.html still works as
+         a browser-side checkpoint if the Python edge node is
+         unavailable. Run `pip install flask && python web_app.py` and
+         open `/checkpoint`.
+
+         (Optional) Flask = static HTML host for register/dashboard.
+         Flask is no longer in requirements.txt — install on demand.
 ```
 
 ### Why this architecture
@@ -81,19 +94,24 @@ backend.
 AI-Runner-Timing-System-YOLOv8/
 ├── AI_CONTEXT.md          ← THIS FILE (system memory for AI agents)
 ├── README.md              ← human-facing project intro (Thai/English)
-├── web_app.py             ← Flask: serves 3 HTML templates only
-├── requirements.txt       ← legacy deps; in v2 only `flask` is needed
+├── checkpoint_camera.py   ← Python edge node (YOLOv8 + PaddleOCR, v0)
+├── requirements.txt       ← edge-node deps; flask is NOT included —
+│                            install separately if running web_app.py
+├── web_app.py             ← Flask: serves register/dashboard/checkpoint
+│                            HTML; legacy /checkpoint route still works
 ├── yolov8n-face.pt        ← legacy YOLO weights (used by legacy_v1 only)
 ├── running_results.csv    ← legacy CSV log (gitignored, rarely cleared)
 ├── .gitignore
 │
-├── templates/             ← The active product (browser frontend)
+├── templates/             ← Browser frontend (register + dashboard active;
+│                            checkpoint deprecated)
 │   ├── register.html      ← Runner registration (5-angle face capture)
-│   ├── checkpoint.html    ← Real-time recognition + checkpoint logging
+│   ├── checkpoint.html    ← DEPRECATED — see checkpoint_camera.py.
+│   │                        Preserved as a rollback path; still works.
 │   └── dashboard.html     ← Public leaderboard + Admin portal (login-gated)
 │
 ├── apps_script/
-│   └── Code.gs            ← Google Apps Script REST API (v5)
+│   └── Code.gs            ← Google Apps Script REST API (v6)
 │
 ├── legacy_v1/             ← Python/OpenCV/YOLOv8 fallback (offline mode)
 │   ├── main.py            ← standalone capture loop
@@ -112,9 +130,10 @@ AI-Runner-Timing-System-YOLOv8/
 
 | File | Role | Touch this when… |
 |---|---|---|
-| `web_app.py` | Tiny Flask wrapper, 4 routes (`/`, `/register`, `/checkpoint`, `/admin`-alias). **Does no AI work.** | Adding/renaming a frontend page |
+| `checkpoint_camera.py` | Local edge node — webcam → YOLOv8 → crop → PaddleOCR → annotated display. **Primary checkpoint pipeline as of 2026-05-10.** | Detection model swap, OCR tuning, drawing/UI tweaks, future POST/face-rec wiring |
+| `web_app.py` | Tiny Flask wrapper. Serves `register.html`, `dashboard.html`, and (deprecated) `checkpoint.html`. **Does no AI work.** | Adding/renaming a frontend page (Flask is install-on-demand now) |
 | `templates/register.html` | Capture 5 face angles, compute averaged 128-d descriptor, single atomic upload | Changing capture UX, embedding format, registration payload |
-| `templates/checkpoint.html` | Live detection loop (face-api + Tesseract), per-CP cooldowns, smart OCR, violation reporting | Recognition tuning, OCR strategy, CP buttons |
+| `templates/checkpoint.html` | **DEPRECATED.** Browser checkpoint (face-api + Tesseract). Preserved as a rollback path; still POSTs cleanly to the v6 backend | Only when fixing the rollback path |
 | `templates/dashboard.html` | Public leaderboard, alerts, admin portal (auth, CRUD, bulk delete, type filter) | UI/UX, admin actions, polling, type taxonomy |
 | `apps_script/Code.gs` | Backend REST + Sheets/Drive I/O + cache + migrations | Schema, endpoints, validation, cleanup logic |
 | `legacy_v1/*` | Offline fallback. **Independent codebase.** | Only when explicitly fixing legacy mode |
@@ -239,7 +258,100 @@ My Drive/
    `Runners` row (or updates in place if `name` already exists),
    invalidates the runners cache.
 
-### 4.2 Checkpoint detection (`checkpoint.html` → `recordCheckpoint`/`reportViolation`)
+### 4.2 Checkpoint detection
+
+The project has TWO checkpoint pipelines:
+
+- **§4.2.1 — Python edge node** (`checkpoint_camera.py`): primary as of
+  2026-05-10. YOLOv8 + PaddleOCR running locally on the operator's
+  machine. Currently a thin v0 — detect, OCR, display. No backend POST,
+  no face recognition, no consensus voting, no cooldowns yet.
+- **§4.2.2 — Browser checkpoint** (`templates/checkpoint.html`):
+  **deprecated** but preserved as a rollback path. Full-featured: face
+  recognition, OCR consensus voting, per-CP cooldowns, five
+  autonomous violation triggers. Still POSTs cleanly to the v6 backend.
+
+The Python edge node will eventually subsume the browser pipeline's
+features (face recognition, consensus voting, cooldowns, POST). Until
+v0.1 lands those, an event running on the Python edge node only logs
+locally — operators who need timing records flowing to the backend
+should use the browser checkpoint.
+
+#### 4.2.1 Python edge node (`checkpoint_camera.py`, v0)
+
+```
+init_models():
+  YOLO(MODEL_PATH = "yolov8n.pt")         # COCO 80-class placeholder
+  PaddleOCR(use_angle_cls=True, lang="en", show_log=False)
+  print "Loading models..." banner before init (first run downloads ~25 MB)
+
+init_camera(CAMERA_INDEX = 0):
+  cv2.VideoCapture(0); raise RuntimeError if not isOpened()
+
+main loop:
+  ok, frame = cap.read()       # break on read failure
+  process_frame(yolo, ocr, frame)
+  cv2.imshow(WINDOW_NAME, frame)
+  if cv2.waitKey(1) & 0xFF == ord("q"): break
+  finally: cap.release(); cv2.destroyAllWindows()
+
+process_frame:
+  for d in detect(yolo, frame, conf=YOLO_CONF_THRESHOLD = 0.5):
+    clamp box to frame bounds; skip degenerate boxes
+    roi = frame[y1:y2, x1:x2]
+    digits = extract_digits(ocr, roi)
+    label = f"BIB: {digits}" if digits else d.name.upper()
+    draw_yolo_label(frame, box, label, d.conf)
+
+extract_digits(ocr, roi):
+  skip if roi.size == 0 or shape < MIN_OCR_ROI_SIZE (20 px) on either axis
+  result = ocr.ocr(roi, cls=True)         # try/except — swallow degenerate-ROI failures
+  best_digits, best_conf = "", 0
+  for line in result[0]:
+    text, conf = line[1][0], float(line[1][1])
+    digits = re.sub(r"\D", "", text)      # strip non-digit chars
+    if digits and conf > best_conf: best_digits, best_conf = digits, conf
+  return best_digits
+
+draw_yolo_label:
+  cv2.rectangle(box, BBOX_COLOR=(0,255,0), BBOX_THICKNESS=2)
+  text = f"{label} {conf:.2f}"
+  (tw, th), bl = cv2.getTextSize(text, FONT_HERSHEY_SIMPLEX, 0.6, 1)
+  tab anchored above bbox top-left; flips inside the bbox if it would
+    clip the frame's top edge
+  filled rect (color), then cv2.putText in white (LINE_AA)
+```
+
+**v0 limitations** (deliberate; deferred to v0.1+):
+
+- **No backend POST.** The script does not call `recordCheckpoint` or
+  `reportViolation`. Local display only. `requests` is in
+  `requirements.txt` already so v0.1 can wire it in without new deps.
+- **No face recognition.** YOLOv8 with COCO weights detects generic
+  classes (person, car, etc.); there's no notion of which runner is in
+  frame. Future v0.1 needs `face_recognition` or `facenet-pytorch`.
+- **No OCR consensus voting.** Every PaddleOCR read is treated as
+  authoritative for the label; there's no per-runner buffer or
+  3-of-5 majority gate. The browser pipeline's Guardrail 21 is still
+  the desired contract — port it forward in v0.1.
+- **No cooldowns.** Browser pipeline's `cooldowns` (record, 30 s) and
+  `violationCooldowns` (60 s) buckets aren't replicated yet.
+- **No CLI flags.** `MODEL_PATH`, `CAMERA_INDEX`, etc. are constants at
+  the top of the file; edit and re-run. v0.1 should add `--cp`,
+  `--api-url`, `--camera-index`, `--debug`.
+- **`yolov8n.pt` is a placeholder.** It's the standard COCO 80-class
+  Ultralytics model. Until BIB-fine-tuned weights drop in via
+  `MODEL_PATH`, OCR runs on every detection's ROI; only digit-bearing
+  crops yield non-empty BIBs.
+
+#### 4.2.2 Browser checkpoint (`templates/checkpoint.html`, deprecated; preserved for reference)
+
+> **DEPRECATED as of 2026-05-10** in favor of `checkpoint_camera.py`.
+> The HTML, JavaScript, and POST contract are unchanged — the v6
+> backend continues to accept records and violations from this path
+> verbatim. Operators run `pip install flask && python web_app.py`
+> and open `/checkpoint` to use it as a rollback. The narrative below
+> describes the deprecated implementation; do not extend it.
 
 The pipeline has two **independent triggers**:
 
@@ -565,10 +677,15 @@ explicit, justified, and accompanied by an update to this file.
     one-shot migration helper (template:
     `_migrateViolationTypeColumn`). Existing sheets must not be
     rewritten just by deploying new code.
-16. **Don't introduce server-side AI.** All face/OCR work runs in the
-    browser by design (zero compute cost on the backend, scales to N
-    open laptops for free). Apps Script is for storage and validation,
-    not inference.
+16. **AI runs at the edge, never in Apps Script.** All face/OCR work
+    runs on the operator's machine — historically in the browser
+    (`templates/checkpoint.html`, face-api.js + Tesseract.js), and as
+    of 2026-05-10 in a local Python edge node (`checkpoint_camera.py`,
+    YOLOv8 + PaddleOCR; primary path going forward). Apps Script
+    remains storage + validation only. Do not introduce server-side
+    inference: the GAS execution-time quota (~6 h/day on consumer
+    accounts) makes it economically unviable, and the architecture
+    intentionally scales to N edge devices for free.
 17. **`legacy_v1/` is frozen.** Do not refactor it as part of v2 work.
     It only changes when the user explicitly asks for offline-mode
     fixes.
@@ -635,13 +752,79 @@ explicit, justified, and accompanied by an update to this file.
 
 ### 6.1 Active version
 
-- **`Code.gs` is at v6.** Header comment block in `Code.gs` is the
-  authoritative changelog for the backend.
+- **Backend `Code.gs` is at v6.** Header comment block in `Code.gs`
+  is the authoritative changelog for the backend.
+- **Edge node `checkpoint_camera.py` is at v0** — placeholder COCO
+  YOLO weights (`yolov8n.pt`), PaddleOCR digit extraction, local
+  display only. No backend POST yet.
 - Frontend templates align with v5 (ViolationType + bulk delete UI).
   v6 is backend-only — no frontend payload, schema, or endpoint
   shape changed; the dashboard simply receives URLs that all render.
+- `templates/checkpoint.html` is **deprecated** as of 2026-05-10 but
+  preserved as a rollback path; its POST contract to v6 backend is
+  unchanged.
 
 ### 6.2 Recent changes
+
+#### 2026-05-10 — Edge-node migration v0: YOLOv8 + PaddleOCR replaces browser checkpoint
+
+Major architecture shift. The checkpoint role moves from
+`templates/checkpoint.html` (browser, face-api.js + Tesseract.js) to a
+new top-level Python script `checkpoint_camera.py` running locally on
+the operator's machine. v6 backend is unchanged.
+
+**Why this shift:**
+- **OCR accuracy.** PaddleOCR (with `use_angle_cls=True`) is more
+  resilient to runner-held BIBs and rotated text than Tesseract.js.
+- **Future room.** YOLOv8 (`ultralytics`) is fine-tuneable. The repo
+  ships v0 with `yolov8n.pt` (the COCO 80-class model) as a placeholder;
+  the user will swap in BIB-trained weights when they're ready.
+- **Edge consolidation.** Bringing detection + OCR onto one Python
+  process removes the browser's CDN dependency on face-api.js and
+  Tesseract.js (Guardrail 8), and gives a single tunable code path
+  for future cooldown / consensus / POST work.
+
+**v0 scope (deliberately thin):**
+- `init_models` — YOLO + PaddleOCR
+- `init_camera(0)` — `cv2.VideoCapture`
+- `detect` — returns list of `{box, conf, cls, name}` dicts
+- `extract_digits` — runs PaddleOCR on the cropped ROI, strips to
+  digits via regex, returns the highest-confidence digit run
+- `draw_yolo_label` — bbox + filled label tab anchored top-left of the
+  bbox, sized via `cv2.getTextSize`, with a flip-into-bbox fallback
+  when the tab would clip the frame top
+- `process_frame` — orchestrates detect → crop → OCR → draw
+- `main` — model + camera init, frame loop, `'q'` to quit, `try/finally`
+  cleanup
+
+**Out of v0 scope (deferred to v0.1+):**
+- Backend POST (`recordCheckpoint`, `reportViolation`). `requests` is
+  in `requirements.txt` already so v0.1 wires in without new deps.
+- Face recognition / runner identity. Without it, v0 has no `name` to
+  send the backend even if POST were wired.
+- OCR consensus voting (Guardrail 21 from the browser pipeline).
+- Per-CP cooldowns (Guardrail 5).
+- CLI flags. v0 uses module-level constants; edit + re-run.
+
+**What's NOT touched:**
+- `templates/checkpoint.html` stays in the repo as a deprecated
+  rollback path — the v6 backend continues to accept POSTs from it.
+- `web_app.py` stays. It still serves register/dashboard/checkpoint
+  HTML. Flask is dropped from `requirements.txt`; users `pip install
+  flask` if they need the wrapper.
+- `legacy_v1/` — frozen per Guardrail 17.
+- `apps_script/Code.gs` — backend stays at v6 (no schema or endpoint
+  changes; the edge node hasn't started POSTing yet).
+
+**Guardrail update:** Guardrail 16 was "Don't introduce server-side
+AI. All face/OCR work runs in the browser by design." It's been
+rewritten to make clear that the prohibition is on Apps Script AI,
+not on edge-side Python. Edge AI was always fine; the browser was
+just the only previous edge.
+
+**Run:** `pip install -r requirements.txt && python checkpoint_camera.py`.
+First run downloads `yolov8n.pt` (~6 MB) + PaddleOCR detection /
+recognition / angle-classifier models (~10–15 MB).
 
 #### 2026-05-10 — v6: Single thumbnail URL contract + dated subfolders
 
@@ -930,6 +1113,24 @@ world accuracy and FPS without blocking the main thread.
   rewrites their URLs but does not relocate the underlying files.
   A fresh deploy that has never run before v6 will see all uploads
   go straight into the dated layout.
+- **Edge node v0 has no backend POST, no face recognition, no
+  consensus voting, no cooldowns.** `checkpoint_camera.py` is a thin
+  detect → OCR → display loop. It runs PaddleOCR on every detection
+  every frame — expect display lag at high detection counts. Future
+  v0.1 will port the browser pipeline's consensus voting (Guardrail
+  21) and cooldown buckets (Guardrails 5, 25) into Python.
+- **`yolov8n.pt` is the default COCO model (80 classes — person,
+  car, etc.).** It does not natively detect BIBs. Until BIB-fine-tuned
+  weights are dropped in via `MODEL_PATH`, OCR runs on every
+  detection's ROI and only digit-bearing crops yield non-empty BIBs;
+  the rest of the time the label tab shows the COCO class name as
+  a fallback (e.g., `PERSON 0.92`).
+- **Browser checkpoint pipeline is deprecated as of 2026-05-10 but
+  preserved as a rollback path.** `templates/checkpoint.html` and the
+  `/checkpoint` route in `web_app.py` still work. The v6 backend
+  continues to accept POSTs from it unchanged. Operators run
+  `pip install flask && python web_app.py`, open `/checkpoint`, and
+  the prior face-api.js + Tesseract.js pipeline runs as before.
 - **Multiple unknowns in frame**: the `UNREGISTERED` trigger captures
   only the **largest-area** face for the snapshot. Other unknowns are
   ignored for that fire — they'll be picked up on the next cooldown
@@ -1043,6 +1244,21 @@ All responses are
 | `POLL_VIOLATIONS_MS` | `10000` | Public alerts refresh |
 | `POLL_ADMIN_MS` | `15000` | Admin tables refresh |
 | `DISMISSED_MAX` | `500` | FIFO cap on dismissed-alert memory |
+
+#### `checkpoint_camera.py` — edge node (v0)
+| Constant | Default | Effect |
+|---|---|---|
+| `MODEL_PATH` | `"yolov8n.pt"` | YOLO weights; ultralytics auto-downloads on first run. Replace with BIB-fine-tuned `.pt` when available. |
+| `CAMERA_INDEX` | `0` | `cv2.VideoCapture` index |
+| `WINDOW_NAME` | `"RunnerTrack — Edge Node v0"` | OpenCV display window title |
+| `YOLO_CONF_THRESHOLD` | `0.5` | Per-detection score floor (matches `legacy_v1/main.py`) |
+| `MIN_OCR_ROI_SIZE` | `20` | Skip OCR on ROIs smaller than this on either axis (PaddleOCR crashes on degenerate inputs) |
+| `QUIT_KEY` | `"q"` | Key that exits the loop |
+| `BBOX_THICKNESS` | `2` | bbox stroke width |
+| `BBOX_COLOR` | `(0, 255, 0)` (BGR green) | bbox + label-tab fill color |
+| `LABEL_TEXT_COLOR` | `(255, 255, 255)` (BGR white) | label text color inside the tab |
+| `LABEL_FONT_SCALE` | `0.6` | `cv2.putText` scale (drives `cv2.getTextSize`) |
+| `LABEL_PAD` | `4` | inner padding around label text inside the tab |
 
 ### 6.9 Configuration knobs (backend, `Code.gs`)
 

@@ -1,8 +1,15 @@
+# RunnerTrack AI — Edge Node Dependencies
+# Backend: GAS v6 (apps_script/Code.gs); Edge node: checkpoint_camera.py (v0)
+# Install: pip install -r requirements.txt
+
 opencv-python
-face_recognition
-numpy
-pandas
 ultralytics
-flask
-easyocr
-python-socketio
+paddleocr
+
+# paddlepaddle: pick CPU or GPU build for your machine.
+# CPU:  pip install paddlepaddle
+# GPU:  pip install paddlepaddle-gpu
+paddlepaddle
+
+requests
+numpy
