@@ -1,13 +1,15 @@
 """RunnerTrack AI — Web App (hybrid mode).
 
 Serves the browser pages (Register / Checkpoint / Dashboard) AND hosts the
-local YOLOv8 + PaddleOCR inference endpoint at POST /analyze. The browser
+local YOLOv8 + EasyOCR inference endpoint at POST /analyze. The browser
 checkpoint UI fetches /analyze every ~400 ms with a base64 JPEG and merges
 the per-detection BIB results with face-api.js identification.
 
-Models load once at import time. First start downloads weights (~25 MB) and
-takes ~4-8 s on CPU; the GET /health endpoint reports readiness for the
-frontend's init poll.
+Models load once at import time. First start downloads weights (~100 MB:
+YOLOv8n ~6 MB + EasyOCR detection ~64 MB + recognition ~30 MB) and takes
+~4-8 s on CPU; the GET /health endpoint reports readiness for the
+frontend's init poll. (PaddleOCR was used previously; swapped for EasyOCR
+because paddlepaddle has no wheel for Python 3.14 yet.)
 
 Run:   python web_app.py
 """
@@ -16,9 +18,9 @@ import logging
 import re
 
 import cv2
+import easyocr
 import numpy as np
 from flask import Flask, jsonify, render_template, request
-from paddleocr import PaddleOCR
 from ultralytics import YOLO
 
 
@@ -33,11 +35,12 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 log = logging.getLogger("runnertrack.ai")
 
 
-def extract_digits(ocr, roi):
-    """Run PaddleOCR on the ROI; return (digits, conf) for the highest-confidence digit run, or ('', 0.0).
+def extract_digits(reader, roi):
+    """Run EasyOCR on the ROI; return (digits, conf) for the highest-confidence digit run, or ('', 0.0).
 
-    Lifted from checkpoint_camera.py:78-100; return shape extended to carry confidence
-    so the JSON response can surface it to the browser.
+    Mirrored in checkpoint_camera.py (single-string return there). `allowlist`
+    constrains the recognizer to digits at the model level; the regex below
+    is defense-in-depth in case EasyOCR ever returns a punctuation glyph.
     """
     if roi is None or roi.size == 0:
         return "", 0.0
@@ -45,17 +48,18 @@ def extract_digits(ocr, roi):
     if h < MIN_OCR_ROI_SIZE or w < MIN_OCR_ROI_SIZE:
         return "", 0.0
     try:
-        result = ocr.ocr(roi, cls=True)
+        # detail=1 returns [(bbox, text, confidence), ...]; bbox is unused here.
+        result = reader.readtext(roi, allowlist="0123456789", detail=1)
     except Exception:
         return "", 0.0
-    if not result or result[0] is None:
+    if not result:
         return "", 0.0
     best_digits = ""
     best_conf = 0.0
-    for line in result[0]:
-        if not line or len(line) < 2 or not line[1]:
+    for entry in result:
+        if not entry or len(entry) < 3:
             continue
-        text, conf = line[1][0], float(line[1][1])
+        text, conf = str(entry[1]), float(entry[2])
         digits = re.sub(r"\D", "", text)
         if digits and conf > best_conf:
             best_digits, best_conf = digits, conf
@@ -82,11 +86,13 @@ def _decode_image(data_url):
 
 
 # === Load AI models at import time ===
-log.info("Loading YOLO + PaddleOCR (one-shot)...")
+log.info("Loading YOLO + EasyOCR (one-shot)...")
 YOLO_MODEL = YOLO(MODEL_PATH)
-PADDLE_OCR = PaddleOCR(use_angle_cls=True, lang="en", show_log=False)
-# Warm the PaddleOCR angle-classifier so the first /analyze is not slow.
-extract_digits(PADDLE_OCR, np.zeros((40, 40, 3), dtype=np.uint8))
+# gpu=False keeps behavior deterministic on operator laptops without CUDA.
+# Flip to True (or omit) once a CUDA-enabled torch is verified on the host.
+OCR_READER = easyocr.Reader(["en"], gpu=False)
+# Warm the recognition path so the first /analyze isn't slow.
+extract_digits(OCR_READER, np.zeros((40, 40, 3), dtype=np.uint8))
 log.info("AI models ready.")
 
 
@@ -123,7 +129,7 @@ def health():
 
 @app.route('/analyze', methods=['POST'])
 def analyze():
-    """Decode base64 frame, run YOLO + PaddleOCR, return one entry per BIB box.
+    """Decode base64 frame, run YOLO + EasyOCR, return one entry per BIB box.
 
     Response shape: {"detections": [
       {"box": {"x", "y", "w", "h"}, "text": "67", "confidence": 0.95, "label": "BIB"},
@@ -155,7 +161,7 @@ def analyze():
                 if x2 <= x1 or y2 <= y1:
                     continue
                 roi = frame[y1:y2, x1:x2]
-                digits, conf = extract_digits(PADDLE_OCR, roi)
+                digits, conf = extract_digits(OCR_READER, roi)
                 if not digits:
                     continue
                 out.append({
@@ -172,5 +178,5 @@ def analyze():
 
 if __name__ == '__main__':
     # debug=False: the reloader would re-import this module on save and pay
-    # the YOLO+PaddleOCR cold-load (~4-8 s) every time. Keep it off.
+    # the YOLO+EasyOCR cold-load (~4-8 s) every time. Keep it off.
     app.run(host='0.0.0.0', port=5000, debug=False)

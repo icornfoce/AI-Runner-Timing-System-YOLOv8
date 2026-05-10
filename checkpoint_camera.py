@@ -1,8 +1,8 @@
 """RunnerTrack AI — Local Edge Checkpoint Node (v0).
 
-YOLOv8 (placeholder COCO weights) + PaddleOCR digit extraction, run from a
-local webcam. Replaces templates/checkpoint.html as the primary checkpoint
-pipeline. Apps Script v6 backend is unchanged.
+YOLOv8 (placeholder COCO weights) + EasyOCR digit extraction, run from a
+local webcam. Standalone alternative to the hybrid pipeline (web_app.py
++ templates/checkpoint.html). Apps Script v6 backend is unchanged.
 
 v0 ships only the detect -> crop -> OCR -> draw -> display loop. Face
 recognition, backend POST, OCR consensus voting, and per-CP cooldowns are
@@ -15,7 +15,7 @@ Quit:  press 'q' in the video window.
 import re
 
 import cv2
-from paddleocr import PaddleOCR
+import easyocr
 from ultralytics import YOLO
 
 
@@ -40,10 +40,11 @@ LABEL_PAD = 4
 
 
 def init_models():
-    """Load YOLO + PaddleOCR. First run downloads weights (~25 MB total)."""
-    print("Loading models (first run downloads weights, ~25 MB)...")
+    """Load YOLO + EasyOCR. First run downloads weights (~100 MB total)."""
+    print("Loading models (first run downloads weights, ~100 MB)...")
     yolo = YOLO(MODEL_PATH)
-    ocr = PaddleOCR(use_angle_cls=True, lang="en", show_log=False)
+    # gpu=False for predictability on operator laptops without CUDA.
+    ocr = easyocr.Reader(["en"], gpu=False)
     return yolo, ocr
 
 
@@ -75,26 +76,28 @@ def detect(yolo, frame, conf_threshold=YOLO_CONF_THRESHOLD):
     return detections
 
 
-def extract_digits(ocr, roi):
-    """Run PaddleOCR on the ROI and return the highest-confidence digit run, or ''."""
+def extract_digits(reader, roi):
+    """Run EasyOCR on the ROI and return the highest-confidence digit run, or ''."""
     if roi is None or roi.size == 0:
         return ""
     h, w = roi.shape[:2]
     if h < MIN_OCR_ROI_SIZE or w < MIN_OCR_ROI_SIZE:
         return ""
     try:
-        result = ocr.ocr(roi, cls=True)
+        # detail=1 returns [(bbox, text, confidence), ...]; allowlist constrains
+        # the recognizer to digits at the model level.
+        result = reader.readtext(roi, allowlist="0123456789", detail=1)
     except Exception:
         return ""
-    if not result or result[0] is None:
+    if not result:
         return ""
     best_digits = ""
     best_conf = 0.0
-    for line in result[0]:
-        if not line or len(line) < 2 or not line[1]:
+    for entry in result:
+        if not entry or len(entry) < 3:
             continue
-        text, conf = line[1][0], float(line[1][1])
-        digits = re.sub(r"\D", "", text)
+        text, conf = str(entry[1]), float(entry[2])
+        digits = re.sub(r"\D", "", text)        # defense-in-depth even with allowlist
         if digits and conf > best_conf:
             best_digits, best_conf = digits, conf
     return best_digits

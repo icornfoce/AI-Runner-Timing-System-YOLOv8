@@ -1,18 +1,17 @@
 # RunnerTrack AI — Hybrid-Mode Dependencies
 # Backend: GAS v6 (apps_script/Code.gs).
-# Local server: web_app.py serves templates AND POST /analyze (YOLOv8 + PaddleOCR).
+# Local server: web_app.py serves templates AND POST /analyze (YOLOv8 + EasyOCR).
 # Standalone alternative: checkpoint_camera.py (same AI, headless cv2 loop).
 # Install: pip install -r requirements.txt
+#
+# easyocr pulls torch + torchvision transitively — no need to list them
+# explicitly. We swapped from paddleocr to easyocr because paddlepaddle
+# does not yet publish a wheel for Python 3.14.
 
 opencv-python
 flask
 ultralytics
-paddleocr
-
-# paddlepaddle: pick CPU or GPU build for your machine.
-# CPU:  pip install paddlepaddle
-# GPU:  pip install paddlepaddle-gpu
-paddlepaddle
+easyocr
 
 requests
 numpy

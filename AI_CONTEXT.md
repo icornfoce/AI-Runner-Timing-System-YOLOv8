@@ -10,8 +10,11 @@
 > set.
 >
 > **Last updated:** 2026-05-10 — **Hybrid architecture**: browser
-> checkpoint UI restored as primary; YOLOv8 + PaddleOCR exposed via a
-> local Flask `/analyze` endpoint inside `web_app.py`. Tesseract.js is
+> checkpoint UI restored as primary; YOLOv8 + EasyOCR exposed via a
+> local Flask `/analyze` endpoint inside `web_app.py`. (Same day,
+> later: PaddleOCR was swapped for EasyOCR after `paddlepaddle` proved
+> unavailable on Python 3.14; same hybrid architecture, same
+> `extract_digits` contract.) Tesseract.js is
 > fully removed. `templates/checkpoint.html` un-deprecated and
 > refactored to fetch the local server every ~400 ms with a base64
 > JPEG; per-detection BIB boxes are paired spatially with face-api
@@ -37,7 +40,7 @@ Google Apps Script backend handles only storage and validation.
 
 As of 2026-05-10 the **checkpoint** role uses a hybrid architecture:
 the browser UI in `templates/checkpoint.html` runs face recognition and
-the operator overlay, while the heavy YOLOv8 + PaddleOCR inference is
+the operator overlay, while the heavy YOLOv8 + EasyOCR inference is
 offloaded to a local Flask `/analyze` endpoint hosted alongside the
 templates inside `web_app.py`. Same machine, same Flask process, same
 origin (port 5000) — no CORS. The standalone `checkpoint_camera.py`
@@ -62,7 +65,7 @@ remains as an alternative path; it is no longer the primary loop.
            │            │ • /, /register, /checkpoint │       │
            │            │ • /dashboard, /admin        │       │
            │            │ • POST /analyze ← YOLOv8 +  │       │
-           │            │   PaddleOCR (per-detection) │       │
+           │            │   EasyOCR (per-detection)   │       │
            │            │ • GET  /health              │       │
            │            └─────────────────────────────┘       │
            │                                                  │
@@ -104,12 +107,12 @@ remains as an alternative path; it is no longer the primary loop.
 AI-Runner-Timing-System-YOLOv8/
 ├── AI_CONTEXT.md          ← THIS FILE (system memory for AI agents)
 ├── README.md              ← human-facing project intro (Thai/English)
-├── checkpoint_camera.py   ← Standalone alternative (YOLOv8 + PaddleOCR,
+├── checkpoint_camera.py   ← Standalone alternative (YOLOv8 + EasyOCR,
 │                            headless cv2 loop). Not in primary loop.
 ├── requirements.txt       ← all hybrid deps incl. flask, ultralytics,
-│                            paddleocr, paddlepaddle, opencv-python
+│                            easyocr (which pulls torch), opencv-python
 ├── web_app.py             ← Flask host: serves templates AND the local
-│                            POST /analyze endpoint (YOLOv8 + PaddleOCR);
+│                            POST /analyze endpoint (YOLOv8 + EasyOCR);
 │                            also exposes GET /health for the frontend
 │                            ready-poll. Loads models once at import.
 ├── yolov8n-face.pt        ← legacy YOLO weights (used by legacy_v1 only)
@@ -142,7 +145,7 @@ AI-Runner-Timing-System-YOLOv8/
 
 | File | Role | Touch this when… |
 |---|---|---|
-| `web_app.py` | Flask host: serves templates AND `POST /analyze` (YOLOv8 + PaddleOCR) and `GET /health`. Loads models at import; first start ~4-8 s. **Primary AI host as of 2026-05-10.** | Detection model swap, OCR tuning, route changes, request validation |
+| `web_app.py` | Flask host: serves templates AND `POST /analyze` (YOLOv8 + EasyOCR) and `GET /health`. Loads models at import; first start ~4-8 s. **Primary AI host as of 2026-05-10.** | Detection model swap, OCR tuning, route changes, request validation |
 | `checkpoint_camera.py` | Headless cv2 alternative (same models, no HTTP). Independent of the primary loop. | Kiosk-mode tweaks, drawing/cv2-window changes |
 | `templates/register.html` | Capture 5 face angles, compute averaged 128-d descriptor, single atomic upload | Changing capture UX, embedding format, registration payload |
 | `templates/checkpoint.html` | **Primary checkpoint UI.** face-api.js for identity; throttled `fetch('/analyze')` for BIB OCR; spatial face↔BIB pairing; existing castVote / cooldowns / GAS POST contract preserved | OCR cadence, pairing geometry, drawing, violation triggers |
@@ -277,7 +280,7 @@ The project ships TWO checkpoint pipelines:
 - **§4.2.1 — Hybrid (browser + local Flask AI)**: primary path as of
   2026-05-10. `templates/checkpoint.html` runs face-api.js for runner
   identity and posts every ~400 ms to `web_app.py`'s `/analyze` endpoint
-  (YOLOv8 + PaddleOCR). The browser pairs each server-returned BIB box
+  (YOLOv8 + EasyOCR). The browser pairs each server-returned BIB box
   with a face by spatial proximity (chest region) and feeds the
   existing castVote / cooldown / GAS POST machinery from those
   results. Full-featured: face recognition, OCR consensus voting,
@@ -289,7 +292,8 @@ The project ships TWO checkpoint pipelines:
 
 The hybrid path is the default; operators run `pip install -r
 requirements.txt && python web_app.py` and open `/checkpoint`. The
-local server loads YOLO+PaddleOCR once at import (~4-8 s on CPU);
+local server loads YOLO+EasyOCR once at import (~4-8 s on CPU; first run
+also downloads ~100 MB of EasyOCR weights);
 the frontend polls `GET /health` before opening the camera. If the
 local server goes down mid-event, `recordCheckpoint` keeps firing
 (face-only path), the UI shows an "AI offline" banner, and OCR-driven
@@ -312,7 +316,7 @@ processLoop (every rAF, ~60 fps):           POST /analyze (every ~400 ms)
       && !analyzeBusy):
     analyzeFrame()                          → cv2.imdecode → YOLO_MODEL
                                               → per-box: clamp, crop,
-                                                extract_digits(PADDLE_OCR)
+                                                extract_digits(OCR_READER)
                                               → drop empty-digit entries
                                             ◄────────────────────────────────
                                             {"detections": [
@@ -342,13 +346,15 @@ processLoop (every rAF, ~60 fps):           POST /analyze (every ~400 ms)
 
 **Cadence and throughput**: 400 ms server cadence is held by an
 `analyzeBusy` flag — if inference takes longer than the interval, the
-next fetch is skipped (no stacking). YOLOv8n + PaddleOCR English on
+next fetch is skipped (no stacking). YOLOv8n + EasyOCR English on
 CPU is ~80-120 ms/frame and ~150-300 ms per OCR ROI, so 2-3 BIBs in
 view sit near the budget. Raise `ANALYZE_INTERVAL_MS` before
 downgrading models if the HUD shows `analyzeBusy: true` continuously.
 
-**PaddleOCR confidence is 0-1** (Tesseract was 0-100); `PADDLE_MIN_CONF
-= 0.6` replaces the old `OCR_MIN_CONFIDENCE`. The majority-vote gate
+**EasyOCR confidence is 0-1** (Tesseract was 0-100); `PADDLE_MIN_CONF
+= 0.6` is the floor and is checked against EasyOCR's `confidence`
+field. (The constant name predates the Paddle→EasyOCR swap; it's kept
+to avoid touching the frontend cosmetically.) The majority-vote gate
 (3-of-5 over a 15 s window) is unchanged and still the primary
 protection against single-frame misreads (Guardrail 21).
 
@@ -364,8 +370,8 @@ feeds the vote, while `all` drives the `MULTIPLE_BIBS` count.
 ```
 init_models():
   YOLO(MODEL_PATH = "yolov8n.pt")         # COCO 80-class placeholder
-  PaddleOCR(use_angle_cls=True, lang="en", show_log=False)
-  print "Loading models..." banner before init (first run downloads ~25 MB)
+  easyocr.Reader(["en"], gpu=False)
+  print "Loading models..." banner before init (first run downloads ~100 MB)
 
 init_camera(CAMERA_INDEX = 0):
   cv2.VideoCapture(0); raise RuntimeError if not isOpened()
@@ -385,13 +391,14 @@ process_frame:
     label = f"BIB: {digits}" if digits else d.name.upper()
     draw_yolo_label(frame, box, label, d.conf)
 
-extract_digits(ocr, roi):
+extract_digits(reader, roi):
   skip if roi.size == 0 or shape < MIN_OCR_ROI_SIZE (20 px) on either axis
-  result = ocr.ocr(roi, cls=True)         # try/except — swallow degenerate-ROI failures
+  result = reader.readtext(roi, allowlist="0123456789", detail=1)
+                                          # try/except — swallow degenerate-ROI failures
   best_digits, best_conf = "", 0
-  for line in result[0]:
-    text, conf = line[1][0], float(line[1][1])
-    digits = re.sub(r"\D", "", text)      # strip non-digit chars
+  for entry in result:                    # entry = (bbox, text, confidence)
+    text, conf = str(entry[1]), float(entry[2])
+    digits = re.sub(r"\D", "", text)      # defense-in-depth even with allowlist
     if digits and conf > best_conf: best_digits, best_conf = digits, conf
   return best_digits
 
@@ -412,7 +419,7 @@ draw_yolo_label:
 - **No face recognition.** YOLOv8 with COCO weights detects generic
   classes (person, car, etc.); there's no notion of which runner is in
   frame. Future v0.1 needs `face_recognition` or `facenet-pytorch`.
-- **No OCR consensus voting.** Every PaddleOCR read is treated as
+- **No OCR consensus voting.** Every EasyOCR read is treated as
   authoritative for the label; there's no per-runner buffer or
   3-of-5 majority gate. The browser pipeline's Guardrail 21 is still
   the desired contract — port it forward in v0.1.
@@ -602,7 +609,7 @@ explicit, justified, and accompanied by an update to this file.
     rewritten just by deploying new code.
 16. **AI runs at the edge, never in Apps Script.** "Edge" means the
     operator's machine — face-api.js in the browser AND YOLOv8 +
-    PaddleOCR in the local Flask process (`web_app.py`) hosted on the
+    EasyOCR in the local Flask process (`web_app.py`) hosted on the
     same machine. The hybrid arrangement is fine: same machine, no
     cloud inference. Apps Script remains storage + validation only.
     Do not introduce server-side inference *in Apps Script*: the GAS
@@ -619,15 +626,20 @@ explicit, justified, and accompanied by an update to this file.
     passes that to `pairFaceToBib` (and to the on-canvas overlay) —
     preserve that contract.
 19. *(retired 2026-05-10)* Was: "OCR preprocessing is grayscale →
-    adaptive threshold → 2× nearest-neighbor on the main thread."
-    PaddleOCR has its own preprocessing pipeline; the hybrid migration
-    deleted `preprocessForOCR` from `checkpoint.html`. No replacement
-    rule needed — the server is the OCR contract.
-20. *(retired 2026-05-10)* Was: "Tesseract worker config is part of
-    the contract." Tesseract.js is gone. The PaddleOCR equivalent
-    (`use_angle_cls=True, lang="en"`) lives in `web_app.py` and
-    `checkpoint_camera.py`; do not change without re-deriving the
-    `BIB_MIN_LEN` / `BIB_MAX_LEN` / `PADDLE_MIN_CONF` validation gate.
+    adaptive threshold → 2× nearest-neighbor on the main thread." The
+    server-side OCR engine has its own preprocessing pipeline; the
+    hybrid migration deleted `preprocessForOCR` from `checkpoint.html`.
+    No replacement rule needed — the server is the OCR contract.
+20. **The OCR engine's recognizer config is part of the contract.**
+    Currently `easyocr.Reader(["en"], gpu=False)` + `readtext(roi,
+    allowlist="0123456789", detail=1)` in both `web_app.py` and
+    `checkpoint_camera.py`. The `allowlist` constrains the recognizer
+    to digits at the model level; `gpu=False` is set explicitly for
+    predictability on operator laptops without CUDA. Do not change
+    these without re-deriving the `BIB_MIN_LEN` / `BIB_MAX_LEN` /
+    `PADDLE_MIN_CONF` validation gate. (PaddleOCR `use_angle_cls=True,
+    lang="en"` was the prior config — replaced 2026-05-10 because
+    `paddlepaddle` has no Python 3.14 wheel.)
 21. **Violations require majority consensus, not a single read.** The
     `castVote` → consensus gate exists because single-frame OCR
     misreads were generating false-positive `WRONG_PERSON` reports.
@@ -688,7 +700,7 @@ explicit, justified, and accompanied by an update to this file.
   is the authoritative changelog for the backend.
 - **Hybrid checkpoint pipeline is primary** as of 2026-05-10.
   `web_app.py` hosts both the templates and `POST /analyze` (YOLOv8 +
-  PaddleOCR) on port 5000. `templates/checkpoint.html` runs face-api.js
+  EasyOCR) on port 5000. `templates/checkpoint.html` runs face-api.js
   in the browser and posts frames at ~400 ms cadence.
 - **`checkpoint_camera.py` (v0)** remains as the headless cv2
   alternative — same models, no HTTP, no GAS POST.
@@ -697,6 +709,42 @@ explicit, justified, and accompanied by an update to this file.
   shape changed; the dashboard simply receives URLs that all render.
 
 ### 6.2 Recent changes
+
+#### 2026-05-10 (later) — PaddleOCR → EasyOCR (Python 3.14 fix)
+
+Operator runs Python 3.14 where `paddlepaddle` does not yet publish a
+wheel. `pip install -r requirements.txt` failed and `from paddleocr
+import PaddleOCR` raised `ModuleNotFoundError` at server boot. Swapped
+the OCR engine to EasyOCR (PyTorch-backed; Python 3.14 wheels available)
+in **both** `web_app.py` and `checkpoint_camera.py`.
+
+**API delta**: `PaddleOCR(use_angle_cls=True, lang="en", show_log=False)`
+→ `easyocr.Reader(["en"], gpu=False)`. `ocr.ocr(roi, cls=True)` →
+`reader.readtext(roi, allowlist="0123456789", detail=1)`. Result shape:
+PaddleOCR `[[(text, conf), ...]]` → EasyOCR `[(bbox, text, conf), ...]`.
+The `extract_digits` return contract — `(digits, conf)` in `web_app.py`,
+bare `digits` in `checkpoint_camera.py` — is unchanged, as is the
+JSON shape returned by `POST /analyze`. The frontend
+(`templates/checkpoint.html`), the face↔BIB pairing, the consensus
+vote, and the GAS POST contract are all untouched.
+
+**`gpu=False` is explicit.** Most operator laptops have no CUDA, and
+EasyOCR's auto-detect emits a warning if GPU is requested but
+unavailable. Flip to `gpu=True` (or omit) once a CUDA torch is verified.
+
+**First-run weight footprint** is larger: PaddleOCR ~25 MB → EasyOCR
+~100 MB (detection ~64 MB + recognition ~30 MB). The frontend
+`waitForAIServer(30000, 500)` poll covers the cold load on most
+laptops; on slower disks bump the timeout in `checkpoint.html` if the
+init screen times out.
+
+**`requirements.txt`** dropped `paddleocr` and `paddlepaddle` (and the
+CPU/GPU comment block); added `easyocr`. EasyOCR pulls `torch` and
+`torchvision` transitively, so they are not listed explicitly.
+
+**Guardrail 20** rewritten to reference EasyOCR's `Reader` + `readtext`
++ `allowlist` config; the prior PaddleOCR config preserved as the
+"prior config" footnote.
 
 #### 2026-05-10 — Hybrid checkpoint: browser UI + local Flask AI
 
@@ -1104,7 +1152,7 @@ world accuracy and FPS without blocking the main thread.
   go straight into the dated layout.
 - **Edge node v0 has no backend POST, no face recognition, no
   consensus voting, no cooldowns.** `checkpoint_camera.py` is a thin
-  detect → OCR → display loop. It runs PaddleOCR on every detection
+  detect → OCR → display loop. It runs EasyOCR on every detection
   every frame — expect display lag at high detection counts. Future
   v0.1 will port the browser pipeline's consensus voting (Guardrail
   21) and cooldown buckets (Guardrails 5, 25) into Python.
@@ -1217,7 +1265,7 @@ All responses are
 | `PAIR_LATERAL_FACTOR` | `0.5` | Chest region lateral pad (×faceH) |
 | `PAIR_TOP_FACTOR` | `0.6` | Chest region top offset (×faceH below face top) |
 | `PAIR_BOTTOM_FACTOR` | `3.0` | Chest region bottom offset (×faceH below face bottom) |
-| `PADDLE_MIN_CONF` | `0.6` | PaddleOCR confidence floor (0–1) for `primary` detection |
+| `PADDLE_MIN_CONF` | `0.6` | OCR confidence floor (0–1) for `primary` detection. Name predates the Paddle→EasyOCR swap; the value is checked against EasyOCR's `confidence` field. |
 | `BIB_MIN_LEN` / `BIB_MAX_LEN` | `1` / `6` (field-test; nominal `2` / `5`) | Accepted BIB length range |
 | `OCR_VOTE_BUFFER_SIZE` | `5` | Rolling buffer of recent valid reads |
 | `OCR_VOTE_MIN_CONSENSUS` | `3` | Reads-in-agreement required for consensus |
@@ -1245,7 +1293,7 @@ All responses are
 | `CAMERA_INDEX` | `0` | `cv2.VideoCapture` index |
 | `WINDOW_NAME` | `"RunnerTrack — Edge Node v0"` | OpenCV display window title |
 | `YOLO_CONF_THRESHOLD` | `0.5` | Per-detection score floor (matches `legacy_v1/main.py`) |
-| `MIN_OCR_ROI_SIZE` | `20` | Skip OCR on ROIs smaller than this on either axis (PaddleOCR crashes on degenerate inputs) |
+| `MIN_OCR_ROI_SIZE` | `20` | Skip OCR on ROIs smaller than this on either axis (EasyOCR / PaddleOCR both crash on degenerate inputs) |
 | `QUIT_KEY` | `"q"` | Key that exits the loop |
 | `BBOX_THICKNESS` | `2` | bbox stroke width |
 | `BBOX_COLOR` | `(0, 255, 0)` (BGR green) | bbox + label-tab fill color |
