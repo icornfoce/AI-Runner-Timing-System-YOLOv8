@@ -9,12 +9,14 @@
 > cadence, caching, or guardrails MUST update this file in the same change
 > set.
 >
-> **Last updated:** 2026-05-09 — Audit-driven hardening in `checkpoint.html`
-> (`ocrConsensus` cleared on EMA reset; `setStatus()` interpolations
-> escaped; `?debug=1` URL flag); plus `Violations.ImageUrl` now writes
-> the Drive thumbnail URL (`thumbnail?id=…&sz=w800`) so dashboard
-> `<img>` rendering works under strict third-party cookie defaults.
-> Runner photos unchanged (still embed form). Backend still v5.
+> **Last updated:** 2026-05-10 — Backend bumped to **v6**: every Drive
+> image URL (Runners.Photo_* AND Violations.ImageUrl) now writes the
+> thumbnail form (`thumbnail?id=…&sz=w800`); the embed form
+> (`uc?export=view`) is retired. New uploads land in a `YYYY-MM-DD`
+> subfolder under their parent (`RunnerFaces/<name>/<date>/`,
+> `ViolationEvidence/<date>/`) so Drive stays browseable. New
+> `_migrateHistoricalImages()` rewrites every legacy URL to the
+> thumbnail form and replaces the v3 `_migrateAllImageUrls` helper.
 
 ---
 
@@ -44,7 +46,7 @@ backend.
           │                 │                     │ verify/delete/update…
           ▼                 ▼                     ▼
 ┌────────────────────────────────────────────────────────────────────┐
-│  GOOGLE APPS SCRIPT  (apps_script/Code.gs — v5)                    │
+│  GOOGLE APPS SCRIPT  (apps_script/Code.gs — v6)                    │
 │  • doGet (cache-fronted reads, 12 s TTL)                           │
 │  • doPost (writes; invalidate cache on success)                    │
 │  • Drive cleanup on delete (synchronous, try-catch isolated)       │
@@ -130,8 +132,10 @@ Name | BibNumber | Email | RegisteredAt
 | FolderUrl | Embeddings
 ```
 - `Name` is the **primary key** (case-sensitive, A-Z 0-9 _ - ., max 50 chars).
-- `Photo_*` cells store Drive embed URLs:
-  `https://drive.google.com/uc?export=view&id=<FILE_ID>`
+- `Photo_*` cells store Drive thumbnail URLs (v6+):
+  `https://drive.google.com/thumbnail?id=<FILE_ID>&sz=w800`. Pre-v6
+  rows may still carry the embed form (`uc?export=view&id=…`); run
+  `_migrateHistoricalImages()` once to normalize them.
 - `FolderUrl` is the runner's Drive folder.
 - `Embeddings` is a JSON-stringified array of 128 floats (averaged across
   the 5 angles by the frontend).
@@ -161,35 +165,49 @@ ID | Name | BibNumber | Message | ImageUrl | Timestamp
 
 ```
 My Drive/
-├── RunnerFaces/                       ← shared ANYONE_WITH_LINK / VIEW
+├── RunnerFaces/                            ← shared ANYONE_WITH_LINK / VIEW
 │   ├── kawin/
-│   │   ├── kawin_front_<ts>.jpg
-│   │   ├── kawin_top_<ts>.jpg
-│   │   ├── kawin_bottom_<ts>.jpg
-│   │   ├── kawin_left_<ts>.jpg
-│   │   └── kawin_right_<ts>.jpg
+│   │   ├── 2026-05-10/                     ← YYYY-MM-DD subfolder (v6+)
+│   │   │   ├── kawin_front_<ts>.jpg
+│   │   │   ├── kawin_top_<ts>.jpg
+│   │   │   ├── kawin_bottom_<ts>.jpg
+│   │   │   ├── kawin_left_<ts>.jpg
+│   │   │   └── kawin_right_<ts>.jpg
+│   │   └── 2026-05-09/  …
 │   └── …/
-└── ViolationEvidence/                 ← shared ANYONE_WITH_LINK / VIEW
-    └── violation_<name>_<ts>.jpg
+└── ViolationEvidence/                      ← shared ANYONE_WITH_LINK / VIEW
+    ├── 2026-05-10/                         ← YYYY-MM-DD subfolder (v6+)
+    │   └── violation_<name>_<ts>.jpg
+    └── 2026-05-09/  …
 ```
 
 - Folder creation is wrapped in a **`LockService` lock** to prevent
-  duplicates from concurrent registrations.
-- Two URL shapes are written depending on the consumer:
-  - **Runner photos** (`Runners.Photo_*`): embed form
-    `https://drive.google.com/uc?export=view&id=<id>`.
-  - **Violation evidence** (`Violations.ImageUrl`): thumbnail form
-    `https://drive.google.com/thumbnail?id=<id>&sz=w800`.
-- The thumbnail form is preferred wherever an `<img src>` consumer
-  exists in a public browser context, because the embed form breaks
-  under strict third-party cookie defaults — the image opens fine in
-  a new tab, but a cookie-less `<img>` request gets bounced to a
-  login page. The thumbnail endpoint serves a public bitmap with no
-  cookie dance.
-- Both shapes require `ANYONE_WITH_LINK / VIEW` sharing on the file.
+  duplicates from concurrent registrations / concurrent saves on the
+  same date subfolder.
+- **Single URL contract (v6+)**: every Drive image URL written by
+  this backend uses the thumbnail form,
+  `https://drive.google.com/thumbnail?id=<id>&sz=w800`. Both
+  `Runners.Photo_*` and `Violations.ImageUrl` follow this contract.
+  The embed form (`uc?export=view`) was retired because cookie-less
+  `<img src>` requests bounce to a Google login page under strict
+  third-party cookie defaults; thumbnail serves a public bitmap with
+  no cookie dance and works for every consumer.
+- Legacy rows (pre-v6) carry the embed form or the older
+  `/file/d/<id>/view` viewer form. Run `_migrateHistoricalImages()`
+  (see §6.6) once after deploying v6 to rewrite them to thumbnail.
+  The Drive files themselves are never moved — only the URL stored
+  in the sheet changes.
+- `ANYONE_WITH_LINK / VIEW` sharing on the file is required for
+  thumbnail to render — same as it was for embed.
+- **Date-organized subfolders apply to NEW uploads only.** Files
+  saved before v6 stay in the parent folder
+  (`RunnerFaces/<name>/<file>` or `ViolationEvidence/<file>`); only
+  uploads from v6 onward land in the date subfolder. The historical
+  migration does not relocate them.
 - The deletion path (`deleteViolation` → `extractDriveFileId`) is
-  format-agnostic: its `/[?&]id=([-\w]{25,})/` regex matches the file
-  ID inside either query string.
+  format-agnostic: its `/[?&]id=([-\w]{25,})/` and
+  `/\/file\/d\/([-\w]{25,})/` regexes match the file ID inside any
+  URL form (thumbnail, embed, legacy viewer).
 
 ### 3.3 Where the data lives in code
 
@@ -520,15 +538,19 @@ explicit, justified, and accompanied by an update to this file.
     The schema setup forces `setNumberFormat("@")` on first creation —
     do not remove this. If Sheets converts `13:01` to a Date, the
     leaderboard breaks.
-11. **`ANYONE_WITH_LINK / VIEW` sharing is intentional.** The dashboard
-    renders Drive images in `<img src>` from any browser — without
-    public sharing the image URLs return 401 (or worse, a redirect to
-    a login page) and the alerts show broken images. Restricting
-    sharing requires re-architecting image delivery (e.g. base64-inline
-    or a proxy endpoint). Note: even with sharing correct, the embed
-    form (`uc?export=view`) can still break in `<img src>` under strict
-    third-party cookie defaults — that's why violations now write the
-    thumbnail form.
+11. **`ANYONE_WITH_LINK / VIEW` sharing + thumbnail URL form are
+    both load-bearing.** The dashboard renders Drive images in
+    `<img src>` from any browser. Without public sharing the URLs
+    return 401 (or worse, redirect to a login page) and the alerts
+    show broken images; restricting sharing requires re-architecting
+    image delivery (e.g. base64-inline or a proxy endpoint). And
+    even with sharing correct, the embed form (`uc?export=view`)
+    breaks `<img src>` under strict third-party cookie defaults —
+    the cookie-less request bounces to a Google login page. v6
+    standardized every URL on the thumbnail form
+    (`drive.google.com/thumbnail?id=…&sz=w800`) for both
+    `Runners.Photo_*` and `Violations.ImageUrl`. Don't reintroduce
+    the embed form, and don't drop the public sharing.
 12. **Violation ID format is `V<unix-ms>`.** `ID_PATTERN = /^V\d{10,}$/`
     enforces it on writes. Do not change this format without writing a
     migration helper similar to `_migrateViolationTypeColumn`.
@@ -613,11 +635,68 @@ explicit, justified, and accompanied by an update to this file.
 
 ### 6.1 Active version
 
-- **`Code.gs` is at v5.** Header comment block in `Code.gs` is the
+- **`Code.gs` is at v6.** Header comment block in `Code.gs` is the
   authoritative changelog for the backend.
 - Frontend templates align with v5 (ViolationType + bulk delete UI).
+  v6 is backend-only — no frontend payload, schema, or endpoint
+  shape changed; the dashboard simply receives URLs that all render.
 
 ### 6.2 Recent changes
+
+#### 2026-05-10 — v6: Single thumbnail URL contract + dated subfolders
+
+Backend `Code.gs` bumped from v5 to v6. Two intertwined changes plus a
+historical migration helper.
+
+- **All Drive image URLs are now thumbnail form.** Runner photos
+  (`Runners.Photo_Front` … `Photo_Right`) used to be written in the
+  embed form (`uc?export=view&id=<id>`); they now share the same
+  thumbnail form (`thumbnail?id=<id>&sz=w800`) that violation evidence
+  has used since 2026-05-09. Reason: the embed form returns broken
+  `<img>` images in browsers with strict third-party cookie defaults
+  (image opens fine in a new tab, but a cookie-less `<img src>` gets
+  bounced to a Google login page). Thumbnail serves a public bitmap
+  with no cookie dance — works for both runner photos and violation
+  evidence. Net result: every dashboard `<img>` consumer is
+  cookie-default-safe.
+
+  Code change: `handleRegisterRunner` swaps `DRIVE_EMBED_URL` →
+  `DRIVE_THUMBNAIL_URL`, and the `DRIVE_EMBED_URL` constant is
+  removed (no remaining call sites). `extractDriveFileId` is
+  unchanged — its `[?&]id=` and `/file/d/` regexes already match
+  every URL form this app has ever written, so cleanup paths and
+  the historical migration cope with rows from older deploys.
+
+- **New uploads land in a `YYYY-MM-DD` subfolder.**
+  `saveBase64Image(folder, filename, base64Data)` now saves to
+  `<folder>/<YYYY-MM-DD>/<filename>` instead of `<folder>/<filename>`.
+  Folder layout becomes `RunnerFaces/<name>/<date>/<files>` and
+  `ViolationEvidence/<date>/<files>`. Reason: an event with hundreds
+  of violations dumps every JPEG into a single Drive root, which is
+  unbrowseable. Date subfolders keep the Drive view manageable. The
+  date subfolder is created lazily on first save of the day —
+  `getOrCreateFolder` is `LockService`-protected so concurrent
+  registrations on the same day share one subfolder rather than
+  racing to create duplicates. New helper `getDateStringYMD(date)`
+  returns `Utilities.formatDate(d, Session.getScriptTimeZone(),
+  "yyyy-MM-dd")`. Existing files are NOT relocated — they remain
+  in the parent folder; only new uploads land in date subfolders.
+
+- **`_migrateHistoricalImages()` rewrites every legacy URL.** Replaces
+  the v3 helper `_migrateAllImageUrls` (which produced embed URLs and
+  is now obsolete). Iterates `Runners.Photo_*` and
+  `Violations.ImageUrl`, extracts the file ID via
+  `extractDriveFileId`, rewrites the URL with `DRIVE_THUMBNAIL_URL`.
+  Skips rows already in thumbnail form so it is idempotent. Single
+  read + single write per sheet; invalidates the matching cache key.
+  Logs three counters per sheet (`rewrote`, `already thumbnail`,
+  `unparseable`) so a re-run on a clean sheet shows everything in
+  the "already thumbnail" bucket.
+
+  **Run once after deploying v6** from the Apps Script editor:
+  function dropdown → `_migrateHistoricalImages` → Run. Without
+  this run, runner photos and any pre-2026-05-09 violation rows
+  continue to render with their old (broken) URLs in the dashboard.
 
 #### 2026-05-09 — Violation `ImageUrl` switched to Drive thumbnail format
 
@@ -843,6 +922,14 @@ world accuracy and FPS without blocking the main thread.
   cached consensus, and Ghost-BIB counters are dropped together.
 - **Sample data** in `Data/` (legacy face DB) and `events/test/` is
   retained for reference; both directories are gitignored.
+- **Drive uploads land in `YYYY-MM-DD` subfolders (v6+).** Layout is
+  `RunnerFaces/<name>/<date>/<files>` and
+  `ViolationEvidence/<date>/<files>`. The date is computed in the
+  script's timezone via `Session.getScriptTimeZone()`. Files saved
+  before v6 stay in the parent folder; `_migrateHistoricalImages`
+  rewrites their URLs but does not relocate the underlying files.
+  A fresh deploy that has never run before v6 will see all uploads
+  go straight into the dated layout.
 - **Multiple unknowns in frame**: the `UNREGISTERED` trigger captures
   only the **largest-area** face for the snapshot. Other unknowns are
   ignored for that fire — they'll be picked up on the next cooldown
@@ -870,7 +957,7 @@ All are idempotent.
 |---|---|---|
 | `_setupAdminToken()` | Stores the admin password in `ScriptProperties` | Once at deploy time, or when changing the password |
 | `_consolidateDuplicateRootFolders()` | Merges duplicate `RunnerFaces`/`ViolationEvidence` folders into one canonical folder | If a race ever creates duplicates (predates the lock fix) |
-| `_migrateAllImageUrls()` | Rewrites legacy `/file/d/<id>/view` URLs to the embed form | Once after the v3 image-URL change |
+| `_migrateHistoricalImages()` | Rewrites every legacy Drive image URL (`Runners.Photo_*`, `Violations.ImageUrl`) to the thumbnail form | Once after deploying v6 (replaces the v3 `_migrateAllImageUrls` helper, which produced now-obsolete embed URLs) |
 | `_migrateViolationTypeColumn()` | Adds the `ViolationType` column and back-fills `WRONG_PERSON` | Once after deploying v5 |
 
 ### 6.7 Endpoints reference

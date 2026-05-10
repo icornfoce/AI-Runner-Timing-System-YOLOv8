@@ -1,14 +1,17 @@
 // ============================================================
-// AI Runner Timing System — Google Apps Script Backend (v5)
+// AI Runner Timing System — Google Apps Script Backend (v6)
 // ============================================================
 // Deploy: Extensions → Apps Script → Deploy → Web app
 //   Execute as: Me | Access: Anyone with the link
 //
-// FIRST-TIME SETUP (run from the editor's function dropdown):
-//   1) _setupAdminToken()                  — stores admin password
-//   2) _consolidateDuplicateRootFolders()  — merges duplicate Drive folders
-//   3) _migrateAllImageUrls()              — rewrites old viewer URLs
-// All three are idempotent — re-running is safe.
+// FIRST-TIME / MIGRATION SETUP (run from the editor's function dropdown):
+//   1) _setupAdminToken()                 — stores admin password
+//   2) _consolidateDuplicateRootFolders() — merges duplicate Drive folders
+//   3) _migrateHistoricalImages()         — rewrites every legacy Drive
+//                                           image URL (Photo_*, ImageUrl)
+//                                           to the thumbnail form
+//   4) _migrateViolationTypeColumn()      — adds ViolationType + backfill
+// All four are idempotent — re-running is safe.
 //
 // What's new in v4:
 //   • Read-through CacheService for getRunners/getResults/getViolations
@@ -27,6 +30,24 @@
 //     Drive trash isolated in try-catch. Cache is invalidated once.
 //   • _migrateViolationTypeColumn() helper backfills the new column on
 //     existing sheets (idempotent; safe to re-run).
+//
+// What's new in v6:
+//   • Single URL contract: every Drive image URL (Runners.Photo_* AND
+//     Violations.ImageUrl) is now written in the thumbnail form
+//     (drive.google.com/thumbnail?id=…&sz=w800). The embed form
+//     (uc?export=view) was retired because <img src> requests bounce
+//     to a Google login page under strict third-party cookie defaults.
+//     DRIVE_EMBED_URL is removed; only DRIVE_THUMBNAIL_URL remains.
+//   • Drive auto-organization: saveBase64Image now lands every upload
+//     in a YYYY-MM-DD subfolder under the existing parent
+//     (RunnerFaces/<name>/<date>/, ViolationEvidence/<date>/). The
+//     subfolder is created lazily on first save of the day via the
+//     LockService-protected getOrCreateFolder, so concurrent saves on
+//     the same day share one subfolder. Existing files are NOT
+//     relocated — only new uploads land in the date subfolder.
+//   • _migrateHistoricalImages() rewrites every URL on the spreadsheet
+//     to the thumbnail form. Replaces the v3 _migrateAllImageUrls
+//     helper, which produced (now-obsolete) embed URLs.
 // ============================================================
 
 // ─── CONSTANTS ──────────────────────────────────────────────
@@ -343,18 +364,17 @@ function readSheetAsJson(sheet) {
 }
 
 // ─── DRIVE HELPERS ──────────────────────────────────────────
-// Two URL shapes coexist on purpose:
-//   • DRIVE_EMBED_URL — used for runner-photo links (Photo_* and FolderUrl
-//     consumers); historical default that the v3 migration normalized to.
-//   • DRIVE_THUMBNAIL_URL — used for Violations.ImageUrl. The dashboard
-//     embeds violation evidence directly via <img src>; the embed form
-//     started returning broken images in browsers with strict third-party
-//     cookie defaults (image opens fine in a new tab but the cookie-less
-//     <img> request gets bounced to a login page). The thumbnail endpoint
-//     serves a public bitmap with no cookie dance.
-const DRIVE_EMBED_URL = function (id) {
-  return "https://drive.google.com/uc?export=view&id=" + id;
-};
+// Single URL contract (v6): every Drive image URL written by this
+// backend uses the thumbnail form. The embed form
+// (drive.google.com/uc?export=view&id=…) used to coexist for runner
+// photos but was retired because <img src> requests bounce to a Google
+// login page under strict third-party cookie defaults — the image
+// opens fine in a new tab, but the cookie-less embed request fails.
+// The thumbnail endpoint serves a public bitmap with no cookie dance,
+// so it works for both runner-photo and violation-evidence consumers.
+// extractDriveFileId still recognizes legacy embed and viewer URLs
+// (id= query and /file/d/ path), so cleanup paths and the historical
+// migration cope with rows written by older deploys.
 const DRIVE_THUMBNAIL_URL = function (id, size) {
   return "https://drive.google.com/thumbnail?id=" + id + "&sz=w" + (size || 800);
 };
@@ -389,6 +409,18 @@ function getRootFolder(name) {
   return getOrCreateFolder(DriveApp.getRootFolder(), name);
 }
 
+// "YYYY-MM-DD" in the script's timezone. Used as the date-subfolder
+// name so the Drive view stays browseable as the system accumulates
+// daily uploads (an event with hundreds of violations dropped into a
+// single root is impossible to scan visually).
+function getDateStringYMD(date) {
+  return Utilities.formatDate(
+    date || new Date(),
+    Session.getScriptTimeZone(),
+    "yyyy-MM-dd"
+  );
+}
+
 function saveBase64Image(folder, filename, base64Data) {
   if (!base64Data || typeof base64Data !== "string") {
     throw httpError("Image data missing", "bad_request");
@@ -402,10 +434,17 @@ function saveBase64Image(folder, filename, base64Data) {
   } catch (e) {
     throw httpError("Image data is not valid base64", "bad_request");
   }
+  // Date-organized landing folder (v6+). Files go to
+  // <folder>/<YYYY-MM-DD>/<filename>. getOrCreateFolder is
+  // LockService-protected, so concurrent saves on the same day share
+  // one subfolder rather than racing to create duplicates. Files
+  // saved before v6 stay in the parent folder — only new uploads land
+  // in the date subfolder.
+  const dateFolder = getOrCreateFolder(folder, getDateStringYMD());
   let file;
   try {
     const blob = Utilities.newBlob(decoded, "image/jpeg", filename);
-    file = folder.createFile(blob);
+    file = dateFolder.createFile(blob);
   } catch (e) {
     logErr("Drive createFile failed for " + filename, e);
     throw httpError("Failed to upload image: " + e.message, "drive_error");
@@ -415,8 +454,7 @@ function saveBase64Image(folder, filename, base64Data) {
   } catch (e) {
     logErr("setSharing failed for file " + filename, e);
   }
-  // Return the raw file ID; callers wrap with DRIVE_EMBED_URL or
-  // DRIVE_THUMBNAIL_URL depending on how the URL will be consumed.
+  // Return the raw file ID; callers wrap with DRIVE_THUMBNAIL_URL.
   return file.getId();
 }
 
@@ -560,7 +598,7 @@ function handleRegisterRunner(body) {
     const key = "photo_" + angle;
     if (body[key]) {
       const filename = name + "_" + angle + "_" + Date.now() + ".jpg";
-      photoUrls[angle] = DRIVE_EMBED_URL(saveBase64Image(personFolder, filename, body[key]));
+      photoUrls[angle] = DRIVE_THUMBNAIL_URL(saveBase64Image(personFolder, filename, body[key]), 800);
     }
   }
 
@@ -982,41 +1020,60 @@ function _mergeFolderInto(src, dst) {
 }
 
 /**
- * Rewrites old viewer-style URLs (.../file/d/ID/view) into embed URLs
- * across Violations.ImageUrl and Runners.Photo_* columns. Single
- * batched read + write per sheet. Invalidates caches at the end.
+ * Rewrites every Drive image URL on the spreadsheet to the thumbnail
+ * form (drive.google.com/thumbnail?id=…&sz=w800). Targets every URL
+ * column the app writes — Violations.ImageUrl and Runners.Photo_Front
+ * through Photo_Right. Single batched read + write per sheet;
+ * invalidates the matching cache.
+ *
+ * Idempotent on three axes:
+ *   • Rows already in the thumbnail form are skipped.
+ *   • Empty cells are skipped.
+ *   • Cells that contain something other than a Drive URL (no
+ *     extractable file ID) are left untouched and counted as skipped.
+ *
+ * Run once after deploying v6 from the editor's function dropdown.
+ * Without this run, runner photos and any pre-v6 violation rows keep
+ * their legacy URL form (uc?export=view&id=… or /file/d/<id>/view)
+ * and render broken in the dashboard under strict third-party cookie
+ * defaults. The Drive files themselves are not moved — only the URLs
+ * stored in the sheet change. Files keep their original locations
+ * (parent root for pre-v6 uploads, YYYY-MM-DD subfolder for v6+).
  */
-function _migrateAllImageUrls() {
+function _migrateHistoricalImages() {
   const targets = [
     { sheet: SHEETS.VIOLATIONS, cols: ["ImageUrl"], invalidate: invalidateViolations },
     { sheet: SHEETS.RUNNERS, cols: ["Photo_Front", "Photo_Top", "Photo_Bottom", "Photo_Left", "Photo_Right"], invalidate: invalidateRunners },
   ];
-  let total = 0;
+  let total = 0, skipped = 0, unparsed = 0;
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   for (let t = 0; t < targets.length; t++) {
     const target = targets[t];
     const sheet = ss.getSheetByName(target.sheet);
-    if (!sheet) continue;
+    if (!sheet) { Logger.log("[" + target.sheet + "] sheet not found, skipping"); continue; }
     try {
       const range = sheet.getDataRange();
       const data = range.getValues();
-      if (data.length <= 1) continue;
+      if (data.length <= 1) { Logger.log("[" + target.sheet + "] no data rows"); continue; }
       const headers = data[0];
       const colIdx = target.cols
         .map(function (c) { return headers.indexOf(c); })
         .filter(function (i) { return i >= 0; });
-      if (!colIdx.length) continue;
+      if (!colIdx.length) { Logger.log("[" + target.sheet + "] target columns missing"); continue; }
 
-      let changed = 0;
+      let changed = 0, alreadyOk = 0, noId = 0;
       for (let r = 1; r < data.length; r++) {
         for (let k = 0; k < colIdx.length; k++) {
           const c = colIdx[k];
           const url = String(data[r][c] || "");
-          if (!url || url.indexOf("uc?export=view") >= 0) continue;
-          const m = url.match(/[-\w]{25,}/);
-          if (m) {
-            data[r][c] = "https://drive.google.com/uc?export=view&id=" + m[0];
+          if (!url) continue;
+          if (url.indexOf("/thumbnail?id=") >= 0) { alreadyOk++; continue; }
+          const fileId = extractDriveFileId(url);
+          if (fileId) {
+            data[r][c] = DRIVE_THUMBNAIL_URL(fileId, 800);
             changed++;
+          } else {
+            noId++;
           }
         }
       }
@@ -1025,12 +1082,17 @@ function _migrateAllImageUrls() {
         target.invalidate();
         total += changed;
       }
-      Logger.log("[" + target.sheet + "] rewrote " + changed + " URL(s)");
+      skipped += alreadyOk;
+      unparsed += noId;
+      Logger.log("[" + target.sheet + "] rewrote " + changed +
+                 ", already thumbnail " + alreadyOk +
+                 ", unparseable " + noId);
     } catch (err) {
-      logErr("_migrateAllImageUrls[" + target.sheet + "]", err);
+      logErr("_migrateHistoricalImages[" + target.sheet + "]", err);
     }
   }
-  Logger.log("Total URLs migrated: " + total);
+  Logger.log("Total: rewrote " + total + ", already thumbnail " + skipped +
+             ", unparseable " + unparsed);
 }
 
 /**
