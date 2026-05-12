@@ -100,10 +100,26 @@ body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--txt);min-
 
 <script src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+<!-- Phase 1 scaffolding: alternate engine via ?engine=ort. Default stays face-api/Tesseract. -->
+<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/ort.min.js"></script>
+<script src="/static/js/ort-helpers.js"></script>
 <script>
 const API="https://script.google.com/macros/s/AKfycbyI4vNBRqjO5f00DN7VDCTaMKUoDqN2L10JHtQtM4tW5A-Uca_btGkOW1ei6OTBcf8g0g/exec";
 // Pinned to a release tag — `@master` would silently change at any time.
 const MODEL_URL="https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js@0.22.2/weights/";
+
+// ── ENGINE TOGGLE (Phase 1 scaffolding) ────────────────────────
+// Default = face-api.js + Tesseract.js (current production stack).
+// `?engine=ort` switches to onnxruntime-web (SCRFD + MobileFaceNet + PP-OCRv4).
+// See plan: C:\Users\ASUS\.claude\plans\mossy-coalescing-clover.md
+const ENGINE = (new URLSearchParams(location.search).get("engine") || "face-api").toLowerCase();
+const useOrt = ENGINE === "ort";
+const ORT_MODEL_URLS = {
+ scrfd:         "/static/models/det_500m.onnx",
+ mobilefacenet: "/static/models/w600k_mbf.onnx",
+ ocrRec:        "/static/models/ch_PP-OCRv4_rec_infer.onnx",
+ ocrDict:       "/static/models/ppocr_keys_v1.txt",
+};
 
 // ── DEBUG MODE ─────────────────────────────────────────────────
 // Append `?debug=1` to the URL to enable verbose OCR/vote console
@@ -130,6 +146,10 @@ const FACE_DETECTOR_SCORE_THRESHOLD = 0.5;
 // fewer false matches — appropriate at a checkpoint where misidentifying
 // a runner is more costly than missing them on one frame.
 const FACE_MATCH_DISTANCE = 0.45;
+// Cosine distance (1 - cosine_similarity) ∈ [0, 2]. Used only when
+// ENGINE === 'ort'. ArcFace/MobileFaceNet typical match ≈ 0.36; will be
+// re-tuned in field test per Guardrail 5.20.
+const FACE_MATCH_COS_THRESHOLD = 0.36;
 
 // ── BBOX SMOOTHING (EMA) ───────────────────────────────────────
 // Per-runner exponential moving average. α=0.35 → ~3-frame half-life.
@@ -203,6 +223,8 @@ let fpsCounter = 0, lastFpsTime = performance.now();
 let ocrBusy = false;
 let tesseractWorker = null;
 let ocrReady = false;
+let ortRegistry = null;          // { name → Float32Array(512) } when useOrt
+let ortOcrEngine = null;         // { recognize(canvas) } when useOrt
 let videoStream = null;
 let loopRunning = false;
 let rafId = null;
@@ -220,38 +242,59 @@ function setCP(id){
 // ── INIT ──
 async function init(){
  try{
-  // 1) Load models — TinyFaceDetector + landmarks + recognition.
-  // SSD MobileNet was the v5 default; TinyFaceDetector is ~5× faster
-  // and accurate enough at checkpoint distance.
+  // 1) Load models — face-api default, or SCRFD-500MF + MobileFaceNet (ENGINE=ort).
   markStep("step-models","loading");
-  await faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL);
-  await faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL);
-  await faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL);
+  if (useOrt) {
+   console.log("[checkpoint] ENGINE=ort — loading SCRFD + MobileFaceNet via onnxruntime-web");
+   await ortHelpers.loadFaceModels({
+    scrfdUrl: ORT_MODEL_URLS.scrfd,
+    mobilefacenetUrl: ORT_MODEL_URLS.mobilefacenet,
+    onProgress: (which) => console.log("[ort] loaded", which),
+   });
+  } else {
+   await faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL);
+   await faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL);
+   await faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL);
+  }
   markStep("step-models","done");
 
-  // 2) Load runners
+  // 2) Load runners. Embedding dim is 128 (face-api) or 512 (ort/MobileFaceNet).
   markStep("step-runners","loading");
   const res=await fetch(API+"?action=getRunners");
   const d=await res.json();
   const runners=d.data||[];
   document.getElementById("runner-count").textContent=runners.length;
 
+  const expectedDim = useOrt ? 512 : 128;
   const labeled=[];
+  ortRegistry = useOrt ? {} : null;
+  let loadedCount = 0;
   for(const r of runners){
    if(!r.Embeddings)continue;
    try{
     let emb=JSON.parse(r.Embeddings);
-    // Handle nested array [[...]] from multi-angle
+    // Handle nested array [[...]] from multi-angle (face-api legacy shape)
     if(Array.isArray(emb) && emb.length>0 && Array.isArray(emb[0])){
      emb=emb[0];
     }
-    if(!Array.isArray(emb)||emb.length!==128){console.warn('Bad embedding size for',r.Name,emb.length);continue}
+    if(!Array.isArray(emb)||emb.length!==expectedDim){
+     console.warn('Bad embedding size for',r.Name,emb.length,'expected',expectedDim);continue;
+    }
     const desc=new Float32Array(emb);
-    labeled.push(new faceapi.LabeledFaceDescriptors(r.Name,[desc]));
+    if (useOrt) {
+     ortRegistry[r.Name] = desc;        // assumed L2-normalized at registration
+    } else {
+     labeled.push(new faceapi.LabeledFaceDescriptors(r.Name,[desc]));
+    }
     runnerRegistry[r.Name]=String(r.BibNumber||"");
+    loadedCount++;
    }catch(e){console.warn("Bad embedding for",r.Name,e)}
   }
-  if(labeled.length>0)faceMatcher=new faceapi.FaceMatcher(labeled, FACE_MATCH_DISTANCE);
+  if (useOrt) {
+   console.log("[checkpoint] loaded", loadedCount, "runners with 512-D embeddings");
+  } else if (labeled.length>0) {
+   faceMatcher=new faceapi.FaceMatcher(labeled, FACE_MATCH_DISTANCE);
+  }
   markStep("step-runners","done");
 
   // 3) Camera — surface NotAllowedError specifically so the operator
@@ -279,18 +322,26 @@ async function init(){
   window.addEventListener("pagehide",stopCamera);
   markStep("step-camera","done");
 
-  // 4) Init Tesseract — Tesseract.js v5 runs the engine in its own
-  // Web Worker so recognize() is non-blocking from the main thread.
-  // Whitelist + PSM 7 (single text line) optimize for short numeric
-  // BIB strings.
+  // 4) Init OCR engine. ENGINE=face-api → Tesseract.js worker.
+  //    ENGINE=ort → PaddleOCR PP-OCRv4 rec via onnxruntime-web.
+  //    Both expose a Tesseract-shaped recognize(canvas) → {data:{text,confidence}}.
   try{
-   tesseractWorker=await Tesseract.createWorker("eng");
-   await tesseractWorker.setParameters({
-    tessedit_char_whitelist:'0123456789',
-    tessedit_pageseg_mode:'7'
-   });
-   ocrReady=true;
-  }catch(e){console.warn("Tesseract init failed, OCR disabled:",e);ocrReady=false;}
+   if (useOrt) {
+    ortOcrEngine = await ortHelpers.loadOcrModel({
+     recUrl: ORT_MODEL_URLS.ocrRec,
+     dictUrl: ORT_MODEL_URLS.ocrDict,
+     onProgress: (which) => console.log("[ort] loaded", which),
+    });
+    ocrReady=true;
+   } else {
+    tesseractWorker=await Tesseract.createWorker("eng");
+    await tesseractWorker.setParameters({
+     tessedit_char_whitelist:'0123456789',
+     tessedit_pageseg_mode:'7'
+    });
+    ocrReady=true;
+   }
+  }catch(e){console.warn("OCR init failed, OCR disabled:",e);ocrReady=false;}
 
   setStatus("ok","🟢 Connected");
   document.getElementById("init-screen").classList.add("hidden");
@@ -513,7 +564,7 @@ async function processLoop(){
  // allocation. inputSize=320 balances accuracy and speed; tighten to 224
  // for more FPS on weak hardware, loosen to 416 if small/distant faces
  // are missed.
- const detectorOptions = new faceapi.TinyFaceDetectorOptions({
+ const detectorOptions = useOrt ? null : new faceapi.TinyFaceDetectorOptions({
   inputSize: FACE_DETECTOR_INPUT_SIZE,
   scoreThreshold: FACE_DETECTOR_SCORE_THRESHOLD,
  });
@@ -530,12 +581,26 @@ async function processLoop(){
 
   ctx.clearRect(0,0,overlay.width,overlay.height);
 
-  if(!faceMatcher){rafId=requestAnimationFrame(frame);return}
+  const registryReady = useOrt
+   ? (ortRegistry && Object.keys(ortRegistry).length > 0)
+   : !!faceMatcher;
+  if(!registryReady){rafId=requestAnimationFrame(frame);return}
 
   try{
-   const detections = await faceapi.detectAllFaces(video, detectorOptions)
-    .withFaceLandmarks()
-    .withFaceDescriptors();
+   let detections;
+   if (useOrt) {
+    // Normalize ortHelpers shape to face-api shape so the rest of the loop
+    // (and runSmartOCR / overlays) is engine-agnostic.
+    const ortDets = await ortHelpers.detectAndEmbed(video);
+    detections = ortDets.map(d => ({
+     detection: { box: d.box, score: d.detection.score },
+     descriptor: d.descriptor,
+    }));
+   } else {
+    detections = await faceapi.detectAllFaces(video, detectorOptions)
+     .withFaceLandmarks()
+     .withFaceDescriptors();
+   }
 
    const currentNames=new Set();
    // Per-frame holder for the largest unknown face. Largest by area is the
@@ -544,11 +609,18 @@ async function processLoop(){
    let largestUnknownBox = null, largestUnknownArea = 0;
 
    for(const det of detections){
-    const match=faceMatcher.findBestMatch(det.descriptor);
+    let match;
+    if (useOrt) {
+     const r = ortHelpers.cosineNearest(det.descriptor, ortRegistry);
+     match = { label: (r.distance <= FACE_MATCH_COS_THRESHOLD) ? r.name : "unknown", distance: r.distance };
+    } else {
+     match = faceMatcher.findBestMatch(det.descriptor);
+    }
     const name=match.label;
     const dist=match.distance;
     const rawBox=det.detection.box;
-    const isKnown = name!=="unknown" && dist<=FACE_MATCH_DISTANCE;
+    const matchThreshold = useOrt ? FACE_MATCH_COS_THRESHOLD : FACE_MATCH_DISTANCE;
+    const isKnown = name!=="unknown" && dist<=matchThreshold;
 
     // EMA-smoothed box only for known runners. Unknowns share the same
     // identity bucket, so smoothing across multiple unknowns would smear
@@ -596,7 +668,8 @@ async function processLoop(){
     const color = isKnown ? "#38c172" : "#e53e3e";
     const drawColor = isMismatch ? "#e53e3e" : color;
     const bib = ocrBib || expectedBib || "N/A";
-    const pct = isKnown ? ((1-dist)*100).toFixed(0) : "0";
+    // L2 distance (face-api): pct = (1 - dist) * 100. Cosine distance (ort, ∈[0,2]): pct = (1 - dist/2) * 100.
+    const pct = isKnown ? (useOrt ? Math.max(0,(1-dist/2)*100) : (1-dist)*100).toFixed(0) : "0";
     const label = isKnown ? `${name} (${pct}%)` : "Unknown";
     const bibLabel = isKnown ? `BIB: ${bib}` : "";
 
@@ -707,7 +780,9 @@ async function processLoop(){
 // detection loop continues unblocked because tesseractWorker.recognize
 // is async and runs in its own Web Worker.
 async function runSmartOCR(video, box, name){
- if(ocrBusy || !ocrReady || !tesseractWorker) return;
+ if(ocrBusy || !ocrReady) return;
+ if(!useOrt && !tesseractWorker) return;
+ if(useOrt && !ortOcrEngine) return;
  ocrBusy=true;
  try{
   // Crop geometry shared with the OCR debug overlay in processLoop
@@ -723,7 +798,9 @@ async function runSmartOCR(video, box, name){
   // Adaptive threshold + 2× nearest-neighbor upscale on the crop. <1 ms.
   const processed=preprocessForOCR(cropCanvas);
 
-  const result=await tesseractWorker.recognize(processed);
+  const result = useOrt
+   ? await ortOcrEngine.recognize(processed)
+   : await tesseractWorker.recognize(processed);
   const rawText=String(result.data.text||"");
   const conf=Number(result.data.confidence||0);
 

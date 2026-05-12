@@ -389,6 +389,9 @@
 
 <!-- face-api.js -->
 <script src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
+<!-- Phase 1 scaffolding: alternate engine via ?engine=ort. Default stays face-api. -->
+<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/ort.min.js"></script>
+<script src="/static/js/ort-helpers.js"></script>
 
 <script>
 // ═══════════════════════════════════════════════════════
@@ -397,6 +400,19 @@
 const API_URL = "https://script.google.com/macros/s/AKfycbyI4vNBRqjO5f00DN7VDCTaMKUoDqN2L10JHtQtM4tW5A-Uca_btGkOW1ei6OTBcf8g0g/exec";
 // Pinned to a release tag — `@master` would silently change at any time.
 const MODEL_URL = "https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js@0.22.2/weights/";
+
+// ── ENGINE TOGGLE (Phase 1 scaffolding) ────────────────────────
+// Default = face-api.js (current production stack). `?engine=ort` switches
+// to onnxruntime-web (SCRFD-500MF + MobileFaceNet ArcFace) producing 512-D
+// L2-normalized embeddings instead of face-api's 128-D Euclidean descriptor.
+// See plan: C:\Users\ASUS\.claude\plans\mossy-coalescing-clover.md
+const ENGINE = (new URLSearchParams(location.search).get("engine") || "face-api").toLowerCase();
+const useOrt = ENGINE === "ort";
+const EMBEDDING_DIM = useOrt ? 512 : 128;
+const ORT_MODEL_URLS = {
+    scrfd:         "/static/models/det_500m.onnx",
+    mobilefacenet: "/static/models/w600k_mbf.onnx",
+};
 
 const ANGLES = [
     { id: "front",  label: "หน้าตรง",  icon: "😐" },
@@ -468,15 +484,24 @@ function stopCamera() {
 async function loadModels() {
     const statusEl = document.getElementById("model-status");
     try {
-        statusEl.textContent = "⏳ โหลด SSD MobileNet...";
-        await faceapi.nets.ssdMobilenetv1.loadFromUri(MODEL_URL);
-        statusEl.textContent = "⏳ โหลด Face Landmarks...";
-        await faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL);
-        statusEl.textContent = "⏳ โหลด Face Recognition...";
-        await faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL);
+        if (useOrt) {
+            statusEl.textContent = "⏳ โหลด SCRFD + MobileFaceNet (ENGINE=ort)...";
+            await ortHelpers.loadFaceModels({
+                scrfdUrl: ORT_MODEL_URLS.scrfd,
+                mobilefacenetUrl: ORT_MODEL_URLS.mobilefacenet,
+                onProgress: (which) => console.log("[ort] loaded", which),
+            });
+        } else {
+            statusEl.textContent = "⏳ โหลด SSD MobileNet...";
+            await faceapi.nets.ssdMobilenetv1.loadFromUri(MODEL_URL);
+            statusEl.textContent = "⏳ โหลด Face Landmarks...";
+            await faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL);
+            statusEl.textContent = "⏳ โหลด Face Recognition...";
+            await faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL);
+        }
         modelsLoaded = true;
         document.getElementById("btn-capture").disabled = false;
-        statusEl.textContent = "✅ โมเดล AI พร้อมใช้งาน";
+        statusEl.textContent = "✅ โมเดล AI พร้อมใช้งาน" + (useOrt ? " (ort)" : "");
         statusEl.className = "model-status ready";
         showToast("โมเดล AI โหลดสำเร็จ ✓", "success");
     } catch (e) {
@@ -517,10 +542,17 @@ async function capturePhoto() {
 
     const dataUrl = canvas.toDataURL("image/jpeg", 0.85);
 
-    // Detect face + extract descriptor (use canvas directly)
-    const detection = await faceapi.detectSingleFace(canvas)
-        .withFaceLandmarks()
-        .withFaceDescriptor();
+    // Detect face + extract descriptor. face-api → 128-D Euclidean.
+    // ort → SCRFD detect + MobileFaceNet ArcFace 512-D (L2-normalized).
+    let detection;
+    if (useOrt) {
+        const r = await ortHelpers.detectAndEmbedSingle(canvas);
+        detection = r ? { descriptor: r.descriptor } : null;
+    } else {
+        detection = await faceapi.detectSingleFace(canvas)
+            .withFaceLandmarks()
+            .withFaceDescriptor();
+    }
 
     if (!detection) {
         showToast("ไม่พบใบหน้า กรุณาลองใหม่", "error");
@@ -597,13 +629,21 @@ async function submitRegistration() {
     showLoading("กำลังอัปโหลดภาพและ Face Embedding...");
 
     try {
-        // Average the 5 descriptors so a single avg embedding represents the runner
+        // Average the 5 descriptors so a single avg embedding represents the runner.
+        // For ENGINE=ort (512-D ArcFace), re-normalize after averaging — averaging
+        // unit vectors breaks unit length, and cosine match assumes unit length.
         const descriptors = ANGLES.map(a => capturedData[a.id].descriptor);
-        const avgDescriptor = new Array(128).fill(0);
+        const avgDescriptor = new Array(EMBEDDING_DIM).fill(0);
         for (const d of descriptors) {
-            for (let i = 0; i < 128; i++) avgDescriptor[i] += d[i];
+            for (let i = 0; i < EMBEDDING_DIM; i++) avgDescriptor[i] += d[i];
         }
-        for (let i = 0; i < 128; i++) avgDescriptor[i] /= descriptors.length;
+        for (let i = 0; i < EMBEDDING_DIM; i++) avgDescriptor[i] /= descriptors.length;
+        if (useOrt) {
+            let s = 0;
+            for (let i = 0; i < EMBEDDING_DIM; i++) s += avgDescriptor[i] * avgDescriptor[i];
+            const n = Math.sqrt(s) || 1.0;
+            for (let i = 0; i < EMBEDDING_DIM; i++) avgDescriptor[i] /= n;
+        }
 
         // Single atomic POST — photos + embeddings together so we can't
         // end up with a runner row that has no embeddings.

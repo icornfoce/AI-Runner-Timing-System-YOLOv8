@@ -9,14 +9,18 @@
 > cadence, caching, or guardrails MUST update this file in the same change
 > set.
 >
-> **Last updated:** 2026-05-10 — Backend bumped to **v6**: every Drive
-> image URL (Runners.Photo_* AND Violations.ImageUrl) now writes the
-> thumbnail form (`thumbnail?id=…&sz=w800`); the embed form
-> (`uc?export=view`) is retired. New uploads land in a `YYYY-MM-DD`
-> subfolder under their parent (`RunnerFaces/<name>/<date>/`,
-> `ViolationEvidence/<date>/`) so Drive stays browseable. New
-> `_migrateHistoricalImages()` rewrites every legacy URL to the
-> thumbnail form and replaces the v3 `_migrateAllImageUrls` helper.
+> **Last updated:** 2026-05-12 — Phase 1 scaffolding for the AI-engine swap
+> (face-api.js → SCRFD-500MF + MobileFaceNet ArcFace; Tesseract.js →
+> PaddleOCR PP-OCRv4 mobile rec) is now in place behind a `?engine=ort`
+> feature flag. New `static/` tree (`static/js/ort-helpers.js`,
+> `static/models/det_500m.onnx`, `w600k_mbf.onnx`, `ch_PP-OCRv4_rec_infer.onnx`,
+> `ppocr_keys_v1.txt`) is served via Flask's default `/static/` route.
+> **Default engine remains face-api/Tesseract** — no production behavior
+> change, no embedding-dimension migration, no Guardrail amendments yet.
+> Plan file: `C:\Users\ASUS\.claude\plans\mossy-coalescing-clover.md`.
+> Previous (2026-05-10): Backend bumped to **v6** — every Drive image
+> URL writes thumbnail form (`thumbnail?id=…&sz=w800`), uploads land in
+> a `YYYY-MM-DD` subfolder, `_migrateHistoricalImages()` rewrites legacy URLs.
 
 ---
 
@@ -642,6 +646,111 @@ explicit, justified, and accompanied by an update to this file.
   shape changed; the dashboard simply receives URLs that all render.
 
 ### 6.2 Recent changes
+
+#### 2026-05-12 — Phase 1: ONNX Runtime Web stack scaffolded behind `?engine=ort`
+
+Background: face-api.js TinyFaceDetector scores ~0.50 AP on WIDER Face
+*hard* (the regime that mirrors a race checkpoint), and FaceRecognitionNet
+is brittle under sunglasses/hats/masks. Tesseract.js struggles with motion-
+blurred bibs at race pace. Approved plan
+(`C:\Users\ASUS\.claude\plans\mossy-coalescing-clover.md`): swap to
+SCRFD-500MF + MobileFaceNet (ArcFace, WebFace600K) + PaddleOCR PP-OCRv4
+mobile rec, all via onnxruntime-web. User-decided constraints:
+**browser-only** (Guardrail 16 stays) and **big-bang re-registration**
+(512-D embeddings, no parallel-write transition).
+
+**Phase 1 = scaffolding only.** No production cutover yet. No Guardrails
+amended. The current production stack (face-api + Tesseract, 128-D
+embeddings) is untouched at default. Cutover will land in a later commit
+and update §4.2, §5.6, §5.18–§5.26, §6.8 in one shot.
+
+**What landed in this commit:**
+
+- **`static/js/ort-helpers.js`** — UMD-style module on `window.ortHelpers`
+  exposing `loadFaceModels`, `loadOcrModel`, `detectAndEmbed`,
+  `detectAndEmbedSingle`, `cosineNearest`, `recognizeOcrCrop`,
+  `affineWarp112`, `embedFace`, `l2normalize`. Mirrors the face-api +
+  Tesseract API shapes so call sites in `checkpoint.html` /
+  `register.html` change minimally. SCRFD output decoder is generic
+  (groups outputs by last-dim 1/4/10 = scores/bboxes/kps), so the same
+  code works against any standard SCRFD-with-keypoints export. Affine
+  warp uses a complex-number similarity-transform fit (no SVD)
+  equivalent to InsightFace's `skimage.SimilarityTransform`. CTC decode
+  in `ctcDecode` is greedy with repeat-collapse and blank removal.
+
+- **`static/models/`** — four assets totaling ~27 MB cold-load (vs the
+  plan's ~14.5 MB estimate; difference is real MobileFaceNet ONNX size
+  ~13.6 MB instead of the 5 MB estimate, which is the production
+  InsightFace `buffalo_sc/w600k_mbf.onnx`). All single files under the
+  50 MB / file budget.
+  - `det_500m.onnx` — SCRFD-500MF with 5-point keypoints (2.5 MB,
+    InsightFace MIT, sourced from `WePrompt/buffalo_sc`)
+  - `w600k_mbf.onnx` — MobileFaceNet ArcFace WebFace600K, 512-D output
+    (13.6 MB, InsightFace MIT, same source bundle)
+  - `ch_PP-OCRv4_rec_infer.onnx` — PaddleOCR PP-OCRv4 Chinese mobile
+    rec, dict-included for digits via post-filter (10.9 MB, Apache-2.0,
+    sourced from `SWHL/RapidOCR`)
+  - `ppocr_keys_v1.txt` — 6623-line PaddleOCR character dictionary
+    (raw from `PaddlePaddle/PaddleOCR` main branch)
+
+- **`templates/checkpoint.html`** — new `?engine=ort` query-param flag
+  parses to `useOrt` constant. `init()` branches between face-api and
+  ortHelpers for both face models and OCR. Embedding parser validates
+  dim 128 vs 512 based on engine. Frame loop normalizes ortHelpers
+  output to face-api shape so EMA, consensus, cooldown, and overlay
+  paths are unchanged. New constant `FACE_MATCH_COS_THRESHOLD = 0.36`
+  for cosine distance (face-api L2 threshold 0.45 untouched).
+  Confidence percentage formula adapts: `(1-dist)*100` for L2,
+  `(1-dist/2)*100` for cosine. `runSmartOCR` recognize() call routes
+  to ortOcrEngine when the flag is on.
+
+- **`templates/register.html`** — same `?engine=ort` flag.
+  `loadModels()` branches. `capturePhoto()` uses
+  `ortHelpers.detectAndEmbedSingle` when `useOrt`. The 5-angle averaging
+  loop now uses `EMBEDDING_DIM` (128 or 512) and re-normalizes
+  to unit length when `useOrt` (averaging unit vectors breaks
+  normalization; cosine match assumes unit length).
+
+**Backend untouched.** No `Code.gs` change. The `registerRunner`
+endpoint accepts whatever embedding length the client posts; a 512-D
+embedding submitted with `?engine=ort` will land alongside legacy 128-D
+rows in the same `Embeddings` column. Reading 512-D back with the
+default engine (which expects 128-D) will be skipped with a `console.warn`
+in `checkpoint.html` — so until cutover, do NOT register runners with
+`?engine=ort` against the production sheet, or do so on a throwaway
+sheet for testing.
+
+**How to test side-by-side:**
+
+1. From the repo root: `python web_app.py` (Flask dev server on :5000).
+2. Default engine: open `http://localhost:5000/checkpoint` — face-api
+   path, identical to before.
+3. New engine: open `http://localhost:5000/checkpoint?engine=ort&debug=1`
+   — DevTools Network panel should show four downloads from `/static/`
+   (~27 MB total), Console should print `[ort] loaded detector`,
+   `[ort] loaded recognizer`, `[ort] loaded ocr-rec`, `[ort] loaded
+   ocr-dict`. Existing 128-D runner rows will be skipped with a
+   `console.warn` (expected — they don't match 512-D).
+4. To produce a 512-D row for testing:
+   `http://localhost:5000/register?engine=ort` — capture the 5 angles,
+   submit. Then reload checkpoint.html with `?engine=ort` and verify
+   the new runner is recognized via cosine distance.
+
+**Known limitations of Phase 1:**
+
+- WASM threads require COOP/COEP headers (Cross-Origin-Embedder-Policy
+  + Cross-Origin-Opener-Policy). Flask's default dev server does NOT
+  set these, so onnxruntime-web falls back to single-thread WASM+SIMD.
+  Acceptable for Phase 1; production hosting (or a Flask middleware)
+  can enable threads later for a measurable speedup.
+- PP-OCRv4 character class count assumed = 6625 (1 blank + 6623 dict + 1
+  space). If the rec model output channel count differs, `ctcDecode`
+  warns once and continues — chars may be off-by-one. Verify in
+  `?engine=ort&debug=1` console on the first OCR fire.
+- SCRFD output names are export-dependent; decoder groups by tensor
+  shape rather than name, so any standard with-keypoints SCRFD export
+  (3 strides × {scores N×1, bboxes N×4, kps N×10}) works. Will warn if
+  it doesn't see exactly that pattern.
 
 #### 2026-05-10 — v6: Single thumbnail URL contract + dated subfolders
 
