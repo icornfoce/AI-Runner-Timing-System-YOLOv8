@@ -1,0 +1,864 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Drive Photo Scanner | RunnerTrack AI</title>
+<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>
+:root{--pri:#1D9E75;--pri-g:rgba(29,158,117,.35);--bg:#0b0f14;--sf:#141a22;--card:rgba(22,30,40,.85);--bdr:rgba(255,255,255,.08);--txt:#f0f2f5;--mut:#7a8594;--red:#e53e3e;--grn:#38c172;--yel:#f0b429}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--txt);min-height:100vh;overflow:hidden}
+.bar{background:rgba(11,15,20,.95);backdrop-filter:blur(18px);border-bottom:1px solid var(--bdr);padding:.7rem 1.5rem;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:50}
+.bar-l{display:flex;align-items:center;gap:1rem;flex-wrap:wrap}
+.bar h1{font-family:'Bebas Neue',sans-serif;font-size:1.4rem;letter-spacing:2px;background:linear-gradient(135deg,var(--pri),#2dd4a8);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.cp-sel{display:flex;gap:0;flex-wrap:wrap}
+.cp-btn{padding:.4rem .7rem;font-family:'Bebas Neue',sans-serif;font-size:.85rem;letter-spacing:1px;cursor:pointer;border:1px solid var(--bdr);background:rgba(255,255,255,.03);color:var(--mut);transition:all .2s}
+.cp-btn:first-child{border-radius:8px 0 0 8px}.cp-btn:last-child{border-radius:0 8px 8px 0}
+.cp-btn.on{background:rgba(29,158,117,.2);border-color:var(--pri);color:var(--pri)}
+.cp-btn[disabled]{opacity:.4;cursor:not-allowed}
+.bar-r{display:flex;align-items:center;gap:1rem}
+.status{display:flex;align-items:center;gap:.4rem;font-size:.8rem}
+.status.ok{color:#4ade80}.status.err{color:var(--red)}.status.warn{color:var(--yel)}
+.dot{width:7px;height:7px;border-radius:50%;animation:pulse 2s infinite}
+.dot.ok{background:#22c55e}.dot.err{background:var(--red)}.dot.warn{background:var(--yel)}
+.nav-link{color:var(--mut);text-decoration:none;font-size:.8rem}.nav-link:hover{color:var(--pri)}
+/* MAIN */
+.main{display:flex;height:calc(100vh - 52px)}
+.work{flex:1;display:flex;flex-direction:column;background:#000;position:relative;overflow:hidden}
+.preview-wrap{flex:1;position:relative;display:flex;align-items:center;justify-content:center;overflow:hidden;background:#000}
+#preview-canvas{max-width:100%;max-height:100%;display:block;background:#0b0f14}
+.preview-empty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--mut);font-size:.9rem;text-align:center;padding:2rem;pointer-events:none}
+.preview-empty.hidden{display:none}
+.control-panel{background:var(--sf);border-top:1px solid var(--bdr);padding:1rem 1.5rem;display:flex;flex-direction:column;gap:.7rem}
+.input-row{display:flex;gap:.6rem;align-items:center;flex-wrap:wrap}
+.input-row label{font-size:.85rem;color:var(--mut);min-width:120px}
+.input-row input[type=text]{flex:1;min-width:280px;background:rgba(255,255,255,.04);border:1px solid var(--bdr);color:var(--txt);padding:.55rem .8rem;border-radius:8px;font-family:'JetBrains Mono',monospace;font-size:.85rem}
+.input-row input[type=text]:focus{outline:none;border-color:var(--pri)}
+.input-row input[type=text]:disabled{opacity:.55;cursor:not-allowed}
+.btn{padding:.55rem 1.1rem;border-radius:8px;font-family:'Bebas Neue',sans-serif;font-size:.9rem;letter-spacing:1.5px;border:1px solid var(--bdr);background:rgba(255,255,255,.04);color:var(--txt);cursor:pointer;transition:all .2s}
+.btn.primary{background:linear-gradient(135deg,var(--pri),#2dd4a8);border-color:var(--pri);color:#0b0f14}
+.btn.primary:hover:not([disabled]){filter:brightness(1.1)}
+.btn.danger{border-color:var(--red);color:var(--red)}
+.btn.danger:hover:not([disabled]){background:rgba(229,62,62,.1)}
+.btn[disabled]{opacity:.45;cursor:not-allowed}
+.progress-row{display:flex;align-items:center;gap:.8rem;font-family:'JetBrains Mono',monospace;font-size:.8rem;color:var(--mut)}
+.progress-bar{flex:1;height:8px;background:rgba(255,255,255,.05);border-radius:4px;overflow:hidden;border:1px solid var(--bdr)}
+.progress-fill{height:100%;background:linear-gradient(90deg,var(--pri),#2dd4a8);width:0;transition:width .25s ease}
+.progress-fill.error{background:linear-gradient(90deg,#e53e3e,#f56565)}
+.current-name{flex:0 0 auto;max-width:42%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--txt)}
+.note{font-size:.72rem;color:var(--mut);line-height:1.45}
+/* SIDEBAR */
+.sidebar{width:320px;background:var(--sf);border-left:1px solid var(--bdr);display:flex;flex-direction:column;overflow:hidden}
+.sb-h{padding:1rem;font-family:'Bebas Neue',sans-serif;font-size:1.1rem;letter-spacing:1px;border-bottom:1px solid var(--bdr);color:var(--pri);display:flex;justify-content:space-between;align-items:center}
+.sb-count{font-family:'JetBrains Mono',monospace;font-size:.75rem;color:var(--mut)}
+.sb-list{flex:1;overflow-y:auto;padding:.5rem}
+.sb-item{padding:.7rem .8rem;border-radius:10px;margin-bottom:.4rem;background:rgba(255,255,255,.03);border:1px solid var(--bdr);animation:slideIn .3s ease}
+.sb-item.violation{border-color:var(--red);background:rgba(229,62,62,.06)}
+.sb-item.dup{border-color:rgba(122,133,148,.4);opacity:.62}
+.sb-item.skip{border-color:rgba(240,180,41,.45);background:rgba(240,180,41,.05)}
+.sb-name{font-weight:600;font-size:.9rem}
+.sb-name.viol{color:var(--red)}
+.sb-info{font-family:'JetBrains Mono',monospace;font-size:.75rem;color:var(--mut);margin-top:.2rem;word-break:break-word}
+.sb-stats{padding:.8rem 1rem;border-top:1px solid var(--bdr);font-size:.78rem;color:var(--mut);display:grid;grid-template-columns:1fr 1fr;gap:.3rem .8rem}
+.sb-stats strong{color:var(--txt);font-family:'JetBrains Mono',monospace}
+/* INIT SCREEN */
+.init-screen{position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:200;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:1rem}
+.init-screen.hidden{display:none}
+.spinner{width:48px;height:48px;border:4px solid rgba(255,255,255,.1);border-top-color:var(--pri);border-radius:50%;animation:spin 1s linear infinite}
+.init-text{color:var(--mut);font-size:.9rem}
+.init-steps{list-style:none;text-align:left;margin-top:.5rem}
+.init-steps li{padding:.3rem 0;font-size:.82rem;color:var(--mut)}
+.init-steps li.done{color:var(--grn)}
+.init-steps li.loading{color:var(--pri)}
+.init-steps li.err{color:var(--red)}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes pulse{0%,100%{transform:scale(.95);opacity:.7}70%{transform:scale(1.1);opacity:1}}
+@keyframes slideIn{from{opacity:0;transform:translateX(10px)}to{opacity:1;transform:translateX(0)}}
+@media(max-width:900px){.sidebar{display:none}.bar{flex-wrap:wrap;gap:.5rem}}
+</style>
+</head>
+<body>
+<div class="bar">
+ <div class="bar-l">
+  <h1>🖼️ DRIVE SCANNER</h1>
+  <div class="cp-sel">
+   <button class="cp-btn on" id="cp-start-btn" onclick="setCP('start')">🟢 START</button>
+   <button class="cp-btn" id="cp-1-btn" onclick="setCP(1)">CP1</button>
+   <button class="cp-btn" id="cp-2-btn" onclick="setCP(2)">CP2</button>
+   <button class="cp-btn" id="cp-3-btn" onclick="setCP(3)">CP3</button>
+   <button class="cp-btn" id="cp-4-btn" onclick="setCP(4)">CP4</button>
+   <button class="cp-btn" id="cp-finish-btn" onclick="setCP('finish')">🏁 FINISH</button>
+  </div>
+ </div>
+ <div class="bar-r">
+  <div class="status" id="conn-status"><div class="dot"></div><span>Initializing</span></div>
+  <a href="/" class="nav-link">📺 Dashboard</a>
+  <a href="/register" class="nav-link">📋 Register</a>
+ </div>
+</div>
+
+<div class="main">
+ <div class="work">
+  <div class="preview-wrap">
+   <canvas id="preview-canvas"></canvas>
+   <div class="preview-empty" id="preview-empty">
+    Enter a Google Drive folder ID below, choose the checkpoint, then press <strong>Start Scanning</strong>.<br>
+    <span class="note">The folder must be shared with the script's Google account (or "Anyone with the link"). Only image files are processed.</span>
+   </div>
+  </div>
+  <div class="control-panel">
+   <div class="input-row">
+    <label for="folder-id">📁 Drive Folder ID:</label>
+    <input type="text" id="folder-id" placeholder="e.g. 1aB2cDeFgHiJkLmNoPqRsTuVwXyZ0123456" autocomplete="off">
+    <button class="btn primary" id="start-btn" onclick="startScan()">▶ Start Scanning</button>
+    <button class="btn danger" id="stop-btn" onclick="stopScan()" disabled>■ Stop</button>
+   </div>
+   <div class="progress-row">
+    <span id="progress-text">Idle</span>
+    <div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
+    <span class="current-name" id="current-name"></span>
+   </div>
+   <div class="note">
+    Timestamps are recorded at scan time (not the photo's capture time). Run one folder per checkpoint.
+    Duplicate detections within this session are suppressed automatically.
+   </div>
+  </div>
+ </div>
+ <div class="sidebar">
+  <div class="sb-h">📋 SCAN LOG <span class="sb-count" id="sb-count">0</span></div>
+  <div class="sb-list" id="sb-list"></div>
+  <div class="sb-stats">
+   <div>Runners loaded: <strong id="runner-count">0</strong></div>
+   <div>Photos: <strong id="stat-photos">0</strong></div>
+   <div>Recorded: <strong id="stat-records">0</strong></div>
+   <div>Violations: <strong id="stat-violations">0</strong></div>
+   <div>Skipped: <strong id="stat-skipped">0</strong></div>
+   <div>Errors: <strong id="stat-errors">0</strong></div>
+  </div>
+ </div>
+</div>
+
+<!-- INIT SCREEN -->
+<div class="init-screen" id="init-screen">
+ <div class="spinner"></div>
+ <div class="init-text">กำลังเตรียมระบบ...</div>
+ <ul class="init-steps" id="init-steps">
+  <li id="step-models">⏳ โหลดโมเดล AI (SSD MobileNet)...</li>
+  <li id="step-runners">⏳ โหลดข้อมูลนักวิ่ง...</li>
+  <li id="step-ocr">⏳ เปิด Tesseract OCR...</li>
+ </ul>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+<script>
+// ── ENDPOINTS / CDN ─────────────────────────────────────────
+// Same API + model URL as checkpoint.html — keep them in sync if either
+// is ever rotated. CDN tags pinned (Guardrail 8: @master silently broke
+// face matching once already).
+const API="https://script.google.com/macros/s/AKfycbyI4vNBRqjO5f00DN7VDCTaMKUoDqN2L10JHtQtM4tW5A-Uca_btGkOW1ei6OTBcf8g0g/exec";
+const MODEL_URL="https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js@0.22.2/weights/";
+
+// ── DEBUG MODE ──────────────────────────────────────────────
+// `?debug=1` enables verbose console logs for each photo / face / OCR.
+const DEBUG = new URLSearchParams(location.search).get("debug") === "1";
+
+// ── FACE DETECTION ──────────────────────────────────────────
+// SSD MobileNet — slower than TinyFaceDetector but produces tighter,
+// higher-recall boxes on high-resolution static photos (typical event
+// shots are 4K). The scanner doesn't need 30 FPS, so the accuracy
+// trade-off swings in SSD's favor (Task 3).
+const SSD_MIN_CONFIDENCE = 0.5;
+// Same threshold as checkpoint.html — tighter than face-api's 0.5
+// default. False matches are more costly than missed ones because a
+// false match writes a wrong runner's row.
+const FACE_MATCH_DISTANCE = 0.45;
+
+// ── OCR PIPELINE ────────────────────────────────────────────
+// Single read per face — no multi-frame majority vote (Task 3). The
+// validation gate is still applied per read, so an obviously garbage
+// OCR string is silently dropped (no NO_BIB/OBSCURED_BIB triggers in
+// the scanner — those require the consecutive-failure counter the
+// live checkpoint loop maintains).
+const ADAPTIVE_THRESHOLD_BLOCK = 15;        // odd; 11–19 typical
+const ADAPTIVE_THRESHOLD_C = 10;
+const OCR_UPSCALE = 2;                      // nearest-neighbor
+// Static high-res photos give Tesseract a clean target; we keep the
+// nominal thresholds instead of the checkpoint.html field-test values.
+const OCR_MIN_CONFIDENCE = 60;
+const BIB_MIN_LEN = 1;
+const BIB_MAX_LEN = 6;
+
+// ── MULTIPLE_BIBS DETECTION (carried over from checkpoint.html) ──
+// RAW Tesseract text is checked BEFORE digit-only normalization, per
+// Guardrail 26 — once normalized, whitespace separating distinct BIB
+// blocks is gone and the regex matches a single concatenated number.
+const MULTIPLE_BIBS_MIN_BLOCK_LEN = 2;
+const MULTIPLE_BIBS_MIN_BLOCKS = 2;
+
+// ── CHECKPOINT BUTTONS ──────────────────────────────────────
+const CP_BUTTONS = ['start', 1, 2, 3, 4, 'finish'];
+
+// ── STATE ───────────────────────────────────────────────────
+let checkpointId = 'start';
+let faceMatcher = null;
+let runnerRegistry = {};                    // name → bib
+let tesseractWorker = null;
+let ocrReady = false;
+let scanning = false;
+let abortScan = false;
+
+// Per-session dedup (Task 4). A burst of photos from the same camera
+// would otherwise log the same runner / violation multiple times. The
+// keys are session-scoped — reloading the page clears them.
+let seenRecords = {};                       // "name:cpId" → true
+let seenViolations = {};                    // "name:cpId:type" → true
+let seenUnknownsPerPhoto = {};              // "fileId:unknown" → true (cap UNREGISTERED at 1 per photo)
+
+// Stats counters — updated live on the right panel.
+const stats = { photos: 0, records: 0, violations: 0, skipped: 0, errors: 0 };
+
+// ── CP SELECTOR ─────────────────────────────────────────────
+function setCP(id){
+ if (scanning) return;                      // can't change CP mid-batch — would split records across CPs
+ checkpointId = id;
+ CP_BUTTONS.forEach(b => {
+  const el = document.getElementById('cp-' + b + '-btn');
+  if (el) el.classList.toggle('on', b === id);
+ });
+}
+
+// ── INIT ────────────────────────────────────────────────────
+async function init(){
+ try {
+  // 1) Load models — SSD MobileNet + landmarks + recognition. SSD's
+  // weight file is ~5MB (vs 200KB for Tiny) but only loaded once per
+  // session, so the latency is acceptable.
+  markStep("step-models", "loading");
+  await faceapi.nets.ssdMobilenetv1.loadFromUri(MODEL_URL);
+  await faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL);
+  await faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL);
+  markStep("step-models", "done");
+
+  // 2) Load runners — identical embedding shape contract as
+  // checkpoint.html (128 floats, optional nested-array fallback per
+  // Guardrail 6).
+  markStep("step-runners", "loading");
+  const res = await fetch(API + "?action=getRunners");
+  const d = await res.json();
+  const runners = d.data || [];
+  document.getElementById("runner-count").textContent = runners.length;
+
+  const labeled = [];
+  for (const r of runners){
+   if (!r.Embeddings) continue;
+   try {
+    let emb = JSON.parse(r.Embeddings);
+    if (Array.isArray(emb) && emb.length > 0 && Array.isArray(emb[0])) emb = emb[0];
+    if (!Array.isArray(emb) || emb.length !== 128){
+     console.warn('Bad embedding size for', r.Name, emb.length);
+     continue;
+    }
+    const desc = new Float32Array(emb);
+    labeled.push(new faceapi.LabeledFaceDescriptors(r.Name, [desc]));
+    runnerRegistry[r.Name] = String(r.BibNumber || "");
+   } catch (e){ console.warn("Bad embedding for", r.Name, e); }
+  }
+  if (labeled.length > 0) faceMatcher = new faceapi.FaceMatcher(labeled, FACE_MATCH_DISTANCE);
+  markStep("step-runners", "done");
+
+  // 3) Init Tesseract — identical worker config to checkpoint.html
+  // (digits-only whitelist + PSM 7) per Guardrail 20. Don't change
+  // these without re-deriving the validation thresholds.
+  markStep("step-ocr", "loading");
+  try {
+   tesseractWorker = await Tesseract.createWorker("eng");
+   await tesseractWorker.setParameters({
+    tessedit_char_whitelist: '0123456789',
+    tessedit_pageseg_mode: '7'
+   });
+   ocrReady = true;
+   markStep("step-ocr", "done");
+  } catch (e){
+   console.warn("Tesseract init failed, OCR disabled:", e);
+   ocrReady = false;
+   markStep("step-ocr", "err");
+  }
+
+  setStatus("ok", "🟢 Ready");
+  document.getElementById("init-screen").classList.add("hidden");
+ } catch (e){
+  setStatus("err", "❌ " + (e && e.message || e));
+  console.error("init failed:", e);
+ }
+}
+
+function markStep(id, state){
+ const el = document.getElementById(id);
+ if (!el) return;
+ el.className = state;
+ const prefix = state === "done" ? "✅ " : state === "loading" ? "🔄 " : state === "err" ? "❌ " : "⏳ ";
+ el.textContent = prefix + el.textContent.slice(2);
+}
+function setStatus(type, text){
+ const el = document.getElementById("conn-status");
+ el.className = "status " + type;
+ // esc() — type and text both go into innerHTML (Guardrail 7).
+ el.innerHTML = `<div class="dot ${esc(type)}"></div><span>${esc(text)}</span>`;
+}
+
+// ── SCAN ORCHESTRATION ──────────────────────────────────────
+async function startScan(){
+ if (scanning) return;
+ const folderIdInput = document.getElementById("folder-id");
+ const folderId = folderIdInput.value.trim();
+ if (!folderId){
+  setStatus("err", "❌ Please enter a Drive folder ID");
+  return;
+ }
+ if (!faceMatcher){
+  setStatus("err", "❌ No registered runners — register at least one first");
+  return;
+ }
+ if (!ocrReady){
+  setStatus("warn", "⚠️ OCR unavailable; BIB validation will be skipped");
+ }
+
+ scanning = true;
+ abortScan = false;
+ setScanUI(true);
+ setStatus("ok", "🟢 Scanning…");
+
+ // Reset stats / dedup for a fresh batch. Records/violations from the
+ // PREVIOUS batch stay in the log so the operator can review them, but
+ // their dedup keys are cleared so a re-scan of the same folder
+ // re-records everything (rare but useful for recovery).
+ stats.photos = stats.records = stats.violations = stats.skipped = stats.errors = 0;
+ seenRecords = {};
+ seenViolations = {};
+ seenUnknownsPerPhoto = {};
+ refreshStats();
+ setProgress(0, 0, "");
+
+ let photos = [];
+ try {
+  const url = API + "?action=getDrivePhotos&folderId=" + encodeURIComponent(folderId);
+  const res = await fetch(url);
+  const data = await res.json();
+  if (!data || data.status !== "success"){
+   throw new Error((data && data.message) || "Failed to list folder");
+  }
+  photos = data.data || [];
+  if (DEBUG) console.log("[debug] getDrivePhotos", { count: photos.length, folderName: data.folderName });
+  if (photos.length === 0){
+   setStatus("warn", "⚠️ No images found in folder");
+   logSkip("(folder)", "No image files found");
+   finishScan("done");
+   return;
+  }
+  addLog("info", "Folder scan started", `${data.folderName || "Drive folder"} — ${photos.length} image(s)`);
+ } catch (e){
+  setStatus("err", "❌ " + (e.message || "Folder fetch failed"));
+  stats.errors++;
+  refreshStats();
+  finishScan("error");
+  return;
+ }
+
+ document.getElementById("preview-empty").classList.add("hidden");
+
+ // Sequential processing — keeps memory bounded (one image decoded at
+ // a time) and the operator can see the current image rendering. Each
+ // photo runs end-to-end (fetch bytes → detect → OCR per face → POST
+ // records/violations) before the next starts.
+ for (let i = 0; i < photos.length; i++){
+  if (abortScan) break;
+  const p = photos[i];
+  setProgress(i, photos.length, p.name);
+  try {
+   await processPhoto(p);
+  } catch (e){
+   console.warn("processPhoto failed for", p.name, e);
+   stats.errors++;
+   logSkip(p.name, "Error: " + (e.message || e));
+  }
+  stats.photos++;
+  refreshStats();
+ }
+
+ setProgress(photos.length, photos.length, "");
+ finishScan(abortScan ? "aborted" : "done");
+}
+
+function stopScan(){
+ if (!scanning) return;
+ abortScan = true;
+ setStatus("warn", "⚠️ Stopping…");
+}
+
+function finishScan(reason){
+ scanning = false;
+ abortScan = false;
+ setScanUI(false);
+ const msg = reason === "aborted" ? "⚠️ Stopped"
+           : reason === "error"   ? "❌ Scan failed"
+           : "✅ Done";
+ setStatus(reason === "done" ? "ok" : reason === "error" ? "err" : "warn", msg);
+ addLog("info", "Scan finished", `${stats.photos} photos · ${stats.records} records · ${stats.violations} violations · ${stats.skipped} skipped · ${stats.errors} errors`);
+}
+
+function setScanUI(active){
+ document.getElementById("start-btn").disabled = active;
+ document.getElementById("stop-btn").disabled = !active;
+ document.getElementById("folder-id").disabled = active;
+ CP_BUTTONS.forEach(b => {
+  const el = document.getElementById('cp-' + b + '-btn');
+  if (el) el.disabled = active;
+ });
+}
+
+function setProgress(done, total, name){
+ const fill = document.getElementById("progress-fill");
+ const pct = total > 0 ? (done / total * 100) : 0;
+ fill.style.width = pct + "%";
+ document.getElementById("progress-text").textContent =
+  total > 0 ? `${done}/${total} (${pct.toFixed(0)}%)` : "Idle";
+ // esc() — file name is user-controllable via Drive (Guardrail 7).
+ document.getElementById("current-name").textContent = name || "";
+}
+
+// ── PHOTO PROCESSING ────────────────────────────────────────
+// Fetches one image as base64, decodes it into a same-origin data URL
+// (the whole reason we have a getImageBytes endpoint — Drive thumbnail
+// URLs taint the canvas because lh3.googleusercontent.com doesn't send
+// CORS headers), draws it to the preview canvas, then runs face-api +
+// per-face OCR. No multi-frame state — single detection per face.
+async function processPhoto(photo){
+ // Fetch bytes via Apps Script. Same-origin data URL avoids the canvas
+ // taint that a direct <img crossOrigin> against Drive would cause.
+ const bytesUrl = API + "?action=getImageBytes&fileId=" + encodeURIComponent(photo.id);
+ let res, payload;
+ try {
+  res = await fetch(bytesUrl);
+  payload = await res.json();
+ } catch (e){
+  stats.skipped++;
+  logSkip(photo.name, "Fetch error: " + (e.message || e));
+  return;
+ }
+ if (!payload || payload.status !== "success"){
+  stats.skipped++;
+  logSkip(photo.name, (payload && payload.message) || "Fetch failed");
+  return;
+ }
+
+ const dataUrl = `data:${payload.mimeType || 'image/jpeg'};base64,${payload.base64}`;
+ const img = await loadImage(dataUrl).catch(err => {
+  stats.skipped++;
+  logSkip(photo.name, "Decode failed: " + (err && err.message || err));
+  return null;
+ });
+ if (!img) return;
+
+ // Draw to the preview canvas at the image's native resolution. The CSS
+ // max-width/max-height scales it down for display while preserving the
+ // pixel data we pass to face-api (which needs full resolution for the
+ // SSD MobileNet trade-off to pay off).
+ const canvas = document.getElementById("preview-canvas");
+ canvas.width = img.naturalWidth;
+ canvas.height = img.naturalHeight;
+ const ctx = canvas.getContext("2d");
+ ctx.drawImage(img, 0, 0);
+
+ // SSD MobileNet — explicit options for clarity. Default minConfidence
+ // is 0.5; we keep it explicit so the threshold is visible at the call
+ // site rather than buried in face-api defaults.
+ const detectorOpts = new faceapi.SsdMobilenetv1Options({ minConfidence: SSD_MIN_CONFIDENCE });
+ const detections = await faceapi
+  .detectAllFaces(canvas, detectorOpts)
+  .withFaceLandmarks()
+  .withFaceDescriptors();
+
+ if (DEBUG) console.log("[debug] photo", { name: photo.name, faces: detections.length });
+
+ if (detections.length === 0){
+  stats.skipped++;
+  logSkip(photo.name, "No faces detected");
+  return;
+ }
+
+ // Categorize and draw overlay boxes for operator feedback.
+ let largestUnknown = null;
+ let largestUnknownArea = 0;
+ const knownHits = [];
+ for (const det of detections){
+  const match = faceMatcher.findBestMatch(det.descriptor);
+  const isKnown = match.label !== "unknown" && match.distance <= FACE_MATCH_DISTANCE;
+  if (isKnown){
+   drawDetectionBox(ctx, det.detection.box, match.label, false);
+   knownHits.push({ name: match.label, distance: match.distance, box: det.detection.box });
+  } else {
+   drawDetectionBox(ctx, det.detection.box, "Unknown", true);
+   const area = det.detection.box.width * det.detection.box.height;
+   if (area > largestUnknownArea){
+    largestUnknownArea = area;
+    largestUnknown = det.detection.box;
+   }
+  }
+ }
+
+ // Record each known face (with dedup) + run OCR for BIB-mismatch /
+ // multiple-bibs violations.
+ for (const hit of knownHits){
+  await handleKnownFace(canvas, hit, photo);
+ }
+
+ // One UNREGISTERED report per photo, on the largest unknown face —
+ // matches checkpoint.html's per-frame behavior. Per-photo cap is
+ // tracked in seenUnknownsPerPhoto so a re-detect in the same photo
+ // can't double-fire.
+ if (largestUnknown){
+  const key = photo.id + ":unknown";
+  if (!seenUnknownsPerPhoto[key]){
+   seenUnknownsPerPhoto[key] = true;
+   await fireViolation({
+    name: "Unknown",
+    bib: "",
+    message: `Unregistered face in photo "${photo.name}"`,
+    violationType: "UNREGISTERED",
+    image: cropToDataUrl(canvas, largestUnknown, 0.5),
+   }, "unknown:" + photo.id + ":UNREGISTERED");
+  }
+ }
+}
+
+// ── PER-FACE HANDLING ───────────────────────────────────────
+async function handleKnownFace(canvas, hit, photo){
+ const { name, box } = hit;
+ const expectedBib = runnerRegistry[name] || "";
+
+ // 1) recordCheckpoint — once per session per name+cpId. Burst shots
+ //    of the same runner at the same CP collapse to one record (Task 4).
+ const recordKey = name + ":" + checkpointId;
+ if (!seenRecords[recordKey]){
+  seenRecords[recordKey] = true;
+  await sendRecordCheckpoint(name, expectedBib, photo);
+ } else {
+  addLog("dup", name, `Already recorded at ${cpLabel(checkpointId)} — photo "${photo.name}"`);
+ }
+
+ // 2) OCR — single read per face (Task 3: no majority voting). The
+ //    MULTIPLE_BIBS check runs on RAW text before digit normalization
+ //    (Guardrail 26). WRONG_PERSON fires on a single passing read
+ //    instead of a 3-of-5 consensus — acceptable because the scanner
+ //    operates on photographer's selects (already curated for clarity).
+ if (!ocrReady) return;
+ const ocr = await runOCRForFace(canvas, box);
+ if (!ocr) return;
+
+ if (ocr.multipleBibsBlocks){
+  await fireViolation({
+   name,
+   bib: "",
+   message: `Multiple BIBs detected on ${name} in "${photo.name}": ${ocr.multipleBibsBlocks.join(", ")}`,
+   violationType: "MULTIPLE_BIBS",
+   image: cropToDataUrl(canvas, box, 0.5),
+  }, name + ":" + checkpointId + ":MULTIPLE_BIBS");
+  return;
+ }
+
+ if (ocr.bib && expectedBib && ocr.bib !== expectedBib){
+  await fireViolation({
+   name,
+   bib: ocr.bib,
+   message: `Expected BIB ${expectedBib}, Found ${ocr.bib} in "${photo.name}"`,
+   violationType: "WRONG_PERSON",
+   image: cropToDataUrl(canvas, box, 0.5),
+  }, name + ":" + checkpointId + ":WRONG_PERSON");
+ }
+}
+
+// ── OCR ─────────────────────────────────────────────────────
+// Single-pass OCR for the chest crop below a detected face. Returns
+// { bib, conf, multipleBibsBlocks } or null on validation-gate fail.
+// Uses the SAME getOCRCropBox geometry + preprocessForOCR pipeline as
+// checkpoint.html (Guardrail 19 + 24) — diverging would mean two
+// places to keep in sync.
+async function runOCRForFace(srcCanvas, box){
+ if (!ocrReady || !tesseractWorker) return null;
+ const { bx, by, bw, bh } = getOCRCropBox(box, srcCanvas);
+ if (bw <= 0 || bh <= 0) return null;
+
+ const cropCanvas = document.createElement("canvas");
+ cropCanvas.width = bw; cropCanvas.height = bh;
+ cropCanvas.getContext("2d").drawImage(srcCanvas, bx, by, bw, bh, 0, 0, bw, bh);
+
+ const processed = preprocessForOCR(cropCanvas);
+ const result = await tesseractWorker.recognize(processed);
+ const rawText = String(result.data.text || "");
+ const conf = Number(result.data.confidence || 0);
+
+ if (DEBUG) console.log("[debug] OCR", { rawText, conf });
+
+ // MULTIPLE_BIBS — runs on RAW text BEFORE digit normalization (Guardrail 26).
+ const blockRe = new RegExp("\\d{" + MULTIPLE_BIBS_MIN_BLOCK_LEN + ",}", "g");
+ const blocks = rawText.match(blockRe) || [];
+ if (blocks.length >= MULTIPLE_BIBS_MIN_BLOCKS){
+  return { multipleBibsBlocks: blocks };
+ }
+
+ const text = rawText.replace(/[^0-9]/g, "").trim();
+ // Validation gate. Silent reject on fail — the scanner doesn't have a
+ // consecutive-failure counter (no multi-frame state).
+ if (!text || text.length < BIB_MIN_LEN || text.length > BIB_MAX_LEN || conf < OCR_MIN_CONFIDENCE){
+  return null;
+ }
+ return { bib: text, conf };
+}
+
+// ── OCR CROP GEOMETRY (mirror of checkpoint.html / Guardrail 24) ──
+// Anchored to the face box, extends from chin down 3× face height.
+// Kept structurally identical to checkpoint.html's helper so OCR
+// behavior stays consistent between live and scanner modes. Uses the
+// source canvas dimensions instead of a video element — same math.
+function getOCRCropBox(box, srcCanvas){
+ const faceH = box.height;
+ const bx = Math.max(0, box.x - faceH * 0.5);
+ const by = Math.max(0, box.y + faceH * 0.6);
+ const bw = Math.min(box.width + faceH * 1.0, srcCanvas.width - bx);
+ const bh = Math.min(faceH * 3.0, srcCanvas.height - by);
+ return { bx, by, bw, bh };
+}
+
+// ── OCR PREPROCESSING (mirror of checkpoint.html / Guardrail 19) ──
+// Grayscale (BT.601) → integral-image adaptive threshold → 2× NN.
+// Identical to checkpoint.html's implementation. Don't swap any step
+// or stage — the validation gate (Tesseract confidence + digit length)
+// was tuned against this exact pipeline.
+function preprocessForOCR(srcCanvas){
+ const w = srcCanvas.width, h = srcCanvas.height;
+ const ctx = srcCanvas.getContext("2d");
+ const imgData = ctx.getImageData(0, 0, w, h);
+ const src = imgData.data;
+
+ const gray = new Uint8ClampedArray(w * h);
+ for (let i = 0, j = 0; i < src.length; i += 4, j++){
+  gray[j] = (src[i] * 0.299 + src[i + 1] * 0.587 + src[i + 2] * 0.114) | 0;
+ }
+
+ const stride = w + 1;
+ const integral = new Uint32Array(stride * (h + 1));
+ for (let y = 1; y <= h; y++){
+  let rowSum = 0;
+  for (let x = 1; x <= w; x++){
+   rowSum += gray[(y - 1) * w + (x - 1)];
+   integral[y * stride + x] = integral[(y - 1) * stride + x] + rowSum;
+  }
+ }
+
+ const block = ADAPTIVE_THRESHOLD_BLOCK;
+ const half = block >> 1;
+ const C = ADAPTIVE_THRESHOLD_C;
+ const out = new Uint8ClampedArray(w * h);
+ for (let y = 0; y < h; y++){
+  const y0 = Math.max(0, y - half), y1 = Math.min(h, y + half + 1);
+  for (let x = 0; x < w; x++){
+   const x0 = Math.max(0, x - half), x1 = Math.min(w, x + half + 1);
+   const area = (y1 - y0) * (x1 - x0);
+   const sum = integral[y1 * stride + x1]
+             - integral[y0 * stride + x1]
+             - integral[y1 * stride + x0]
+             + integral[y0 * stride + x0];
+   out[y * w + x] = (gray[y * w + x] < (sum / area) - C) ? 0 : 255;
+  }
+ }
+
+ const s = OCR_UPSCALE;
+ const w2 = w * s, h2 = h * s;
+ const dst = document.createElement("canvas");
+ dst.width = w2; dst.height = h2;
+ const dstCtx = dst.getContext("2d");
+ const dstImg = dstCtx.createImageData(w2, h2);
+ const dPix = dstImg.data;
+ for (let y = 0; y < h2; y++){
+  const sy = (y / s) | 0;
+  for (let x = 0; x < w2; x++){
+   const sx = (x / s) | 0;
+   const v = out[sy * w + sx];
+   const di = (y * w2 + x) * 4;
+   dPix[di] = v; dPix[di + 1] = v; dPix[di + 2] = v; dPix[di + 3] = 255;
+  }
+ }
+ dstCtx.putImageData(dstImg, 0, 0);
+ return dst;
+}
+
+// ── API CALLS ───────────────────────────────────────────────
+// Reuses the existing recordCheckpoint / reportViolation contracts —
+// the backend doesn't care whether the source is a live camera or a
+// Drive scan. Timestamp is scan-time HH:MM:SS (we don't extract EXIF;
+// document that limitation in the UI note).
+async function sendRecordCheckpoint(name, bib, photo){
+ const timeStr = new Date().toTimeString().split(" ")[0];
+ addLog("ok", name, `${cpLabel(checkpointId)} @ ${timeStr} · ${photo.name}`);
+ try {
+  const resp = await fetch(API, {
+   method: "POST",
+   headers: { "Content-Type": "text/plain" },
+   body: JSON.stringify({
+    action: "recordCheckpoint",
+    name,
+    checkpoint_id: checkpointId,
+    timestamp: timeStr,
+    bib,
+   }),
+   redirect: "follow",
+  });
+  const result = await resp.json();
+  if (!result || result.status !== "success"){
+   stats.errors++;
+   addLog("err", name, "Record failed: " + ((result && result.message) || "Unknown"));
+   return;
+  }
+  stats.records++;
+  refreshStats();
+ } catch (e){
+  stats.errors++;
+  addLog("err", name, "Network error: " + (e.message || e));
+ }
+}
+
+async function fireViolation(payload, dedupKey){
+ if (seenViolations[dedupKey]){
+  addLog("dup", payload.name, `Duplicate violation suppressed (${payload.violationType})`);
+  return;
+ }
+ seenViolations[dedupKey] = true;
+ addLog("viol", payload.name, `⚠️ ${payload.message}`);
+ try {
+  await fetch(API, {
+   method: "POST",
+   headers: { "Content-Type": "text/plain" },
+   body: JSON.stringify({
+    action: "reportViolation",
+    name: payload.name,
+    bib: payload.bib,
+    message: payload.message,
+    violationType: payload.violationType,
+    timestamp: new Date().toISOString(),
+    image: payload.image,
+   }),
+  });
+  stats.violations++;
+  refreshStats();
+ } catch (e){
+  stats.errors++;
+  addLog("err", payload.name, "Failed to send violation: " + (e.message || e));
+ }
+}
+
+// ── CANVAS HELPERS ──────────────────────────────────────────
+function loadImage(src){
+ return new Promise((resolve, reject) => {
+  const img = new Image();
+  // Data URLs are same-origin so no crossOrigin needed. Keeping the
+  // attribute off avoids the chance of a strict CSP rejecting it.
+  img.onload = () => resolve(img);
+  img.onerror = () => reject(new Error("image decode failed"));
+  img.src = src;
+ });
+}
+
+// Crop a region of `srcCanvas` (padded by `padFactor` × face height on
+// each side) and return as a JPEG data URL — same format the live
+// pipeline sends to reportViolation (Apps Script base64-decodes it).
+function cropToDataUrl(srcCanvas, box, padFactor){
+ const pad = box.height * (padFactor || 0);
+ const cx = Math.max(0, box.x - pad);
+ const cy = Math.max(0, box.y - pad);
+ const cw = Math.min(box.width + pad * 2, srcCanvas.width - cx);
+ const ch = Math.min(box.height + pad * 2, srcCanvas.height - cy);
+ const c = document.createElement("canvas");
+ c.width = cw; c.height = ch;
+ c.getContext("2d").drawImage(srcCanvas, cx, cy, cw, ch, 0, 0, cw, ch);
+ return c.toDataURL("image/jpeg", 0.7);
+}
+
+function drawDetectionBox(ctx, box, label, isViolation){
+ ctx.save();
+ ctx.lineWidth = Math.max(2, Math.min(box.width, box.height) * 0.02);
+ ctx.strokeStyle = isViolation ? "#e53e3e" : "#1D9E75";
+ ctx.strokeRect(box.x, box.y, box.width, box.height);
+
+ // Label background + text. Drawn via canvas API only — no innerHTML,
+ // no XSS surface for OCR-extracted text.
+ ctx.font = `${Math.max(14, box.height * 0.13)|0}px 'DM Sans', sans-serif`;
+ const padX = 6, padY = 4;
+ const textW = ctx.measureText(label).width;
+ const fontSize = Math.max(14, box.height * 0.13) | 0;
+ ctx.fillStyle = isViolation ? "rgba(229,62,62,.85)" : "rgba(29,158,117,.85)";
+ ctx.fillRect(box.x, box.y - fontSize - padY * 2, textW + padX * 2, fontSize + padY * 2);
+ ctx.fillStyle = "#fff";
+ ctx.fillText(label, box.x + padX, box.y - padY);
+ ctx.restore();
+}
+
+// ── LOG / STATS ─────────────────────────────────────────────
+// Every user-supplied / OCR-derived string is passed through esc()
+// before being inserted into innerHTML (Guardrail 7). The two "info"
+// strings on each row are the dominant XSS surface.
+function esc(s){
+ return String(s ?? "").replace(/[&<>"']/g, c => (
+  {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+
+function cpLabel(id){
+ return id === 'start'  ? 'Start'
+      : id === 'finish' ? 'Finish'
+      : 'CP' + id;
+}
+
+function addLog(kind, name, info){
+ const list = document.getElementById("sb-list");
+ const item = document.createElement("div");
+ const cls =
+  kind === "viol"  ? "sb-item violation" :
+  kind === "dup"   ? "sb-item dup" :
+  kind === "skip"  ? "sb-item skip" :
+  kind === "err"   ? "sb-item violation" :
+  "sb-item";
+ const icon =
+  kind === "viol"  ? "🔴" :
+  kind === "dup"   ? "♻️" :
+  kind === "skip"  ? "⏭️" :
+  kind === "err"   ? "❌" :
+  kind === "info"  ? "ℹ️" : "✅";
+ const nameCls = (kind === "viol" || kind === "err") ? " viol" : "";
+ item.className = cls;
+ item.innerHTML =
+  `<div class="sb-name${nameCls}">${esc(icon)} ${esc(name)}</div>` +
+  `<div class="sb-info">${esc(info)}</div>`;
+ list.prepend(item);
+ // Bound the log to keep DOM small on long batches.
+ while (list.children.length > 200) list.lastChild.remove();
+ document.getElementById("sb-count").textContent = list.children.length;
+}
+
+function logSkip(name, info){
+ addLog("skip", name, info);
+}
+
+function refreshStats(){
+ document.getElementById("stat-photos").textContent = stats.photos;
+ document.getElementById("stat-records").textContent = stats.records;
+ document.getElementById("stat-violations").textContent = stats.violations;
+ document.getElementById("stat-skipped").textContent = stats.skipped;
+ document.getElementById("stat-errors").textContent = stats.errors;
+}
+
+// ── START ───────────────────────────────────────────────────
+init();
+</script>
+</body>
+</html>

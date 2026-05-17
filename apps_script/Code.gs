@@ -1,5 +1,5 @@
 // ============================================================
-// AI Runner Timing System — Google Apps Script Backend (v6)
+// AI Runner Timing System — Google Apps Script Backend (v7)
 // ============================================================
 // Deploy: Extensions → Apps Script → Deploy → Web app
 //   Execute as: Me | Access: Anyone with the link
@@ -48,6 +48,30 @@
 //   • _migrateHistoricalImages() rewrites every URL on the spreadsheet
 //     to the thumbnail form. Replaces the v3 _migrateAllImageUrls
 //     helper, which produced (now-obsolete) embed URLs.
+//
+// What's new in v7:
+//   • Drive Photo Scanner workflow — two new read-only endpoints:
+//     - getDrivePhotos?folderId=<id> lists every image inside a
+//       photographer-supplied Drive folder, filtered by mimeType and
+//       sorted by name. Each entry returns {id, name, mimeType,
+//       thumbnailUrl}; thumbnailUrl follows the v6 contract.
+//     - getImageBytes?fileId=<id> streams a single Drive image as
+//       base64 ({fileId, mimeType, sizeBytes, base64}). Exists
+//       because the thumbnail URL form 302-redirects to
+//       lh3.googleusercontent.com, which doesn't return CORS headers
+//       — an <img crossOrigin> against it taints the canvas and
+//       face-api/Tesseract can't read pixels. base64-via-Apps-Script
+//       → data: URL is the only same-origin path.
+//     Both endpoints are uncached: getDrivePhotos because folder
+//     contents change as photographers add shots, getImageBytes
+//     because per-file payloads exceed the 100 KB per-key cache cap.
+//     Drive operations are try-catch isolated; per-file failures
+//     don't abort the batch listing.
+//   • Companion frontend templates/photo_scanner.html (`/scan`) — a
+//     post-race batch processor that reuses recordCheckpoint /
+//     reportViolation unchanged. Runs SSD MobileNet (not Tiny),
+//     single-pass OCR (no majority vote), no EMA, no Ghost-BIB
+//     counter — see Guardrail 27 + 28 in AI_CONTEXT.md §5.
 // ============================================================
 
 // ─── CONSTANTS ──────────────────────────────────────────────
@@ -537,6 +561,17 @@ function doGet(e) {
           return verified.slice(0, 20);
         });
 
+      case "getDrivePhotos":
+        // Not cached: folder contents change as photographers add shots,
+        // and the call is once-per-scan-session, not a polling endpoint.
+        return handleGetDrivePhotos((e && e.parameter) || {});
+
+      case "getImageBytes":
+        // Not cached: per-file payload is up to a few MB; CacheService's
+        // per-key 100 KB limit would skip every put anyway. The scanner
+        // calls this once per image and immediately runs inference.
+        return handleGetImageBytes((e && e.parameter) || {});
+
       default:
         return jsonErr("Unknown action: " + action, "bad_request");
     }
@@ -580,6 +615,166 @@ function doPost(e) {
 }
 
 // ─── ACTION HANDLERS ────────────────────────────────────────
+
+/**
+ * GET handler for the Drive Photo Scanner workflow (v7+).
+ *
+ * Lists every image file inside a user-supplied Drive folder so the
+ * browser-side scanner can iterate them and run face / OCR inference
+ * locally. The folder must be shared with the script account (or
+ * publicly readable) — DriveApp.getFolderById throws otherwise.
+ *
+ * Returns: { status, folderName, count, data: [{id, name, mimeType,
+ *           thumbnailUrl}] } — thumbnailUrl follows the v6 single-URL
+ * contract (drive.google.com/thumbnail?id=…&sz=w800).
+ *
+ * Errors are mapped to jsonErr with codes: bad_request (missing /
+ * malformed folderId), not_found (folder lookup failed),
+ * drive_error (iteration failed mid-scan). Per-file failures are
+ * logged and skipped without aborting the batch.
+ */
+function handleGetDrivePhotos(params) {
+  const folderId = String((params && params.folderId) || "").trim();
+  if (!folderId) {
+    throw httpError("folderId parameter is required", "bad_request");
+  }
+  // Drive IDs are [-\w]{25,44} in practice; same regex shape the
+  // extractDriveFileId helper trusts for ID extraction.
+  if (!/^[-\w]{25,80}$/.test(folderId)) {
+    throw httpError("folderId has invalid format", "bad_request");
+  }
+
+  let folder;
+  try {
+    folder = DriveApp.getFolderById(folderId);
+  } catch (err) {
+    logErr("getDrivePhotos: folder lookup failed", err);
+    throw httpError(
+      "Folder not found or not accessible. Check the ID and that the " +
+      "folder is shared with the script account.",
+      "not_found"
+    );
+  }
+
+  let folderName = "";
+  try { folderName = folder.getName(); } catch (e) { /* non-fatal */ }
+
+  const photos = [];
+  let skipped = 0;
+  try {
+    const files = folder.getFiles();
+    while (files.hasNext()) {
+      try {
+        const file = files.next();
+        const mimeType = file.getMimeType();
+        // Filter to bitmap images only — skips PDFs, video, and Google
+        // Docs/Sheets/Slides that happen to live in the same folder.
+        if (!mimeType || mimeType.indexOf("image/") !== 0) {
+          skipped++;
+          continue;
+        }
+        const id = file.getId();
+        photos.push({
+          id: id,
+          name: file.getName(),
+          mimeType: mimeType,
+          thumbnailUrl: DRIVE_THUMBNAIL_URL(id, 800),
+        });
+      } catch (innerErr) {
+        // A single corrupt / permission-denied file must not abort the
+        // batch — log and continue so the rest of the folder still
+        // reaches the browser.
+        logErr("getDrivePhotos: per-file failure (continuing)", innerErr);
+        skipped++;
+      }
+    }
+  } catch (err) {
+    logErr("getDrivePhotos: folder iteration failed", err);
+    throw httpError("Failed to list folder contents: " + err.message, "drive_error");
+  }
+
+  // Stable lexicographic sort so burst sequences (IMG_0001, IMG_0002, …)
+  // arrive at the scanner in the order the camera took them, which makes
+  // the dedup logic in the UI more predictable.
+  photos.sort(function (a, b) {
+    return String(a.name).localeCompare(String(b.name));
+  });
+
+  logInfo("getDrivePhotos", {
+    folderId: folderId,
+    folderName: folderName,
+    count: photos.length,
+    skipped: skipped,
+  });
+  return jsonOk({
+    folderName: folderName,
+    count: photos.length,
+    data: photos,
+  });
+}
+
+/**
+ * GET handler that streams a Drive image back to the browser as base64
+ * so the browser-side scanner can decode it into a same-origin data: URL
+ * for canvas inference. Required because the Drive thumbnail URL form
+ * (drive.google.com/thumbnail?id=…) 302-redirects to
+ * lh3.googleusercontent.com, which does NOT return CORS headers — an
+ * <img crossOrigin=anonymous> against the thumbnail taints the canvas
+ * and face-api / Tesseract can't read its pixels.
+ *
+ * The full file bytes are returned (not the w800 thumbnail) because
+ * ssdMobilenetv1 + Tesseract OCR on BIB digits both benefit from the
+ * extra resolution; the thumbnail URL stays the v6 display contract
+ * for the scanner UI.
+ *
+ * Returns: { status, fileId, mimeType, base64, sizeBytes }.
+ * Errors: bad_request (missing/malformed fileId, non-image),
+ *         not_found (lookup failed), drive_error (blob read failed).
+ */
+function handleGetImageBytes(params) {
+  const fileId = String((params && params.fileId) || "").trim();
+  if (!fileId) {
+    throw httpError("fileId parameter is required", "bad_request");
+  }
+  if (!/^[-\w]{25,80}$/.test(fileId)) {
+    throw httpError("fileId has invalid format", "bad_request");
+  }
+
+  let file;
+  try {
+    file = DriveApp.getFileById(fileId);
+  } catch (err) {
+    logErr("getImageBytes: file lookup failed", err);
+    throw httpError(
+      "File not found or not accessible. Check the ID and folder sharing.",
+      "not_found"
+    );
+  }
+
+  const declaredMime = (function () {
+    try { return file.getMimeType() || ""; } catch (e) { return ""; }
+  })();
+  if (declaredMime && declaredMime.indexOf("image/") !== 0) {
+    throw httpError("File is not an image: " + declaredMime, "bad_request");
+  }
+
+  let blob, bytes;
+  try {
+    blob = file.getBlob();
+    bytes = blob.getBytes();
+  } catch (err) {
+    logErr("getImageBytes: blob read failed", err);
+    throw httpError("Failed to read image bytes: " + err.message, "drive_error");
+  }
+
+  const base64 = Utilities.base64Encode(bytes);
+  return jsonOk({
+    fileId: fileId,
+    mimeType: blob.getContentType() || declaredMime || "image/jpeg",
+    sizeBytes: bytes.length,
+    base64: base64,
+  });
+}
 
 function handleRegisterRunner(body) {
   const name = reqStr(body.name, "name", NAME_PATTERN, 50);

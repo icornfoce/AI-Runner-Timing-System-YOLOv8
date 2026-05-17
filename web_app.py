@@ -17,9 +17,17 @@ def dashboard():
 def register():
     return render_template('register.html')
 
-@app.route('/checkpoint')
-def checkpoint():
-    return render_template('checkpoint.html')
+# Live recognition page retired 2026-05-17 in favor of the Drive Photo
+# Scanner (/scan). templates/checkpoint.html is kept on disk so live
+# mode can be reinstated by re-enabling this route, but the dashboard
+# no longer advertises it.
+# @app.route('/checkpoint')
+# def checkpoint():
+#     return render_template('checkpoint.html')
+
+@app.route('/scan')
+def scan():
+    return render_template('photo_scanner.html')
 
 # Backward-compatible aliases
 @app.route('/admin')

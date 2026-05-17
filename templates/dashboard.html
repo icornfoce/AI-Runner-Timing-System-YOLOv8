@@ -80,25 +80,44 @@
             animation: pulse 2s infinite
         }
 
-        .nav-link {
-            color: var(--mut);
-            text-decoration: none;
-            font-size: .85rem
-        }
-
-        .nav-link:hover {
-            color: var(--pri)
-        }
-
-        .btn-admin {
-            padding: .4rem 1rem;
-            background: rgba(255, 255, 255, .06);
+        /* Unified nav control — Register / Scanner / Admin share the
+           same shape. .nav-btn.primary applies the brand gradient to
+           the daily-action CTA (Scanner). */
+        .nav-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: .4rem;
+            padding: .5rem 1rem;
+            background: rgba(255, 255, 255, .04);
             border: 1px solid var(--bdr);
             border-radius: 10px;
             color: var(--mut);
+            font-size: .85rem;
+            font-weight: 500;
+            font-family: 'DM Sans', sans-serif;
+            text-decoration: none;
             cursor: pointer;
-            font-size: .8rem;
-            font-family: 'DM Sans', sans-serif
+            transition: background .2s, border-color .2s, color .2s, filter .2s
+        }
+
+        .nav-btn:hover {
+            background: rgba(29, 158, 117, .1);
+            border-color: var(--pri);
+            color: var(--txt)
+        }
+
+        .nav-btn.primary {
+            background: linear-gradient(135deg, var(--pri), #2dd4a8);
+            border-color: var(--pri);
+            color: #0b0f14;
+            font-weight: 600;
+            box-shadow: 0 4px 14px rgba(29, 158, 117, .25)
+        }
+
+        .nav-btn.primary:hover {
+            background: linear-gradient(135deg, var(--pri), #2dd4a8);
+            color: #0b0f14;
+            filter: brightness(1.08)
         }
 
         .page {
@@ -729,9 +748,9 @@
             <div class="live">
                 <div class="dot"></div>Live
             </div>
-            <a href="/register" class="nav-link">📋 Register</a>
-            <a href="/checkpoint" class="nav-link">📷 Checkpoint</a>
-            <button class="btn-admin" id="btn-admin-toggle" onclick="showLogin()">🔐 Admin</button>
+            <a href="/register" class="nav-btn">📋 Register</a>
+            <a href="/scan" class="nav-btn primary">🖼️ Photo Scanner</a>
+            <button class="nav-btn" id="btn-admin-toggle" onclick="showLogin()">🔐 Admin</button>
         </div>
     </div>
 

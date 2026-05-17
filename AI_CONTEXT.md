@@ -9,14 +9,22 @@
 > cadence, caching, or guardrails MUST update this file in the same change
 > set.
 >
-> **Last updated:** 2026-05-10 — Backend bumped to **v6**: every Drive
-> image URL (Runners.Photo_* AND Violations.ImageUrl) now writes the
-> thumbnail form (`thumbnail?id=…&sz=w800`); the embed form
-> (`uc?export=view`) is retired. New uploads land in a `YYYY-MM-DD`
-> subfolder under their parent (`RunnerFaces/<name>/<date>/`,
-> `ViolationEvidence/<date>/`) so Drive stays browseable. New
-> `_migrateHistoricalImages()` rewrites every legacy URL to the
-> thumbnail form and replaces the v3 `_migrateAllImageUrls` helper.
+> **Last updated:** 2026-05-17 — Backend bumped to **v7**: new
+> read-only endpoints `getDrivePhotos` (lists images inside a
+> photographer-supplied Drive folder) and `getImageBytes` (streams a
+> single Drive image as base64) power a new browser page
+> `templates/photo_scanner.html` (`/scan`). The scanner runs the same
+> face-api + Tesseract pipeline as `checkpoint.html` but **on static
+> photos uploaded to Drive after the race**, with SSD MobileNet
+> instead of TinyFaceDetector and no multi-frame state (no EMA, no
+> majority voting, no Ghost-BIB counter). Per-session dedup keeps
+> burst shots from double-recording. Same-day follow-up: the
+> `/checkpoint` Flask route is **commented out** and the dashboard
+> nav link replaced with a Photo Scanner CTA, so live-camera mode is
+> no longer reachable from the UI. `templates/checkpoint.html` is
+> retained on disk (and remains the canonical reference for the
+> multi-frame pipeline this doc describes); restoring live mode is a
+> one-line uncomment in `web_app.py`.
 
 ---
 
@@ -81,19 +89,21 @@ backend.
 AI-Runner-Timing-System-YOLOv8/
 ├── AI_CONTEXT.md          ← THIS FILE (system memory for AI agents)
 ├── README.md              ← human-facing project intro (Thai/English)
-├── web_app.py             ← Flask: serves 3 HTML templates only
+├── web_app.py             ← Flask: serves the active HTML templates (the
+│                            /checkpoint route is commented out; see §6.2)
 ├── requirements.txt       ← legacy deps; in v2 only `flask` is needed
 ├── yolov8n-face.pt        ← legacy YOLO weights (used by legacy_v1 only)
 ├── running_results.csv    ← legacy CSV log (gitignored, rarely cleared)
 ├── .gitignore
 │
 ├── templates/             ← The active product (browser frontend)
-│   ├── register.html      ← Runner registration (5-angle face capture)
-│   ├── checkpoint.html    ← Real-time recognition + checkpoint logging
-│   └── dashboard.html     ← Public leaderboard + Admin portal (login-gated)
+│   ├── register.html       ← Runner registration (5-angle face capture)
+│   ├── checkpoint.html     ← Real-time recognition (retained-but-unrouted; see §6.2)
+│   ├── photo_scanner.html  ← Drive Photo Scanner (post-race batch mode)
+│   └── dashboard.html      ← Public leaderboard + Admin portal (login-gated)
 │
 ├── apps_script/
-│   └── Code.gs            ← Google Apps Script REST API (v5)
+│   └── Code.gs            ← Google Apps Script REST API (v7)
 │
 ├── legacy_v1/             ← Python/OpenCV/YOLOv8 fallback (offline mode)
 │   ├── main.py            ← standalone capture loop
@@ -112,9 +122,10 @@ AI-Runner-Timing-System-YOLOv8/
 
 | File | Role | Touch this when… |
 |---|---|---|
-| `web_app.py` | Tiny Flask wrapper, 4 routes (`/`, `/register`, `/checkpoint`, `/admin`-alias). **Does no AI work.** | Adding/renaming a frontend page |
+| `web_app.py` | Tiny Flask wrapper, 4 active routes (`/`, `/register`, `/scan`, `/admin`-alias) plus a commented-out `/checkpoint`. **Does no AI work.** | Adding/renaming a frontend page |
 | `templates/register.html` | Capture 5 face angles, compute averaged 128-d descriptor, single atomic upload | Changing capture UX, embedding format, registration payload |
-| `templates/checkpoint.html` | Live detection loop (face-api + Tesseract), per-CP cooldowns, smart OCR, violation reporting | Recognition tuning, OCR strategy, CP buttons |
+| `templates/checkpoint.html` | Live detection loop (face-api + Tesseract), per-CP cooldowns, smart OCR, violation reporting. **Retained on disk but no longer routed**; see §6.2. Still the canonical reference for the multi-frame pipeline described in §4.2. | Restoring live mode, or referencing the multi-frame pipeline for new work |
+| `templates/photo_scanner.html` | Drive Photo Scanner — post-race batch processing of photographer-uploaded Drive folder. SSD MobileNet, single-pass per face, session-level dedup. | Drive scanner tuning, batch UX, dedup strategy |
 | `templates/dashboard.html` | Public leaderboard, alerts, admin portal (auth, CRUD, bulk delete, type filter) | UI/UX, admin actions, polling, type taxonomy |
 | `apps_script/Code.gs` | Backend REST + Sheets/Drive I/O + cache + migrations | Schema, endpoints, validation, cleanup logic |
 | `legacy_v1/*` | Offline fallback. **Independent codebase.** | Only when explicitly fixing legacy mode |
@@ -240,6 +251,13 @@ My Drive/
    invalidates the runners cache.
 
 ### 4.2 Checkpoint detection (`checkpoint.html` → `recordCheckpoint`/`reportViolation`)
+
+> ⚠️ **`/checkpoint` is no longer routed** (see §6.2, 2026-05-17
+> follow-up). The file remains on disk because it is the canonical
+> reference for the multi-frame live pipeline this section describes,
+> and because restoring live mode is a one-line uncomment in
+> `web_app.py`. Treat this section as documentation of the **retained
+> implementation**; the active product is the Drive Scanner (§4.7).
 
 The pipeline has two **independent triggers**:
 
@@ -494,6 +512,130 @@ error logs and is swallowed — sheet deletion always proceeds.
   `sessionStorage.adminToken` and **sent as `body.token` with every
   destructive POST**. Logout clears sessionStorage and reloads.
 
+### 4.7 Drive Photo Scanner (`photo_scanner.html` → `recordCheckpoint`/`reportViolation`)
+
+A **batch, post-race** processing mode that complements the live
+`checkpoint.html` loop. Photographers dump event photos into a shared
+Drive folder; an operator opens `/scan`, pastes the folder ID, picks a
+checkpoint, and presses Start. The browser pulls each photo through
+Apps Script, runs SSD MobileNet + Tesseract, and emits the same
+`recordCheckpoint` / `reportViolation` POSTs the live page emits.
+
+```
+init():
+  load face-api (ssdMobilenetv1 + Landmark68 + Recognition)
+  GET /?action=getRunners
+    → build FaceMatcher(labels, FACE_MATCH_DISTANCE = 0.45)
+    → runnerRegistry[name] = bibNumber
+  Tesseract.createWorker("eng") + setParameters({
+    tessedit_char_whitelist: '0123456789',
+    tessedit_pageseg_mode:   '7'
+  })
+
+startScan():
+  GET /?action=getDrivePhotos&folderId=<id>
+    → [{ id, name, mimeType, thumbnailUrl }, ...]
+  for each photo, sequentially (Stop button aborts the loop):
+    GET /?action=getImageBytes&fileId=<id>
+      → { base64, mimeType }                ← un-tainted same-origin path
+    decode → <img> → draw to preview canvas at native resolution
+    detectAllFaces(canvas, SsdMobilenetv1Options{minConfidence:0.5})
+      .withFaceLandmarks().withFaceDescriptors()
+
+    for each detection:
+      match = faceMatcher.findBestMatch(descriptor)
+      isKnown = match.label !== "unknown" AND match.distance ≤ FACE_MATCH_DISTANCE
+      draw rectangle (green/red) on preview canvas
+      categorize: knownHits[] or largestUnknown
+
+    ── recordCheckpoint trigger (face-only, dedup-gated) ──
+    for each known hit:
+      if !seenRecords["name:cpId"]:
+        seenRecords["name:cpId"] = true
+        POST recordCheckpoint(name, cpId, scanTimeHHMMSS, bib)
+      run single-pass OCR on chest crop (getOCRCropBox)
+
+    ── OCR (single read per face, NO majority vote) ──
+    preprocessForOCR(crop):
+      grayscale (BT.601) → integral image →
+      adaptive threshold (mean − ADAPTIVE_THRESHOLD_C,
+                          ADAPTIVE_THRESHOLD_BLOCK² window) →
+      nearest-neighbor 2× upscale
+    {text, conf} = tesseractWorker.recognize(processed)
+
+    if RAW text has ≥MULTIPLE_BIBS_MIN_BLOCKS blocks of length
+       ≥MULTIPLE_BIBS_MIN_BLOCK_LEN:
+      fireViolation MULTIPLE_BIBS (dedup key "name:cpId:MULTIPLE_BIBS")
+      continue
+
+    digitsOnly = text.replace(/[^0-9]/g, "")
+    if !digitsOnly OR length ∉ [BIB_MIN_LEN, BIB_MAX_LEN] OR conf < OCR_MIN_CONFIDENCE:
+      silent reject (NO Ghost-BIB counter — no multi-frame state)
+    else if registered[name] AND digitsOnly !== registered[name]:
+      fireViolation WRONG_PERSON (dedup key "name:cpId:WRONG_PERSON")
+
+    ── UNREGISTERED trigger (largest unknown per photo) ──
+    if largestUnknown exists AND !seenUnknownsPerPhoto["fileId:unknown"]:
+      seenUnknownsPerPhoto["fileId:unknown"] = true
+      fireViolation UNREGISTERED with face crop
+                    (dedup key "unknown:fileId:UNREGISTERED")
+```
+
+**Why two endpoints instead of one inline base64 payload.** The Drive
+thumbnail URL (`drive.google.com/thumbnail?id=…&sz=w800`)
+302-redirects to `lh3.googleusercontent.com`, which does **not** send
+`Access-Control-Allow-Origin` headers. An `<img crossOrigin=anonymous>`
+either fails outright or taints the canvas — and a tainted canvas
+blocks `getImageData()`, which both face-api (descriptor read-out)
+and Tesseract (pixel input) require. The scanner therefore fetches
+image bytes via Apps Script (`getImageBytes` returns base64 over the
+same-origin API channel) and decodes them into a `data:` URL, which
+is same-origin by definition and never taints the canvas. The
+thumbnail URL stays in the v6 contract for display-only consumers
+(dashboard, future preview features).
+
+**Why SSD MobileNet, not TinyFaceDetector.** Static event photos are
+usually 4K+ resolution with multiple runners across the frame; SSD
+produces tighter, higher-recall boxes than Tiny on that target. The
+scanner's per-photo wall time (~3–8 s) is bounded by network +
+base64 decode, not by detection, so the 5× FPS advantage Tiny has on
+720p video doesn't apply here.
+
+**Why no EMA / no majority vote / no Ghost-BIB counter.** All three
+require multi-frame state. The scanner sees each runner exactly once
+per photo (and one photo is one frame for that runner) — there's
+nothing to smooth, vote, or count. A single OCR read passes or fails
+the validation gate; the photographer's selects are already curated
+for clarity, so single-frame false positives are rare in practice.
+For the same reason, the scanner doesn't fire `NO_BIB` or
+`OBSCURED_BIB`: those types only exist in `checkpoint.html` to
+escalate after `NO_BIB_AFTER_FAILURES` consecutive validation-gate
+silent rejects.
+
+**Per-session deduplication.** Burst-mode photography (10 fps shutter
+on the same runner) would otherwise emit one record per photo. The
+scanner suppresses duplicates with three in-memory sets:
+
+| Key                                       | Purpose                                        |
+|---|---|
+| `seenRecords["name:cpId"]`                | One `recordCheckpoint` per runner per CP per session  |
+| `seenViolations["name:cpId:type"]`        | One violation per type per runner per CP per session  |
+| `seenUnknownsPerPhoto["fileId:unknown"]`  | Cap `UNREGISTERED` at ≤1 per photo (matches live)     |
+
+Sets reset on page reload OR when Start is pressed for a fresh batch.
+**There is no backend dedup**: the backend remains stateless across
+scanner calls. A duplicate that slips through (e.g. operator re-runs
+the same folder after a reload) writes a duplicate row — admins
+clean it up via the dashboard's bulk-delete tools.
+
+**Timestamps are scan-time, not capture-time.** `recordCheckpoint`
+receives `new Date().toTimeString().split(" ")[0]` (HH:MM:SS at the
+moment of the POST), not the photo's EXIF capture time. EXIF parsing
+is not implemented; if/when it is, write the scanner to fall back to
+scan-time when EXIF is missing (some screenshots and edited images
+strip it). For most workflows, relative ordering is what matters and
+scan-time is sufficient.
+
 ---
 
 ## 5. Strict Guardrails — DO NOT BREAK
@@ -628,6 +770,31 @@ explicit, justified, and accompanied by an update to this file.
     matches one giant concatenated number instead of two distinct ones.
     Keep the regex anchored to `\d{MULTIPLE_BIBS_MIN_BLOCK_LEN,}`
     against `result.data.text`, not the normalized form.
+27. **The Drive scanner's CV pipeline deliberately diverges from
+    `checkpoint.html`.** SSD MobileNet (not TinyFaceDetector),
+    single-pass OCR (no majority vote), no bbox EMA, no Ghost-BIB
+    counter, no `NO_BIB` / `OBSCURED_BIB` firings. The static-image
+    and live-video tradeoffs go in opposite directions — Tiny + EMA +
+    voting exist because the live loop has 30 FPS of noisy detections
+    to lean on, while the scanner has exactly one frame per runner
+    per photo. Don't try to factor the two pipelines into shared
+    helpers without re-deriving the validation thresholds for both
+    targets. `getOCRCropBox` and `preprocessForOCR` ARE intentionally
+    duplicated across `checkpoint.html` and `photo_scanner.html` —
+    they share geometry and preprocessing because those are the
+    Tesseract-tuned constants Guardrail 19 + 24 protect.
+28. **The Drive scanner MUST fetch image bytes via `getImageBytes`,
+    not via `<img crossOrigin=anonymous>` against the thumbnail URL.**
+    `drive.google.com/thumbnail?id=…&sz=w800` 302-redirects to
+    `lh3.googleusercontent.com`, which does NOT return
+    `Access-Control-Allow-Origin` headers. An `<img crossOrigin>`
+    against the redirect target either errors out or taints the
+    canvas — and a tainted canvas blocks `getImageData()`, which
+    both face-api descriptor read-out AND Tesseract pixel input
+    require. The base64-over-Apps-Script → `data:` URL path is the
+    only safe route. The thumbnail URL stays in the v6 contract for
+    display-only consumers (dashboard `<img src>`) — those don't
+    touch canvas pixels.
 
 ---
 
@@ -635,13 +802,110 @@ explicit, justified, and accompanied by an update to this file.
 
 ### 6.1 Active version
 
-- **`Code.gs` is at v6.** Header comment block in `Code.gs` is the
+- **`Code.gs` is at v7.** Header comment block in `Code.gs` is the
   authoritative changelog for the backend.
-- Frontend templates align with v5 (ViolationType + bulk delete UI).
-  v6 is backend-only — no frontend payload, schema, or endpoint
-  shape changed; the dashboard simply receives URLs that all render.
+- `templates/photo_scanner.html` (the Drive Photo Scanner) is new in
+  v7. The other three templates (`register.html`, `checkpoint.html`,
+  `dashboard.html`) are unchanged from their v5/v6 baselines.
 
 ### 6.2 Recent changes
+
+#### 2026-05-17 — v7: Drive Photo Scanner workflow
+
+Adds a **post-race batch processing mode** so photographers can dump
+event photos into a shared Drive folder and have the same recognition
+pipeline that runs at the live checkpoint reprocess them after the
+race. Backend `Code.gs` bumped v6 → v7; one new HTML template;
+`web_app.py` gains a `/scan` route.
+
+- **Two new GET endpoints in `Code.gs`** (both uncached — folder
+  contents are dynamic, and per-image payloads exceed the 100 KB
+  CacheService per-key limit anyway):
+  - `getDrivePhotos?folderId=<id>` — lists every image file inside the
+    folder via `DriveApp.getFolderById(id).getFiles()`, filtering by
+    `mimeType.startsWith("image/")`. Returns `{folderName, count,
+    data: [{id, name, mimeType, thumbnailUrl}]}` with thumbnail URLs
+    in the v6 contract (`drive.google.com/thumbnail?id=…&sz=w800`).
+    Photos are sorted lexicographically so burst sequences land in
+    capture order. The whole iteration is try-catch isolated; a
+    single corrupt / permission-denied file is logged and skipped
+    without aborting the batch.
+  - `getImageBytes?fileId=<id>` — streams a single Drive image as
+    base64. Required because the thumbnail URL 302-redirects to
+    `lh3.googleusercontent.com`, which does NOT send CORS headers —
+    an `<img crossOrigin>` either errors out or taints the canvas
+    (`getImageData()` then fails for face-api / Tesseract). Returns
+    `{fileId, mimeType, sizeBytes, base64}`. Frontend wraps it in a
+    `data:` URL, which is same-origin by definition and never taints.
+
+- **New `templates/photo_scanner.html` (`/scan`)** — the scanner UI.
+  Folder ID input + CP selector + Start/Stop, with a live preview
+  canvas that renders each photo at native resolution with green/red
+  detection rectangles drawn over recognized faces. Sidebar log
+  shows per-photo events (✅ recorded / 🔴 violation / ♻️ dup
+  suppressed / ⏭️ skipped / ❌ error). Pipeline:
+  - **`ssdMobilenetv1`** instead of TinyFaceDetector — better recall
+    on multi-runner 4K photos; the 5× FPS hit doesn't matter when
+    per-photo wall time is bounded by network + base64 decode.
+  - **No EMA, no majority vote, no Ghost-BIB counter** — none of
+    these apply when each runner is seen exactly once per photo.
+  - **Same `getOCRCropBox` geometry and `preprocessForOCR` pipeline**
+    (grayscale → adaptive threshold → 2× NN upscale) as
+    `checkpoint.html`, intentionally duplicated to keep the
+    Tesseract-tuned constants Guardrail 19 + 24 protect identical
+    between live and scanner targets.
+  - **Three dedup sets** in JS state (`seenRecords`,
+    `seenViolations`, `seenUnknownsPerPhoto`) suppress duplicates
+    from burst photography within one scan session; reset on every
+    Start press.
+  - **Reuses the existing `recordCheckpoint` / `reportViolation` POST
+    contracts** unchanged — the backend doesn't care whether the
+    source is a live camera or a Drive scan. Violation types fired:
+    `WRONG_PERSON`, `MULTIPLE_BIBS`, `UNREGISTERED`. `NO_BIB` /
+    `OBSCURED_BIB` are NOT fired (they require the consecutive-
+    failure counter the live page maintains).
+  - **Timestamps are scan-time HH:MM:SS, not photo capture time** —
+    no EXIF parsing is implemented. Acceptable because relative
+    ordering is what the leaderboard needs, and most use cases for
+    the scanner are post-race verification rather than time-of-day
+    scoring.
+
+- **Two new guardrails (#27, #28)** — pinned the scanner's
+  deliberate divergence from `checkpoint.html` (different CV
+  pipeline, on purpose) and the CORS reason `getImageBytes` exists.
+
+- **`web_app.py`** gains `/scan` → `photo_scanner.html`. No other
+  routes touched.
+
+##### 2026-05-17 (same-day follow-up) — `/checkpoint` route retired, dashboard nav refreshed
+
+Live-camera mode is no longer reachable from the UI; the Drive
+Scanner replaces it as the daily-action page. Surgical change set:
+
+- **`web_app.py`** — the `@app.route('/checkpoint')` handler is
+  **commented out** (not deleted) with a dated header noting why and
+  how to reverse. `templates/checkpoint.html` stays on disk — the
+  file remains the canonical reference for the multi-frame pipeline
+  documented in §4.2, and re-enabling live mode is one uncomment
+  away.
+- **`templates/dashboard.html`** — the nav `<a href="/checkpoint">`
+  is removed; a new `<a href="/scan" class="nav-btn primary">` is
+  added in its place. The Register / Scanner / Admin nav controls
+  now share a unified `.nav-btn` class (consistent padding, border,
+  hover); the Scanner gets a `.primary` modifier (brand gradient,
+  subtle shadow) so it visually reads as the primary CTA. Replaces
+  the previous `.nav-link` (tiny anchor) + `.btn-admin` (chunky
+  button) mismatch. The `#btn-admin-toggle` ID is preserved so the
+  existing post-login hide logic still works.
+- **`templates/register.html`** and **`templates/photo_scanner.html`**
+  — both had nav links pointing at `/checkpoint` left over from the
+  earlier layout. Re-pointed to `/scan` and `/register` respectively
+  so no nav link 404s.
+
+Reversibility: uncomment the route in `web_app.py`, add the link
+back to `dashboard.html` (any class works — `.nav-btn` keeps it
+consistent), and live mode is back. The backend never knew about
+`/checkpoint` (it's a frontend-only route).
 
 #### 2026-05-10 — v6: Single thumbnail URL contract + dated subfolders
 
@@ -874,8 +1138,10 @@ world accuracy and FPS without blocking the main thread.
   dismissed-violation memory cap at 500 entries (FIFO). Reload clears
   it.
 - **Camera released on `pagehide`**: The OS camera indicator goes off
-  when navigating away from `/checkpoint` or `/register`. Re-entering
-  the page restarts the camera.
+  when navigating away from `/register` (and, if you re-enable the
+  route, `/checkpoint`). Re-entering the page restarts the camera.
+  `/scan` has no camera — it processes Drive images, not webcam
+  frames.
 - **Camera resolution = 1280×720**. TinyFaceDetector internally
   rescales to `inputSize=320` for inference; the 720p preview is for
   the operator and the OCR crop. Some devices may negotiate a lower
@@ -947,6 +1213,37 @@ world accuracy and FPS without blocking the main thread.
   blocks `tryFireViolation`, the pipeline still digit-normalizes the
   text and tries to vote one of the bibs as a normal read. Better to
   attempt a single read than drop the frame entirely.
+- **Drive Scanner timestamps are scan-time, not capture-time**: the
+  scanner's `recordCheckpoint` POSTs use `new Date()` at the moment
+  the POST is built. EXIF capture time is NOT extracted — adding it
+  would need a base64-EXIF parser and fallback logic for stripped
+  metadata. For most workflows the relative ordering across photos
+  is what the leaderboard needs, so scan-time is fine.
+- **Drive Scanner dedup is session-scoped, not backend-enforced**:
+  the three `seen…` sets live in browser memory. If the operator
+  reloads the page mid-batch and restarts, runners detected before
+  the reload will record again (the backend writes a duplicate row).
+  Admins clean those up via the dashboard bulk-delete tools. No
+  cross-tab coordination — two operators scanning the same folder
+  simultaneously will write duplicate rows.
+- **Drive Scanner can't change CP mid-batch**: the CP buttons disable
+  themselves while a scan is running. Splitting one folder across
+  multiple CPs requires running the scan once per CP (or organizing
+  Drive folders per checkpoint, which is the recommended layout).
+- **Drive Scanner does NOT fire `NO_BIB` or `OBSCURED_BIB`**: those
+  violations require the `ocrFailureCount` consecutive-failure
+  counter that `checkpoint.html` maintains across many frames of the
+  same runner. The scanner sees each runner exactly once per photo,
+  so a single failed OCR can't escalate. A photo where the BIB is
+  unreadable simply produces no record / no violation for that
+  runner. Operators should re-shoot or manually update via the
+  admin UI.
+- **Drive Scanner skips images larger than ~6 MB per Apps Script
+  response cap**: `getImageBytes` returns base64 in a JSON envelope.
+  The Apps Script doGet response limit is ~50 MB, but in practice
+  network-decode latency for >10 MB images makes the scanner crawl.
+  No hard cap is enforced in code; operators with massive RAW files
+  should pre-export to JPEG/HEIC.
 
 ### 6.6 One-off setup helpers (Apps Script editor)
 
@@ -963,12 +1260,14 @@ All are idempotent.
 ### 6.7 Endpoints reference
 
 **GET** (`?action=…`)
-| Action | Returns |
-|---|---|
-| `getRunners` | All `Runners` rows |
-| `getResults` | All `Results` rows |
-| `getViolations` | Top 20 violations (Timestamp desc) |
-| `getVerifiedViolations` | Top 20 with `Verified=true` |
+| Action | Returns | Notes |
+|---|---|---|
+| `getRunners` | All `Runners` rows | Cached, 12 s TTL |
+| `getResults` | All `Results` rows | Cached, 12 s TTL |
+| `getViolations` | Top 20 violations (Timestamp desc) | Cached, 12 s TTL |
+| `getVerifiedViolations` | Top 20 with `Verified=true` | Cached, 12 s TTL |
+| `getDrivePhotos` | `{ folderName, count, data: [{id, name, mimeType, thumbnailUrl}] }` | Requires `folderId=<id>`. **Uncached** — folder contents change as photographers add shots. Image files only (filtered by mimeType). Sorted by name. Drive errors mapped to `not_found` / `drive_error`. |
+| `getImageBytes` | `{ fileId, mimeType, sizeBytes, base64 }` | Requires `fileId=<id>`. **Uncached** — per-file payload exceeds the 100 KB CacheService per-key cap. Returns the full file bytes so the scanner can decode them into a same-origin `data:` URL for canvas inference (Guardrail 28). |
 
 **POST** (JSON body, `Content-Type: text/plain` to dodge CORS preflight)
 | Action | Payload | Notes |
@@ -1043,6 +1342,19 @@ All responses are
 | `POLL_VIOLATIONS_MS` | `10000` | Public alerts refresh |
 | `POLL_ADMIN_MS` | `15000` | Admin tables refresh |
 | `DISMISSED_MAX` | `500` | FIFO cap on dismissed-alert memory |
+
+#### `photo_scanner.html` — Drive scanner
+| Constant | Default | Effect |
+|---|---|---|
+| `SSD_MIN_CONFIDENCE` | `0.5` | `SsdMobilenetv1Options.minConfidence` — minimum face-score for a detection to count |
+| `FACE_MATCH_DISTANCE` | `0.45` | `findBestMatch` threshold — same as live page; lower = stricter |
+| `OCR_MIN_CONFIDENCE` | `60` | Single-pass Tesseract confidence floor (no field-test override here — static high-res photos give clean reads) |
+| `BIB_MIN_LEN` / `BIB_MAX_LEN` | `1` / `6` | Accepted BIB length range for the validation gate |
+| `ADAPTIVE_THRESHOLD_BLOCK` | `15` | Local-window size for adaptive threshold (mirror of `checkpoint.html`) |
+| `ADAPTIVE_THRESHOLD_C` | `10` | Mean offset (mirror of `checkpoint.html`) |
+| `OCR_UPSCALE` | `2` | Nearest-neighbor scale factor before OCR (mirror of `checkpoint.html`) |
+| `MULTIPLE_BIBS_MIN_BLOCK_LEN` | `2` | Minimum digits per block — same shape check as the live page (Guardrail 26: run on RAW Tesseract text) |
+| `MULTIPLE_BIBS_MIN_BLOCKS` | `2` | Minimum distinct candidate blocks to fire `MULTIPLE_BIBS` |
 
 ### 6.9 Configuration knobs (backend, `Code.gs`)
 
