@@ -26,6 +26,15 @@
 > photo are now reported (capped at 15); localStorage persistence
 > makes interrupted scans resumable; per-POST throttle + image-bytes
 > prefetch-by-1 give quota safety and ~2× throughput on large folders.
+> Same-day follow-up: admins can now edit a runner's BIB inline from
+> the dashboard Runners tab — new `editRunnerProfile` POST endpoint
+> (BIB-only; Name remains read-only because it's the primary key +
+> foreign-keyed to Results/Violations/Drive folder paths). Public
+> leaderboard simplified to match the pivot: timing columns
+> (Start/CP1-4/Finish/Total_Duration) dropped from the `🏁 LEADERBOARD`
+> table, replaced with a single `Verified At` column sourced from
+> `UpdatedAt`; sort is now most-recently-identified first. Admin
+> Runners tab intentionally keeps its CP-time columns.
 >
 > Earlier in the v7 cycle (2026-05-17): added GET endpoints
 > `getDrivePhotos` + `getImageBytes`, created `templates/photo_scanner.html`
@@ -435,7 +444,7 @@ never blocks the render loop.
 
 | Source | Endpoint | Cadence | Notes |
 |---|---|---|---|
-| Public leaderboard | `getResults` | **5 s** | `POLL_RESULTS_MS` |
+| Public leaderboard | `getResults` | **5 s** | `POLL_RESULTS_MS`. Post-2026-05-18 the table renders only `Name` / `BibNumber` / `UpdatedAt` (formatted as "YYYY-MM-DD HH:MM:SS" via `formatVerifiedAt`); CP times are still fetched in the payload but no longer displayed. |
 | Public alerts | `getVerifiedViolations` | **10 s** | `POLL_VIOLATIONS_MS`; only `Verified=true` |
 | Admin tab | `getRunners`, `getViolations`, `getResults` (parallel) | **15 s** | `POLL_ADMIN_MS`; only when admin panel is active |
 
@@ -1145,6 +1154,83 @@ bundles landed in one pass:
 No backend schema or guardrail change. New scanner constants are
 documented in §6.8.
 
+**Same-day follow-up: inline BIB editing on the admin Runners tab.**
+The dashboard's admin runners tab now supports inline editing of a
+runner's BIB number, eliminating manual Google Sheet edits when a
+runner switches BIBs at check-in.
+
+- **Backend (`Code.gs`):** new POST action `editRunnerProfile` —
+  admin-gated handler that updates `Runners.BibNumber` for the row
+  whose `Name` matches, and (if a Results row exists) propagates
+  the new value to `Results.BibNumber` so the leaderboard doesn't
+  surface stale data. Invalidates the runners + results caches.
+  Distinct from the existing `updateRunner` action (which targets
+  the Results sheet's time columns); both endpoints continue to
+  coexist.
+- **Intentionally BIB-only.** `Name` is the primary key in Runners
+  AND foreign-keyed by `Name` in Results, Violations, and the Drive
+  folder path (`RunnerFaces/<name>/`), plus loaded as the
+  FaceMatcher labels on `/scan`. A safe rename would be a
+  3-sheet + Drive cascade; out of scope. The Name cell stays as
+  plain text — only the BIB cell becomes an inline input.
+- **Frontend (`dashboard.html`):** new `editingRunner` state variable
+  holds the Name of the row currently in edit mode. `renderRunnerRow`
+  switches the BIB cell to an `<input class="inline-bib-input">`
+  and the actions cell to `💾 Save` / `✖ Cancel` buttons. New
+  `data-edit-runner` / `data-save-runner` / `data-cancel-runner`
+  delegation handlers on `#admin-body`. New `saveRunnerBib(name,
+  buttonEl)` helper handles validation, loading state, and the POST.
+  `switchTab` clears `editingRunner` so tab navigation doesn't
+  leave an orphan edit state. `renderAdminTab` clears a dangling
+  `editingRunner` if the named runner is gone (another admin
+  deleted them between polls).
+- **No new auth surface.** Reuses `adminPost` and the existing
+  admin token flow. No new Flask route, no new template.
+
+`Violations.BibNumber` rows are intentionally NOT rewritten — those
+are historical records of what was observed at violation time;
+rewriting them would falsify the audit trail.
+
+**Same-day follow-up: public leaderboard trimmed to match the
+Identity Verification pivot.** Since `recordCheckpoint` under the
+`photo_verified` sentinel writes only `Name` + `BibNumber` +
+`UpdatedAt` and never touches a `CP*_Time` column, the leaderboard's
+six legacy timing columns (Start / CP1-4 / Finish / Total Duration)
+were rendering as "-" forever. Cleanup:
+
+- **`<thead>` cut from 10 columns → 4**: `#` (row number),
+  `ชื่อ` (Name), `BIB`, `Verified At`. The old `อันดับ` (Rank)
+  header was renamed `#` — without a race time, "rank" no longer
+  implies a competitive ordering, just a row position.
+- **Sort key changed**: previously partitioned into
+  finished/unfinished by `Total_Duration` presence then sorted by
+  parsed duration; now a single sort by `UpdatedAt` descending
+  (lexicographic on the ISO string — same result as Date parse,
+  faster). Rows with empty `UpdatedAt` (registered runners the
+  scanner hasn't seen yet) sort last.
+- **`#s-fin` stat card repurposed**: label changed from
+  "เข้าเส้นชัยแล้ว" (Finished) → "ระบุตัวตนแล้ว" (Identified).
+  The counter now sums rows with non-empty `UpdatedAt` instead of
+  rows with `Total_Duration`. The element id stays `s-fin` so the
+  JS update site doesn't need a rename and `git blame` still points
+  readers at this changelog entry.
+- **`parseDur` helper removed**: it was used only by the leaderboard
+  sort. `normalizeRowTimeCols` + `calcDuration` (backend) are
+  untouched — they still power `checkpoint.html` if/when live mode
+  is re-enabled.
+- **New helper `formatVerifiedAt(iso)`**: ISO → `YYYY-MM-DD
+  HH:MM:SS` local time, returns `-` for missing/unparseable input.
+  Deliberately avoids `toLocaleString()` to keep the format stable
+  across browser locales.
+
+**The admin Runners tab is intentionally NOT simplified.** The
+existing `renderRunnerRow` continues to show Start/CP1-4/Finish/
+Total Duration columns even though they're empty under the current
+scanner-only deployment — admin context still benefits from the
+shape if live mode is ever reinstated, and the columns are
+cheap-to-render dashes. The Results sheet schema is unchanged; only
+the leaderboard's display shape changed.
+
 #### 2026-05-10 — v6: Single thumbnail URL contract + dated subfolders
 
 Backend `Code.gs` bumped from v5 to v6. Two intertwined changes plus a
@@ -1548,7 +1634,8 @@ All are idempotent.
 | `deleteViolation` | `{ token, id }` | Admin; trashes Drive image |
 | `deleteViolationsBatch` | `{ token, ids: [V…] }` | Admin; up to 200 IDs |
 | `deleteRunner` | `{ token, name }` | Admin; trashes folder + clears Results |
-| `updateRunner` | `{ token, name, Start_Time?, CP1_Time?, …, Finish_Time? }` | Admin; recomputes `Total_Duration` |
+| `updateRunner` | `{ token, name, Start_Time?, CP1_Time?, …, Finish_Time? }` | Admin; edits time columns on the **Results** sheet; recomputes `Total_Duration` |
+| `editRunnerProfile` | `{ token, name, bib? }` | Admin; edits BIB on the **Runners** sheet for the runner with the given Name. Cascades to `Results.BibNumber` if a Results row exists. Empty `bib` clears the value. Invalidates runners + results caches. Distinct from `updateRunner` (which targets time columns); see §6.2 2026-05-18 entry. |
 
 All responses are
 `{ status: "success", … }` or `{ status: "error", code, message }`.

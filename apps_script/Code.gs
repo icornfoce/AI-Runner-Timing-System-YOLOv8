@@ -605,6 +605,7 @@ function doPost(e) {
       case "deleteViolationsBatch": return handleDeleteViolationsBatch(body);
       case "deleteRunner":     return handleDeleteRunner(body);
       case "updateRunner":     return handleUpdateRunner(body);
+      case "editRunnerProfile": return handleEditRunnerProfile(body);
       default:
         return jsonErr("Unknown action: " + action, "bad_request");
     }
@@ -1255,6 +1256,74 @@ function handleUpdateRunner(body) {
   invalidateResults();
   logInfo("updateRunner", { name: name });
   return jsonOk({ message: "Runner " + name + " updated" });
+}
+
+/**
+ * Inline runner-profile edit from the admin panel (BIB only).
+ *
+ * Updates `Runners.BibNumber` for the row whose `Name` matches.
+ * If a `Results` row exists for the same name, the BibNumber there
+ * is also rewritten so the public leaderboard doesn't surface a
+ * stale value. `Violations` rows are intentionally NOT rewritten —
+ * those are historical records of what was observed at violation
+ * time, and rewriting them would falsify the audit trail.
+ *
+ * Name editing is intentionally NOT supported via this endpoint:
+ * Name is the primary key on the Runners sheet AND a foreign key
+ * in Results/Violations/the Drive folder path
+ * (`RunnerFaces/<name>/`) AND the FaceMatcher labels loaded by
+ * `/scan`. A safe rename would be a 3-sheet + Drive cascade; out
+ * of scope.
+ *
+ * Distinct from `handleUpdateRunner`, which edits time columns on
+ * the Results sheet. Both endpoints are admin-gated and share the
+ * `requireAdmin` + `findRowByName` pattern.
+ */
+function handleEditRunnerProfile(body) {
+  requireAdmin(body);
+  const name = reqStr(body.name, "name", NAME_PATTERN, 50);
+  const newBib = optStr(body.bib, BIB_PATTERN, 10);
+
+  // 1) Update Runners.BibNumber for the named row.
+  const runnersSheet = getSheet(SHEETS.RUNNERS);
+  const runnersSnap = readWholeSheet(runnersSheet);
+  const runnerRowIdx = runnersSnap.findRowByName(name);
+  if (runnerRowIdx < 0) throw httpError("Runner not found: " + name, "not_found");
+
+  const runnersBibCol = runnersSnap.headerIndex("BibNumber");
+  if (runnersBibCol < 0) throw httpError("Runners sheet missing BibNumber column", "schema_error");
+  runnersSheet.getRange(runnerRowIdx, runnersBibCol + 1).setValue(newBib);
+
+  // 2) If a Results row exists for the same name, propagate the new
+  //    BIB so the leaderboard stays in sync. The runner may not have
+  //    crossed any timing point yet — the absence of a Results row
+  //    is fine.
+  let resultsUpdated = false;
+  const resultsSheet = getSheet(SHEETS.RESULTS);
+  const resultsSnap = readWholeSheet(resultsSheet);
+  const resultsRowIdx = resultsSnap.findRowByName(name);
+  if (resultsRowIdx > 0) {
+    const resultsBibCol = resultsSnap.headerIndex("BibNumber");
+    if (resultsBibCol >= 0) {
+      resultsSheet.getRange(resultsRowIdx, resultsBibCol + 1).setValue(newBib);
+      resultsUpdated = true;
+    }
+  }
+
+  // 3) Cache invalidation (Guardrail 1). The runners cache drives
+  //    the FaceMatcher labels and runnerRegistry on /scan; results
+  //    drives the leaderboard. Stale data here would mean the next
+  //    scanner POST writes the OLD BIB into Results.
+  invalidateRunners();
+  if (resultsUpdated) invalidateResults();
+
+  logInfo("editRunnerProfile", { name: name, bib: newBib, resultsUpdated: resultsUpdated });
+  return jsonOk({
+    message: "Updated BIB for " + name,
+    name: name,
+    bib: newBib,
+    resultsUpdated: resultsUpdated,
+  });
 }
 
 // ============================================================

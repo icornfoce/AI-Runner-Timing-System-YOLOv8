@@ -454,6 +454,23 @@
             background: rgba(229, 62, 62, .2)
         }
 
+        /* Inline runner-edit buttons + BIB input. Share the .btn-sm size
+           so the row height stays consistent with the delete button.
+           .btn-ed = neutral pencil; .btn-sv = brand-gradient save; .btn-cn = muted cancel. */
+        .btn-ed { background: rgba(255, 255, 255, .04); color: var(--mut); border: 1px solid var(--bdr) }
+        .btn-ed:hover { color: var(--pri); border-color: var(--pri) }
+        .btn-sv { background: linear-gradient(135deg, var(--pri), #2dd4a8); color: #0b0f14; border: 1px solid var(--pri); font-weight: 600 }
+        .btn-sv:hover:not(:disabled) { filter: brightness(1.08) }
+        .btn-sv:disabled, .btn-cn:disabled { opacity: .55; cursor: not-allowed }
+        .btn-cn { background: rgba(255, 255, 255, .04); color: var(--mut); border: 1px solid var(--bdr) }
+        .btn-cn:hover { color: var(--txt) }
+        .inline-bib-input {
+            width: 90px; padding: .3rem .5rem; border-radius: 6px;
+            border: 1px solid var(--pri); background: rgba(29, 158, 117, .08);
+            color: var(--txt); font-family: 'JetBrains Mono', monospace; font-size: .85rem;
+        }
+        .inline-bib-input:focus { outline: none; border-color: #2dd4a8; background: rgba(29, 158, 117, .15) }
+
         /* Login Modal */
         .modal-bg {
             display: none;
@@ -762,7 +779,7 @@
                 <div class="sc-v" id="s-total">0</div>
             </div>
             <div class="sc">
-                <div class="sc-l">เข้าเส้นชัยแล้ว</div>
+                <div class="sc-l">ระบุตัวตนแล้ว</div>
                 <div class="sc-v" id="s-fin" style="color:#4ade80">0</div>
             </div>
             <div class="sc" style="border-color:var(--red)">
@@ -781,16 +798,10 @@
             <table>
                 <thead>
                     <tr>
-                        <th>อันดับ</th>
+                        <th>#</th>
                         <th>ชื่อ</th>
                         <th>BIB</th>
-                        <th>Start</th>
-                        <th>CP1</th>
-                        <th>CP2</th>
-                        <th>CP3</th>
-                        <th>CP4</th>
-                        <th>Finish</th>
-                        <th>เวลารวม</th>
+                        <th>Verified At</th>
                     </tr>
                 </thead>
                 <tbody id="lb-body"></tbody>
@@ -904,6 +915,12 @@
         // explicitly after a successful bulk delete.
         let typeFilter = "ALL";
         const selectedViolationIds = new Set();
+
+        // Inline-edit state for the Runners admin tab. Holds the Name of
+        // the row currently being edited (BIB-only), or null when no row
+        // is in edit mode. Survives the 15-second admin poll's
+        // renderAdminTab() re-render because renderRunnerRow keys on it.
+        let editingRunner = null;
 
         // ── HTML ESCAPE (anti-XSS) ──
         // All data interpolated into innerHTML must pass through esc(). Raw
@@ -1037,34 +1054,43 @@
             const emp = document.getElementById("lb-empty");
             if (!results.length) { tb.innerHTML = ""; emp.style.display = ""; return; }
             emp.style.display = "none";
-            // Single-pass partition into finished/unfinished — was two filters.
-            const fin = [], unfin = [];
-            for (let i = 0; i < results.length; i++) {
-                if (results[i].Total_Duration) fin.push(results[i]); else unfin.push(results[i]);
-            }
-            fin.sort((a, b) => parseDur(a.Total_Duration) - parseDur(b.Total_Duration));
-            const sorted = fin.concat(unfin);
+            // Sort by UpdatedAt desc — most recently identified runner is
+            // row 1. Rows with empty UpdatedAt (registered but not yet
+            // seen by the scanner) sort last in their natural order. ISO
+            // strings sort lexicographically, so localeCompare on the
+            // raw value is sufficient — no Date parsing needed in hot
+            // path.
+            const sorted = results.slice().sort((a, b) => {
+                const ta = a.UpdatedAt || "";
+                const tb_ = b.UpdatedAt || "";
+                if (ta && !tb_) return -1;
+                if (!ta && tb_) return 1;
+                return tb_.localeCompare(ta);
+            });
+            const identifiedCount = sorted.reduce((n, r) => n + (r.UpdatedAt ? 1 : 0), 0);
             document.getElementById("s-total").textContent = results.length;
-            document.getElementById("s-fin").textContent = fin.length;
+            document.getElementById("s-fin").textContent = identifiedCount;
             tb.innerHTML = sorted.map((r, i) => {
                 const rank = i + 1;
                 const rc = rank === 1 ? "rank-1" : rank === 2 ? "rank-2" : rank === 3 ? "rank-3" : "";
                 return `<tr><td class="${rc}" style="font-weight:700">#${rank}</td>` +
                     `<td style="font-weight:600">${esc(r.Name || "-")}</td>` +
                     `<td>${esc(r.BibNumber || "-")}</td>` +
-                    `<td>${esc(r.Start_Time || "-")}</td>` +
-                    `<td>${esc(r.CP1_Time || "-")}</td>` +
-                    `<td>${esc(r.CP2_Time || "-")}</td>` +
-                    `<td>${esc(r.CP3_Time || "-")}</td>` +
-                    `<td>${esc(r.CP4_Time || "-")}</td>` +
-                    `<td>${esc(r.Finish_Time || "-")}</td>` +
-                    `<td class="tt">${esc(r.Total_Duration || "-")}</td></tr>`;
+                    `<td class="tt">${esc(formatVerifiedAt(r.UpdatedAt))}</td></tr>`;
             }).join("");
         }
-        function parseDur(s) {
-            if (!s) return 99999;
-            const p = String(s).split(":");
-            return (parseInt(p[0], 10) || 0) * 60 + (parseInt(p[1], 10) || 0);
+        // "2026-05-18T14:23:45.123Z" → "2026-05-18 14:23:45" in local
+        // time. Returns "-" for missing / unparseable input. Avoids
+        // toLocaleString() because the dashboard runs in mixed-locale
+        // environments (Thai labels + numeric times) and a locale-
+        // dependent format would render unpredictably across browsers.
+        function formatVerifiedAt(iso) {
+            if (!iso) return "-";
+            const d = new Date(iso);
+            if (isNaN(d.getTime())) return "-";
+            const pad = n => String(n).padStart(2, "0");
+            return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ` +
+                   `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
         }
 
         // ── ALERTS ──
@@ -1192,12 +1218,24 @@
             const el = document.getElementById("admin-loading");
             if (el) el.style.display = on ? "flex" : "none";
         }
-        function switchTab(t, el) { adminTab = t; document.querySelectorAll(".tab").forEach(b => b.classList.remove("on")); el.classList.add("on"); renderAdminTab(); }
+        function switchTab(t, el) { adminTab = t; editingRunner = null; document.querySelectorAll(".tab").forEach(b => b.classList.remove("on")); el.classList.add("on"); renderAdminTab(); }
 
         function renderRunnerRow(r) {
+            const isEditing = (editingRunner === r.Name);
+            // BIB cell flips between plain text and an inline input when
+            // the row is in edit mode. Element id contains the unescaped
+            // name (getElementById uses literal string matching, not CSS
+            // selector parsing, so dots / dashes / underscores are safe).
+            const bibCell = isEditing
+                ? `<td><input class="inline-bib-input" id="edit-bib-${attr(r.Name)}" value="${attr(r.BibNumber || "")}" maxlength="10" autocomplete="off"></td>`
+                : `<td>${esc(r.BibNumber || "-")}</td>`;
+            // Actions: in edit mode show Save + Cancel; otherwise Edit + Delete.
+            const actionsCell = isEditing
+                ? `<td style="white-space:nowrap"><button class="btn-sm btn-sv" data-save-runner="${attr(r.Name)}">💾</button> <button class="btn-sm btn-cn" data-cancel-runner="${attr(r.Name)}">✖</button></td>`
+                : `<td style="white-space:nowrap"><button class="btn-sm btn-ed" data-edit-runner="${attr(r.Name)}">✏️</button> <button class="btn-sm btn-dl" data-del-runner="${attr(r.Name)}">🗑️</button></td>`;
             return `<tr>` +
                 `<td style="font-weight:600">${esc(r.Name)}</td>` +
-                `<td>${esc(r.BibNumber || "-")}</td>` +
+                bibCell +
                 `<td style="font-size:.8rem;color:var(--mut)">${esc(r.Email || "-")}</td>` +
                 `<td class="tt">${esc(r.Start_Time)}</td>` +
                 `<td class="tt">${esc(r.CP1_Time)}</td>` +
@@ -1207,7 +1245,7 @@
                 `<td class="tt">${esc(r.Finish_Time)}</td>` +
                 `<td class="tt">${esc(r.Total_Duration)}</td>` +
                 `<td>${r.FolderUrl ? `<a href="${attr(r.FolderUrl)}" target="_blank" rel="noopener" style="color:var(--pri);font-size:.8rem">📂</a>` : "-"}</td>` +
-                `<td><button class="btn-sm btn-dl" data-del-runner="${attr(r.Name)}">🗑️</button></td>` +
+                actionsCell +
                 `</tr>`;
         }
 
@@ -1238,6 +1276,14 @@
         function renderAdminTab() {
             const body = document.getElementById("admin-body");
             const q = document.getElementById("admin-search").value.toLowerCase();
+            // Clear a dangling editingRunner — e.g., the row was deleted by
+            // another admin between polls. Without this, the inline-edit UI
+            // would silently disappear (renderRunnerRow only runs for rows
+            // that exist) but the state would still claim a row was being
+            // edited, blocking the next Edit click on a different runner.
+            if (editingRunner && !runners.some(r => r.Name === editingRunner)) {
+                editingRunner = null;
+            }
             if (adminTab === "runners") {
                 const merged = runners.map(rn => {
                     const res = results.find(r => r.Name === rn.Name) || {};
@@ -1321,12 +1367,26 @@
             const body = document.getElementById("admin-body");
             if (!body) return;
             body.addEventListener("click", e => {
-                const t = e.target.closest("[data-img], [data-verify], [data-del-runner], [data-del-violation]");
+                const t = e.target.closest("[data-img], [data-verify], [data-del-runner], [data-del-violation], [data-edit-runner], [data-save-runner], [data-cancel-runner]");
                 if (!t) return;
                 if (t.dataset.img != null) openLb(t.dataset.img);
                 else if (t.dataset.verify != null) verifyV(t.dataset.verify);
                 else if (t.dataset.delRunner != null) confirmDel("runner", t.dataset.delRunner);
                 else if (t.dataset.delViolation != null) confirmDel("violation", t.dataset.delViolation);
+                else if (t.dataset.editRunner != null) {
+                    editingRunner = t.dataset.editRunner;
+                    renderAdminTab();
+                    // Focus the input so the operator can type immediately.
+                    const inp = document.getElementById("edit-bib-" + editingRunner);
+                    if (inp) { inp.focus(); inp.select(); }
+                }
+                else if (t.dataset.cancelRunner != null) {
+                    editingRunner = null;
+                    renderAdminTab();
+                }
+                else if (t.dataset.saveRunner != null) {
+                    saveRunnerBib(t.dataset.saveRunner, t);
+                }
             });
             body.addEventListener("change", e => {
                 const cb = e.target.closest("[data-cb-id]");
@@ -1383,6 +1443,53 @@
                 if (!d || d.status !== "success") alert("ตรวจสอบไม่สำเร็จ: " + ((d && d.message) || "Unknown"));
             } catch (e) {
                 alert("ตรวจสอบไม่สำเร็จ: เชื่อมต่อเซิร์ฟเวอร์ไม่ได้");
+            }
+            loadAdminData();
+        }
+
+        // Inline runner-BIB save — called from the delegated click handler
+        // when the operator presses 💾. Mirrors verifyV / confirmDel's
+        // shape: validates locally, disables the button, POSTs via the
+        // admin token, refreshes on success. Empty bib is accepted by
+        // the backend (optStr) and clears the field; we mirror that.
+        async function saveRunnerBib(name, buttonEl) {
+            const input = document.getElementById("edit-bib-" + name);
+            if (!input) return;
+            const newBib = input.value.trim();
+            // Match server-side BIB_PATTERN /^[a-zA-Z0-9]{1,10}$/ — empty is OK.
+            if (newBib && !/^[a-zA-Z0-9]{1,10}$/.test(newBib)) {
+                alert("BIB ต้องเป็นตัวอักษร/ตัวเลข 1–10 ตัว (หรือเว้นว่าง)");
+                return;
+            }
+            buttonEl.disabled = true;
+            buttonEl.textContent = "⏳";
+            input.disabled = true;
+            try {
+                const d = await adminPost({ action: "editRunnerProfile", name: name, bib: newBib });
+                if (!d || d.status !== "success") {
+                    alert("บันทึกไม่สำเร็จ: " + ((d && d.message) || "Unknown"));
+                    // Restore the button so the operator can retry; loadAdminData
+                    // below will re-render anyway, but a transient flash of the
+                    // saving state would be confusing.
+                    buttonEl.disabled = false;
+                    buttonEl.textContent = "💾";
+                    input.disabled = false;
+                    return;
+                }
+                // Optimistic local update so the row reflects the new BIB
+                // immediately. loadAdminData() below replaces this with the
+                // authoritative server values on the next poll.
+                const r = runners.find(x => x.Name === name);
+                if (r) r.BibNumber = newBib;
+                const res = results.find(x => x.Name === name);
+                if (res) res.BibNumber = newBib;
+                editingRunner = null;
+            } catch (e) {
+                alert("บันทึกไม่สำเร็จ: เชื่อมต่อเซิร์ฟเวอร์ไม่ได้");
+                buttonEl.disabled = false;
+                buttonEl.textContent = "💾";
+                input.disabled = false;
+                return;
             }
             loadAdminData();
         }
