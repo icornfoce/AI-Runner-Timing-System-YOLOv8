@@ -12,11 +12,6 @@ body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--txt);min-
 .bar{background:rgba(11,15,20,.95);backdrop-filter:blur(18px);border-bottom:1px solid var(--bdr);padding:.7rem 1.5rem;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:50}
 .bar-l{display:flex;align-items:center;gap:1rem;flex-wrap:wrap}
 .bar h1{font-family:'Bebas Neue',sans-serif;font-size:1.4rem;letter-spacing:2px;background:linear-gradient(135deg,var(--pri),#2dd4a8);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
-.cp-sel{display:flex;gap:0;flex-wrap:wrap}
-.cp-btn{padding:.4rem .7rem;font-family:'Bebas Neue',sans-serif;font-size:.85rem;letter-spacing:1px;cursor:pointer;border:1px solid var(--bdr);background:rgba(255,255,255,.03);color:var(--mut);transition:all .2s}
-.cp-btn:first-child{border-radius:8px 0 0 8px}.cp-btn:last-child{border-radius:0 8px 8px 0}
-.cp-btn.on{background:rgba(29,158,117,.2);border-color:var(--pri);color:var(--pri)}
-.cp-btn[disabled]{opacity:.4;cursor:not-allowed}
 .bar-r{display:flex;align-items:center;gap:1rem}
 .status{display:flex;align-items:center;gap:.4rem;font-size:.8rem}
 .status.ok{color:#4ade80}.status.err{color:var(--red)}.status.warn{color:var(--yel)}
@@ -31,6 +26,13 @@ body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--txt);min-
 .preview-empty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--mut);font-size:.9rem;text-align:center;padding:2rem;pointer-events:none}
 .preview-empty.hidden{display:none}
 .control-panel{background:var(--sf);border-top:1px solid var(--bdr);padding:1rem 1.5rem;display:flex;flex-direction:column;gap:.7rem}
+/* Resume banner — shown when localStorage holds dedup state for the
+   folder being scanned (interrupted prior session). Lets the
+   operator pick up where they left off or start fresh. */
+.resume-banner{display:flex;align-items:center;gap:1rem;padding:.8rem 1rem;background:rgba(240,180,41,.12);border:1px solid rgba(240,180,41,.45);border-radius:8px;font-size:.85rem;color:var(--txt);flex-wrap:wrap}
+.resume-banner.hidden{display:none}
+.resume-banner .rb-text{flex:1;min-width:200px}
+.resume-banner .rb-actions{display:flex;gap:.5rem}
 .input-row{display:flex;gap:.6rem;align-items:center;flex-wrap:wrap}
 .input-row label{font-size:.85rem;color:var(--mut);min-width:120px}
 .input-row input[type=text]{flex:1;min-width:280px;background:rgba(255,255,255,.04);border:1px solid var(--bdr);color:var(--txt);padding:.55rem .8rem;border-radius:8px;font-family:'JetBrains Mono',monospace;font-size:.85rem}
@@ -54,6 +56,10 @@ body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--txt);min-
 .sb-count{font-family:'JetBrains Mono',monospace;font-size:.75rem;color:var(--mut)}
 .sb-list{flex:1;overflow-y:auto;padding:.5rem}
 .sb-item{padding:.7rem .8rem;border-radius:10px;margin-bottom:.4rem;background:rgba(255,255,255,.03);border:1px solid var(--bdr);animation:slideIn .3s ease}
+/* Plain .sb-item (no modifier) is a successful identification — give
+   it a green left-border accent so identifications visually pop in a
+   log mixed with duplicates, skips, and violations. */
+.sb-item:not(.violation):not(.dup):not(.skip):not(.info){border-left:3px solid var(--pri);background:rgba(29,158,117,.05)}
 .sb-item.violation{border-color:var(--red);background:rgba(229,62,62,.06)}
 .sb-item.dup{border-color:rgba(122,133,148,.4);opacity:.62}
 .sb-item.skip{border-color:rgba(240,180,41,.45);background:rgba(240,180,41,.05)}
@@ -81,15 +87,7 @@ body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--txt);min-
 <body>
 <div class="bar">
  <div class="bar-l">
-  <h1>🖼️ DRIVE SCANNER</h1>
-  <div class="cp-sel">
-   <button class="cp-btn on" id="cp-start-btn" onclick="setCP('start')">🟢 START</button>
-   <button class="cp-btn" id="cp-1-btn" onclick="setCP(1)">CP1</button>
-   <button class="cp-btn" id="cp-2-btn" onclick="setCP(2)">CP2</button>
-   <button class="cp-btn" id="cp-3-btn" onclick="setCP(3)">CP3</button>
-   <button class="cp-btn" id="cp-4-btn" onclick="setCP(4)">CP4</button>
-   <button class="cp-btn" id="cp-finish-btn" onclick="setCP('finish')">🏁 FINISH</button>
-  </div>
+  <h1>🖼️ IDENTITY VERIFICATION</h1>
  </div>
  <div class="bar-r">
   <div class="status" id="conn-status"><div class="dot"></div><span>Initializing</span></div>
@@ -103,11 +101,18 @@ body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--txt);min-
   <div class="preview-wrap">
    <canvas id="preview-canvas"></canvas>
    <div class="preview-empty" id="preview-empty">
-    Enter a Google Drive folder ID below, choose the checkpoint, then press <strong>Start Scanning</strong>.<br>
+    Enter a Google Drive folder ID below, then press <strong>Start Scanning</strong> to identify the runners in each photo and flag any BIB mismatches.<br>
     <span class="note">The folder must be shared with the script's Google account (or "Anyone with the link"). Only image files are processed.</span>
    </div>
   </div>
   <div class="control-panel">
+   <div class="resume-banner hidden" id="resume-banner">
+    <span class="rb-text" id="resume-banner-text">Found a previous scan…</span>
+    <div class="rb-actions">
+     <button class="btn primary" id="resume-yes">▶ Resume</button>
+     <button class="btn" id="resume-no">✖ Start Fresh</button>
+    </div>
+   </div>
    <div class="input-row">
     <label for="folder-id">📁 Drive Folder ID:</label>
     <input type="text" id="folder-id" placeholder="e.g. 1aB2cDeFgHiJkLmNoPqRsTuVwXyZ0123456" autocomplete="off">
@@ -120,8 +125,7 @@ body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--txt);min-
     <span class="current-name" id="current-name"></span>
    </div>
    <div class="note">
-    Timestamps are recorded at scan time (not the photo's capture time). Run one folder per checkpoint.
-    Duplicate detections within this session are suppressed automatically.
+    Identity verification only — the scanner is no longer a timing gate. Burst shots of the exact same runner AND BIB are skipped to save resources; a changed BIB will trigger a re-check (and a <code>WRONG_PERSON</code> fire if it doesn't match registration). Timestamps reflect scan time, not the photo's capture time.
    </div>
   </div>
  </div>
@@ -131,7 +135,7 @@ body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--txt);min-
   <div class="sb-stats">
    <div>Runners loaded: <strong id="runner-count">0</strong></div>
    <div>Photos: <strong id="stat-photos">0</strong></div>
-   <div>Recorded: <strong id="stat-records">0</strong></div>
+   <div>Identified: <strong id="stat-records">0</strong></div>
    <div>Violations: <strong id="stat-violations">0</strong></div>
    <div>Skipped: <strong id="stat-skipped">0</strong></div>
    <div>Errors: <strong id="stat-errors">0</strong></div>
@@ -184,10 +188,17 @@ const FACE_MATCH_DISTANCE = 0.45;
 const ADAPTIVE_THRESHOLD_BLOCK = 15;        // odd; 11–19 typical
 const ADAPTIVE_THRESHOLD_C = 10;
 const OCR_UPSCALE = 2;                      // nearest-neighbor
-// Static high-res photos give Tesseract a clean target; we keep the
-// nominal thresholds instead of the checkpoint.html field-test values.
-const OCR_MIN_CONFIDENCE = 60;
-const BIB_MIN_LEN = 1;
+// Scanner-specific thresholds — TIGHTER than the live page's
+// field-test values (60 / 1). Static photos give Tesseract a clean
+// target, so the relaxed gates don't earn their cost here — they
+// just admit garbage from shirt graphics / sponsor logos as
+// false BIBs. Audit finding #2: a shirt logo "S2 3X" can OCR to
+// "23" with conf=75, passing the old gate and firing a false
+// WRONG_PERSON for a runner with registered BIB 1234. Tightening
+// conf ≥ 80 and length ≥ 2 closes the most common false-positive
+// path without hurting recall on legitimate BIBs.
+const OCR_MIN_CONFIDENCE = 80;              // was 60
+const BIB_MIN_LEN = 2;                      // was 1
 const BIB_MAX_LEN = 6;
 
 // ── MULTIPLE_BIBS DETECTION (carried over from checkpoint.html) ──
@@ -197,11 +208,40 @@ const BIB_MAX_LEN = 6;
 const MULTIPLE_BIBS_MIN_BLOCK_LEN = 2;
 const MULTIPLE_BIBS_MIN_BLOCKS = 2;
 
-// ── CHECKPOINT BUTTONS ──────────────────────────────────────
-const CP_BUTTONS = ['start', 1, 2, 3, 4, 'finish'];
+// ── UNKNOWN-FACE REPORTING CAP ───────────────────────────────
+// A crowd photo can contain many unregistered faces. Reporting them
+// ALL is the right behavior (audit finding #4 — a single-largest
+// report misses 4 of 5 intruders), but a runaway photo with 50
+// strangers would emit 50 violation rows + 50 face-crop image
+// uploads. Cap at a reasonable number; the largest-area faces are
+// the most likely "main subject" intruders. 15 chosen (was 5) to
+// cover group shots / pack starts where many intruders may legitimately
+// appear in one frame.
+const MAX_UNKNOWNS_PER_PHOTO = 15;
+
+// ── SCAN RESILIENCE ─────────────────────────────────────────
+// localStorage persistence so an interrupted scan (tab close, OS
+// sleep, accidental reload) can resume without re-POSTing every
+// already-processed photo. Audit findings #5 / #6 / #7.
+const STORAGE_PREFIX = "drive_scanner_v1:";
+const SCAN_STATE_TTL_MS = 24 * 60 * 60 * 1000;     // 24h — event is over
+const SCAN_STATE_SAVE_DEBOUNCE_MS = 2000;          // throttle localStorage writes
+
+// Per-POST throttle to keep large batches under Apps Script's
+// per-user URL-fetch quota and avoid hammering setValues throttling
+// on the Results sheet. 150 ms × 1000 photos = +150 s wall time,
+// negligible compared to the ~1-hour scan time.
+const POST_THROTTLE_MS = 150;
+
+// Pagination request size (must be ≤ DRIVE_PHOTOS_MAX_PAGE_SIZE in
+// Code.gs). Used by the listing loop in startScan.
+const LIST_PAGE_SIZE = 500;
 
 // ── STATE ───────────────────────────────────────────────────
-let checkpointId = 'start';
+// The scanner is an identity-verification tool, not a timing gate
+// (see AI_CONTEXT §4.7). No checkpoint selector — every successful
+// face match is recorded once per session via the photo_verified
+// sentinel cpId on the backend (Guardrail 29).
 let faceMatcher = null;
 let runnerRegistry = {};                    // name → bib
 let tesseractWorker = null;
@@ -209,25 +249,23 @@ let ocrReady = false;
 let scanning = false;
 let abortScan = false;
 
-// Per-session dedup (Task 4). A burst of photos from the same camera
-// would otherwise log the same runner / violation multiple times. The
-// keys are session-scoped — reloading the page clears them.
-let seenRecords = {};                       // "name:cpId" → true
-let seenViolations = {};                    // "name:cpId:type" → true
-let seenUnknownsPerPhoto = {};              // "fileId:unknown" → true (cap UNREGISTERED at 1 per photo)
+// Per-session dedup. A burst of photos from the same camera would
+// otherwise emit the same identification / violation multiple times.
+// Keys factor in the OCR-read BIB (not just the runner's name) so a
+// mid-session BIB change — same face, different OCR — is not
+// blindly suppressed. See AI_CONTEXT §4.7. Cleared on every Start
+// press AND on page reload.
+let seenRecords = new Set();                // "name:readBib" — one identification per (name, OCR-result) per session
+let seenViolations = new Set();             // "name:type:readBib" (or :joined-blocks for MULTIPLE_BIBS; "unknown:fileId:N" for UNREGISTERED) — one violation per distinct evidence per session
+
+// Scan-resilience state. currentFolderId is captured at startScan
+// time so the debounced state-save knows which key to write under
+// (the input box can change while the scan is running, in theory).
+let currentFolderId = "";
+let saveScanStateTimer = null;
 
 // Stats counters — updated live on the right panel.
 const stats = { photos: 0, records: 0, violations: 0, skipped: 0, errors: 0 };
-
-// ── CP SELECTOR ─────────────────────────────────────────────
-function setCP(id){
- if (scanning) return;                      // can't change CP mid-batch — would split records across CPs
- checkpointId = id;
- CP_BUTTONS.forEach(b => {
-  const el = document.getElementById('cp-' + b + '-btn');
-  if (el) el.classList.toggle('on', b === id);
- });
-}
 
 // ── INIT ────────────────────────────────────────────────────
 async function init(){
@@ -308,6 +346,86 @@ function setStatus(type, text){
  el.innerHTML = `<div class="dot ${esc(type)}"></div><span>${esc(text)}</span>`;
 }
 
+// ── SCAN STATE PERSISTENCE ──────────────────────────────────
+// localStorage-backed dedup persistence so an interrupted scan can
+// resume. Keyed by folderId; 24-hour TTL so a stale state from a
+// previous event doesn't block a fresh scan with the same folder.
+// QuotaExceeded is swallowed — the next save retries; the worst
+// case (storage full) is a non-resumable scan, not a crash.
+function saveScanState(folderId){
+ if (!folderId) return;
+ try {
+  localStorage.setItem(STORAGE_PREFIX + folderId, JSON.stringify({
+   records:    Array.from(seenRecords),
+   violations: Array.from(seenViolations),
+   ts: Date.now(),
+  }));
+ } catch (e){
+  if (DEBUG) console.warn("[debug] saveScanState failed", e);
+ }
+}
+
+function loadScanState(folderId){
+ if (!folderId) return null;
+ try {
+  const raw = localStorage.getItem(STORAGE_PREFIX + folderId);
+  if (!raw) return null;
+  const parsed = JSON.parse(raw);
+  if (!parsed || typeof parsed !== "object") return null;
+  // Stale-state TTL — past this window the event is presumed over
+  // and a resume would just re-emit confusing dups.
+  if (Date.now() - (parsed.ts || 0) > SCAN_STATE_TTL_MS) {
+   clearScanState(folderId);
+   return null;
+  }
+  return parsed;
+ } catch (e){
+  if (DEBUG) console.warn("[debug] loadScanState failed", e);
+  return null;
+ }
+}
+
+function clearScanState(folderId){
+ if (!folderId) return;
+ try { localStorage.removeItem(STORAGE_PREFIX + folderId); } catch (e){}
+}
+
+// Debounced save so a burst of identifications doesn't write to
+// localStorage on every photo. 2-second debounce is a comfortable
+// trade-off — at most one localStorage.setItem per ~2s of activity.
+function scheduleScanStateSave(){
+ if (!currentFolderId) return;
+ if (saveScanStateTimer) clearTimeout(saveScanStateTimer);
+ saveScanStateTimer = setTimeout(() => {
+  saveScanStateTimer = null;
+  saveScanState(currentFolderId);
+ }, SCAN_STATE_SAVE_DEBOUNCE_MS);
+}
+
+// Promise-based banner prompt. Resolves to "resume" or "discard"
+// depending on which button the operator clicks. No timeout — the
+// scan is paused until the operator decides.
+function promptResume(savedState){
+ return new Promise(resolve => {
+  const banner = document.getElementById("resume-banner");
+  const text = document.getElementById("resume-banner-text");
+  const yesBtn = document.getElementById("resume-yes");
+  const noBtn = document.getElementById("resume-no");
+  const rec = (savedState.records || []).length;
+  const viol = (savedState.violations || []).length;
+  const ageMin = Math.floor((Date.now() - (savedState.ts || 0)) / 60000);
+  text.textContent = `Found a previous scan for this folder · ${rec} identifications, ${viol} violations · started ${ageMin} min ago.`;
+  banner.classList.remove("hidden");
+  const cleanup = () => {
+   banner.classList.add("hidden");
+   yesBtn.onclick = null;
+   noBtn.onclick = null;
+  };
+  yesBtn.onclick = () => { cleanup(); resolve("resume"); };
+  noBtn.onclick  = () => { cleanup(); resolve("discard"); };
+ });
+}
+
 // ── SCAN ORCHESTRATION ──────────────────────────────────────
 async function startScan(){
  if (scanning) return;
@@ -327,37 +445,44 @@ async function startScan(){
 
  scanning = true;
  abortScan = false;
+ currentFolderId = folderId;
  setScanUI(true);
- setStatus("ok", "🟢 Scanning…");
+ setStatus("ok", "🟢 Listing folder…");
 
  // Reset stats / dedup for a fresh batch. Records/violations from the
- // PREVIOUS batch stay in the log so the operator can review them, but
- // their dedup keys are cleared so a re-scan of the same folder
- // re-records everything (rare but useful for recovery).
+ // PREVIOUS batch stay in the log so the operator can review them.
+ // Dedup Sets are cleared, then rehydrated from localStorage if the
+ // operator chooses to resume an interrupted scan (Audit fix #5).
  stats.photos = stats.records = stats.violations = stats.skipped = stats.errors = 0;
- seenRecords = {};
- seenViolations = {};
- seenUnknownsPerPhoto = {};
+ seenRecords.clear();
+ seenViolations.clear();
  refreshStats();
  setProgress(0, 0, "");
 
- let photos = [];
+ // 1) Paginated listing — loop on hasMore so 5000-photo folders
+ //    don't time out a single Apps Script request (Audit fix #1).
+ let allPhotos = [];
+ let totalSkipped = 0;
+ let folderName = "";
  try {
-  const url = API + "?action=getDrivePhotos&folderId=" + encodeURIComponent(folderId);
-  const res = await fetch(url);
-  const data = await res.json();
-  if (!data || data.status !== "success"){
-   throw new Error((data && data.message) || "Failed to list folder");
+  let offset = 0;
+  while (true){
+   if (abortScan) break;
+   const url = API + "?action=getDrivePhotos&folderId=" + encodeURIComponent(folderId)
+             + "&offset=" + offset + "&pageSize=" + LIST_PAGE_SIZE;
+   const res = await fetch(url);
+   const data = await res.json();
+   if (!data || data.status !== "success"){
+    throw new Error((data && data.message) || "Failed to list folder");
+   }
+   allPhotos = allPhotos.concat(data.data || []);
+   totalSkipped += (data.skipped || 0);
+   folderName = data.folderName || folderName;
+   if (DEBUG) console.log("[debug] getDrivePhotos page", { offset: offset, pageCount: (data.data||[]).length, hasMore: data.hasMore });
+   if (!data.hasMore) break;
+   offset = data.nextOffset;
+   setStatus("ok", `🟢 Listing folder… ${allPhotos.length} so far`);
   }
-  photos = data.data || [];
-  if (DEBUG) console.log("[debug] getDrivePhotos", { count: photos.length, folderName: data.folderName });
-  if (photos.length === 0){
-   setStatus("warn", "⚠️ No images found in folder");
-   logSkip("(folder)", "No image files found");
-   finishScan("done");
-   return;
-  }
-  addLog("info", "Folder scan started", `${data.folderName || "Drive folder"} — ${photos.length} image(s)`);
  } catch (e){
   setStatus("err", "❌ " + (e.message || "Folder fetch failed"));
   stats.errors++;
@@ -366,20 +491,66 @@ async function startScan(){
   return;
  }
 
+ if (abortScan){
+  finishScan("aborted");
+  return;
+ }
+
+ if (allPhotos.length === 0){
+  const skipMsg = totalSkipped > 0
+   ? `No supported images found (${totalSkipped} unsupported file(s) skipped — only JPEG/PNG/WebP/GIF are accepted).`
+   : "No image files found";
+  setStatus("warn", "⚠️ " + skipMsg);
+  logSkip("(folder)", skipMsg);
+  finishScan("done");
+  return;
+ }
+ addLog("info", "Folder scan started",
+  `${folderName || "Drive folder"} — ${allPhotos.length} image(s)`
+  + (totalSkipped ? ` · ${totalSkipped} unsupported skipped` : ""));
+
+ // 2) Resume check — if a prior interrupted scan left state in
+ //    localStorage for this folder, ask the operator whether to
+ //    rehydrate or start fresh (Audit fix #5).
+ const savedState = loadScanState(folderId);
+ if (savedState){
+  setStatus("warn", "⏸ Awaiting resume decision");
+  const decision = await promptResume(savedState);
+  if (decision === "resume"){
+   (savedState.records || []).forEach(k => seenRecords.add(k));
+   (savedState.violations || []).forEach(k => seenViolations.add(k));
+   addLog("info", "Resumed prior scan",
+    `${seenRecords.size} identification(s) + ${seenViolations.size} violation(s) restored — already-processed photos will be ♻️ skipped`);
+  } else {
+   clearScanState(folderId);
+   addLog("info", "Discarded prior scan state", "Starting fresh");
+  }
+ }
+ setStatus("ok", "🟢 Scanning…");
+
  document.getElementById("preview-empty").classList.add("hidden");
 
- // Sequential processing — keeps memory bounded (one image decoded at
- // a time) and the operator can see the current image rendering. Each
- // photo runs end-to-end (fetch bytes → detect → OCR per face → POST
- // records/violations) before the next starts.
- for (let i = 0; i < photos.length; i++){
+ // 3) Sequential processing with prefetch-by-1 — fetch photo i+1's
+ //    bytes WHILE inference runs on photo i (Audit fix #7). Memory
+ //    stays bounded (only 2 images decoded simultaneously, one in
+ //    transit and one in inference), wall time approximately halves.
+ let nextBytesPromise = fetchImageBytes(allPhotos[0]);
+ for (let i = 0; i < allPhotos.length; i++){
   if (abortScan) break;
-  const p = photos[i];
-  setProgress(i, photos.length, p.name);
+  const p = allPhotos[i];
+  setProgress(i, allPhotos.length, p.name);
+
+  // Await the (possibly already-resolved) prefetched payload.
+  const bytesPayload = await nextBytesPromise;
+  // Kick off prefetch for i+1 BEFORE running inference on i.
+  nextBytesPromise = (i + 1 < allPhotos.length && !abortScan)
+   ? fetchImageBytes(allPhotos[i + 1])
+   : null;
+
   try {
-   await processPhoto(p);
+   await processPhotoWithBytes(p, bytesPayload);
   } catch (e){
-   console.warn("processPhoto failed for", p.name, e);
+   console.warn("processPhotoWithBytes failed for", p.name, e);
    stats.errors++;
    logSkip(p.name, "Error: " + (e.message || e));
   }
@@ -387,7 +558,7 @@ async function startScan(){
   refreshStats();
  }
 
- setProgress(photos.length, photos.length, "");
+ setProgress(allPhotos.length, allPhotos.length, "");
  finishScan(abortScan ? "aborted" : "done");
 }
 
@@ -401,21 +572,37 @@ function finishScan(reason){
  scanning = false;
  abortScan = false;
  setScanUI(false);
+
+ // Cancel any pending debounced save and force an immediate write
+ // (or clear, depending on the reason) so localStorage reflects the
+ // final state synchronously.
+ if (saveScanStateTimer){
+  clearTimeout(saveScanStateTimer);
+  saveScanStateTimer = null;
+ }
+ if (reason === "done"){
+  // Scan finished cleanly — no resume needed. Discard the saved
+  // state so the next run of this folder starts fresh.
+  clearScanState(currentFolderId);
+ } else if (currentFolderId){
+  // Aborted or errored mid-scan — persist current state so the
+  // operator can resume next time. Flushes any pending debounced
+  // save synchronously.
+  saveScanState(currentFolderId);
+ }
+
  const msg = reason === "aborted" ? "⚠️ Stopped"
            : reason === "error"   ? "❌ Scan failed"
            : "✅ Done";
  setStatus(reason === "done" ? "ok" : reason === "error" ? "err" : "warn", msg);
- addLog("info", "Scan finished", `${stats.photos} photos · ${stats.records} records · ${stats.violations} violations · ${stats.skipped} skipped · ${stats.errors} errors`);
+ addLog("info", "Scan finished", `${stats.photos} photos · ${stats.records} identified · ${stats.violations} violations · ${stats.skipped} skipped · ${stats.errors} errors`);
+ currentFolderId = "";
 }
 
 function setScanUI(active){
  document.getElementById("start-btn").disabled = active;
  document.getElementById("stop-btn").disabled = !active;
  document.getElementById("folder-id").disabled = active;
- CP_BUTTONS.forEach(b => {
-  const el = document.getElementById('cp-' + b + '-btn');
-  if (el) el.disabled = active;
- });
 }
 
 function setProgress(done, total, name){
@@ -429,27 +616,34 @@ function setProgress(done, total, name){
 }
 
 // ── PHOTO PROCESSING ────────────────────────────────────────
-// Fetches one image as base64, decodes it into a same-origin data URL
-// (the whole reason we have a getImageBytes endpoint — Drive thumbnail
-// URLs taint the canvas because lh3.googleusercontent.com doesn't send
-// CORS headers), draws it to the preview canvas, then runs face-api +
-// per-face OCR. No multi-frame state — single detection per face.
-async function processPhoto(photo){
- // Fetch bytes via Apps Script. Same-origin data URL avoids the canvas
- // taint that a direct <img crossOrigin> against Drive would cause.
- const bytesUrl = API + "?action=getImageBytes&fileId=" + encodeURIComponent(photo.id);
- let res, payload;
+// Fetches one image as base64 over the same-origin Apps Script
+// channel. The whole reason getImageBytes exists is that Drive
+// thumbnail URLs taint the canvas (lh3.googleusercontent.com doesn't
+// send CORS headers — see Guardrail 28). Returns the parsed payload
+// or `{ error: "..." }` on failure. Used both for prefetch and for
+// the on-demand path; never throws.
+async function fetchImageBytes(photo){
  try {
-  res = await fetch(bytesUrl);
-  payload = await res.json();
+  const url = API + "?action=getImageBytes&fileId=" + encodeURIComponent(photo.id);
+  const res = await fetch(url);
+  const payload = await res.json();
+  if (!payload || payload.status !== "success"){
+   return { error: (payload && payload.message) || "Fetch failed" };
+  }
+  return payload;
  } catch (e){
-  stats.skipped++;
-  logSkip(photo.name, "Fetch error: " + (e.message || e));
-  return;
+  return { error: "Fetch error: " + (e.message || e) };
  }
- if (!payload || payload.status !== "success"){
+}
+
+// Decodes the (pre-fetched) bytes into a same-origin data URL, draws
+// to the preview canvas, runs face-api + per-face OCR. The bytes
+// fetch lives in fetchImageBytes — separated so the scan loop can
+// prefetch photo i+1's bytes during photo i's inference.
+async function processPhotoWithBytes(photo, payload){
+ if (!payload || payload.error){
   stats.skipped++;
-  logSkip(photo.name, (payload && payload.message) || "Fetch failed");
+  logSkip(photo.name, (payload && payload.error) || "Fetch failed");
   return;
  }
 
@@ -488,10 +682,12 @@ async function processPhoto(photo){
   return;
  }
 
- // Categorize and draw overlay boxes for operator feedback.
- let largestUnknown = null;
- let largestUnknownArea = 0;
+ // Categorize and draw overlay boxes for operator feedback. We
+ // capture EVERY unknown face's box so we can report all of them
+ // below (capped at MAX_UNKNOWNS_PER_PHOTO) — a crowd photo
+ // shouldn't lose 4 of 5 intruders to a "largest only" filter.
  const knownHits = [];
+ const unknownHits = [];
  for (const det of detections){
   const match = faceMatcher.findBestMatch(det.descriptor);
   const isKnown = match.label !== "unknown" && match.distance <= FACE_MATCH_DISTANCE;
@@ -500,11 +696,8 @@ async function processPhoto(photo){
    knownHits.push({ name: match.label, distance: match.distance, box: det.detection.box });
   } else {
    drawDetectionBox(ctx, det.detection.box, "Unknown", true);
-   const area = det.detection.box.width * det.detection.box.height;
-   if (area > largestUnknownArea){
-    largestUnknownArea = area;
-    largestUnknown = det.detection.box;
-   }
+   const b = det.detection.box;
+   unknownHits.push({ box: b, area: b.width * b.height });
   }
  }
 
@@ -514,22 +707,24 @@ async function processPhoto(photo){
   await handleKnownFace(canvas, hit, photo);
  }
 
- // One UNREGISTERED report per photo, on the largest unknown face —
- // matches checkpoint.html's per-frame behavior. Per-photo cap is
- // tracked in seenUnknownsPerPhoto so a re-detect in the same photo
- // can't double-fire.
- if (largestUnknown){
-  const key = photo.id + ":unknown";
-  if (!seenUnknownsPerPhoto[key]){
-   seenUnknownsPerPhoto[key] = true;
-   await fireViolation({
-    name: "Unknown",
-    bib: "",
-    message: `Unregistered face in photo "${photo.name}"`,
-    violationType: "UNREGISTERED",
-    image: cropToDataUrl(canvas, largestUnknown, 0.5),
-   }, "unknown:" + photo.id + ":UNREGISTERED");
-  }
+ // UNREGISTERED — one fire per distinct unknown face, capped per
+ // photo. Sort by area descending so the most prominent intruders
+ // are reported first when the cap kicks in. Per-index dedup key
+ // (`"unknown:fileId:N"`) ensures the same face index in the same
+ // photo can't double-fire even if the loop is re-entered somehow,
+ // while different faces and different photos each get their own
+ // violation row.
+ unknownHits.sort((a, b) => b.area - a.area);
+ const reportedUnknowns = unknownHits.slice(0, MAX_UNKNOWNS_PER_PHOTO);
+ for (let i = 0; i < reportedUnknowns.length; i++){
+  const u = reportedUnknowns[i];
+  await fireViolation({
+   name: "Unknown",
+   bib: "",
+   message: `Unregistered face #${i + 1} in photo "${photo.name}"`,
+   violationType: "UNREGISTERED",
+   image: cropToDataUrl(canvas, u.box, 0.5),
+  }, "unknown:" + photo.id + ":" + i);
  }
 }
 
@@ -538,44 +733,56 @@ async function handleKnownFace(canvas, hit, photo){
  const { name, box } = hit;
  const expectedBib = runnerRegistry[name] || "";
 
- // 1) recordCheckpoint — once per session per name+cpId. Burst shots
- //    of the same runner at the same CP collapse to one record (Task 4).
- const recordKey = name + ":" + checkpointId;
- if (!seenRecords[recordKey]){
-  seenRecords[recordKey] = true;
-  await sendRecordCheckpoint(name, expectedBib, photo);
- } else {
-  addLog("dup", name, `Already recorded at ${cpLabel(checkpointId)} — photo "${photo.name}"`);
+ // Single OCR pass per face, BEFORE the identification gate. The
+ // OCR result (or its absence) becomes part of every dedup key
+ // below, so a mid-session BIB change — same face, different OCR —
+ // is not blindly suppressed as a burst-shot duplicate. The
+ // MULTIPLE_BIBS check still runs on RAW text before digit
+ // normalization (Guardrail 26); see AI_CONTEXT §4.7 for the
+ // (name, OCR-result) dedup rationale.
+ const ocr = ocrReady ? await runOCRForFace(canvas, box) : null;
+ const readBib = (ocr && ocr.bib) || "";                 // empty when OCR failed / silent reject
+ const multipleBibs = ocr && ocr.multipleBibsBlocks;
+
+ // 1) Identity verification (POST recordCheckpoint with the
+ //    photo_verified sentinel). Dedup keyed on (name, readBib) —
+ //    burst shots collapse, but a CHANGED OCR result re-fires.
+ //    Same face + same OCR = identical evidence ⇒ skip violation
+ //    check too (an identical OCR would just hit the violation
+ //    dedup below anyway).
+ const recordKey = name + ":" + readBib;
+ if (seenRecords.has(recordKey)){
+  addLog("dup", name, `Already identified with BIB ${readBib || "—"} this session · "${photo.name}"`);
+  return;
  }
+ seenRecords.add(recordKey);
+ scheduleScanStateSave();
+ await sendIdentification(name, expectedBib, photo);
 
- // 2) OCR — single read per face (Task 3: no majority voting). The
- //    MULTIPLE_BIBS check runs on RAW text before digit normalization
- //    (Guardrail 26). WRONG_PERSON fires on a single passing read
- //    instead of a 3-of-5 consensus — acceptable because the scanner
- //    operates on photographer's selects (already curated for clarity).
- if (!ocrReady) return;
- const ocr = await runOCRForFace(canvas, box);
- if (!ocr) return;
-
- if (ocr.multipleBibsBlocks){
+ // 2) Violations — dedup keys carry the OCR result so distinct
+ //    misreads of the same runner fire distinct violations. WRONG_PERSON
+ //    fires on a single passing read (the scanner operates on
+ //    photographer's selects, already curated for clarity).
+ if (multipleBibs){
+  const blocksKey = multipleBibs.join(",");
   await fireViolation({
    name,
    bib: "",
-   message: `Multiple BIBs detected on ${name} in "${photo.name}": ${ocr.multipleBibsBlocks.join(", ")}`,
+   message: `Multiple BIBs detected on ${name} in "${photo.name}": ${multipleBibs.join(", ")}`,
    violationType: "MULTIPLE_BIBS",
    image: cropToDataUrl(canvas, box, 0.5),
-  }, name + ":" + checkpointId + ":MULTIPLE_BIBS");
+  }, name + ":MULTIPLE_BIBS:" + blocksKey);
   return;
  }
 
- if (ocr.bib && expectedBib && ocr.bib !== expectedBib){
+ if (readBib && expectedBib && readBib !== expectedBib){
   await fireViolation({
    name,
-   bib: ocr.bib,
-   message: `Expected BIB ${expectedBib}, Found ${ocr.bib} in "${photo.name}"`,
+   bib: readBib,
+   message: `Expected BIB ${expectedBib}, Found ${readBib} in "${photo.name}"`,
    violationType: "WRONG_PERSON",
    image: cropToDataUrl(canvas, box, 0.5),
-  }, name + ":" + checkpointId + ":WRONG_PERSON");
+  }, name + ":WRONG_PERSON:" + readBib);
  }
 }
 
@@ -695,13 +902,19 @@ function preprocessForOCR(srcCanvas){
 }
 
 // ── API CALLS ───────────────────────────────────────────────
-// Reuses the existing recordCheckpoint / reportViolation contracts —
-// the backend doesn't care whether the source is a live camera or a
-// Drive scan. Timestamp is scan-time HH:MM:SS (we don't extract EXIF;
-// document that limitation in the UI note).
-async function sendRecordCheckpoint(name, bib, photo){
+// Reuses the existing recordCheckpoint POST contract — the backend
+// recognizes the photo_verified sentinel cpId (Guardrail 29) and
+// short-circuits to a write that only touches Name + BibNumber +
+// UpdatedAt, never a CP_Time column. reportViolation is reused as-is.
+// Timestamp is scan-time HH:MM:SS — see AI_CONTEXT §6.5 for the
+// EXIF-vs-scan-time tradeoff.
+async function sendIdentification(name, bib, photo){
  const timeStr = new Date().toTimeString().split(" ")[0];
- addLog("ok", name, `${cpLabel(checkpointId)} @ ${timeStr} · ${photo.name}`);
+ // Prominent display: "✅ Kawin (BIB 1234)" with the BIB inline next
+ // to the name so the operator can scan-read identifications quickly.
+ // BIB falls back to "—" when a runner has no registered BIB (rare).
+ const nameWithBib = `${name} (BIB ${bib || "—"})`;
+ addLog("ok", nameWithBib, `${timeStr} · ${photo.name}`);
  try {
   const resp = await fetch(API, {
    method: "POST",
@@ -709,7 +922,7 @@ async function sendRecordCheckpoint(name, bib, photo){
    body: JSON.stringify({
     action: "recordCheckpoint",
     name,
-    checkpoint_id: checkpointId,
+    checkpoint_id: "photo_verified",       // sentinel — see Guardrail 29
     timestamp: timeStr,
     bib,
    }),
@@ -718,23 +931,28 @@ async function sendRecordCheckpoint(name, bib, photo){
   const result = await resp.json();
   if (!result || result.status !== "success"){
    stats.errors++;
-   addLog("err", name, "Record failed: " + ((result && result.message) || "Unknown"));
-   return;
+   addLog("err", name, "Identification write failed: " + ((result && result.message) || "Unknown"));
+  } else {
+   stats.records++;
+   refreshStats();
   }
-  stats.records++;
-  refreshStats();
  } catch (e){
   stats.errors++;
   addLog("err", name, "Network error: " + (e.message || e));
  }
+ // POST_THROTTLE_MS — quota safety. Applied even on failure so a
+ // backend outage doesn't trigger a burst of retries against an
+ // already-struggling endpoint.
+ await sleep(POST_THROTTLE_MS);
 }
 
 async function fireViolation(payload, dedupKey){
- if (seenViolations[dedupKey]){
+ if (seenViolations.has(dedupKey)){
   addLog("dup", payload.name, `Duplicate violation suppressed (${payload.violationType})`);
   return;
  }
- seenViolations[dedupKey] = true;
+ seenViolations.add(dedupKey);
+ scheduleScanStateSave();
  addLog("viol", payload.name, `⚠️ ${payload.message}`);
  try {
   await fetch(API, {
@@ -756,6 +974,12 @@ async function fireViolation(payload, dedupKey){
   stats.errors++;
   addLog("err", payload.name, "Failed to send violation: " + (e.message || e));
  }
+ await sleep(POST_THROTTLE_MS);
+}
+
+// Promise-based sleep helper for the per-POST throttle.
+function sleep(ms){
+ return new Promise(r => setTimeout(r, ms));
 }
 
 // ── CANVAS HELPERS ──────────────────────────────────────────
@@ -813,12 +1037,6 @@ function esc(s){
   {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 }
 
-function cpLabel(id){
- return id === 'start'  ? 'Start'
-      : id === 'finish' ? 'Finish'
-      : 'CP' + id;
-}
-
 function addLog(kind, name, info){
  const list = document.getElementById("sb-list");
  const item = document.createElement("div");
@@ -827,6 +1045,7 @@ function addLog(kind, name, info){
   kind === "dup"   ? "sb-item dup" :
   kind === "skip"  ? "sb-item skip" :
   kind === "err"   ? "sb-item violation" :
+  kind === "info"  ? "sb-item info" :
   "sb-item";
  const icon =
   kind === "viol"  ? "🔴" :

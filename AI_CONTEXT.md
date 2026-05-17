@@ -9,22 +9,30 @@
 > cadence, caching, or guardrails MUST update this file in the same change
 > set.
 >
-> **Last updated:** 2026-05-17 — Backend bumped to **v7**: new
-> read-only endpoints `getDrivePhotos` (lists images inside a
-> photographer-supplied Drive folder) and `getImageBytes` (streams a
-> single Drive image as base64) power a new browser page
-> `templates/photo_scanner.html` (`/scan`). The scanner runs the same
-> face-api + Tesseract pipeline as `checkpoint.html` but **on static
-> photos uploaded to Drive after the race**, with SSD MobileNet
-> instead of TinyFaceDetector and no multi-frame state (no EMA, no
-> majority voting, no Ghost-BIB counter). Per-session dedup keeps
-> burst shots from double-recording. Same-day follow-up: the
-> `/checkpoint` Flask route is **commented out** and the dashboard
-> nav link replaced with a Photo Scanner CTA, so live-camera mode is
-> no longer reachable from the UI. `templates/checkpoint.html` is
-> retained on disk (and remains the canonical reference for the
-> multi-frame pipeline this doc describes); restoring live mode is a
-> one-line uncomment in `web_app.py`.
+> **Last updated:** 2026-05-18 — Drive Scanner pivots from "timing"
+> to "identity verification" and lands a four-bundle audit-fix pass.
+> The checkpoint selector (START / CP1-4 / FINISH) is gone; the
+> scanner now answers a single question per photo — *who is in this
+> photo, and are they wearing the correct BIB?* — and persists each
+> unique identification at most once per session. The scanner POSTs
+> `recordCheckpoint` with a new `checkpoint_id: "photo_verified"`
+> sentinel; `handleRecordCheckpoint` short-circuits to
+> `_recordPhotoVerification`, which writes only `BibNumber` +
+> `UpdatedAt` (no CP_Time column). All existing CP-aware behavior
+> (start / 1-4 / finish) is unchanged. New Guardrail #29 pins the
+> sentinel semantics. Same-day audit hardening: `getDrivePhotos`
+> gains pagination + a strict mimeType allow-list; scanner OCR gates
+> tightened (conf 60→80, BIB_MIN_LEN 1→2); ALL unknown faces per
+> photo are now reported (capped at 15); localStorage persistence
+> makes interrupted scans resumable; per-POST throttle + image-bytes
+> prefetch-by-1 give quota safety and ~2× throughput on large folders.
+>
+> Earlier in the v7 cycle (2026-05-17): added GET endpoints
+> `getDrivePhotos` + `getImageBytes`, created `templates/photo_scanner.html`
+> (`/scan`), retired the `/checkpoint` route (file kept on disk),
+> refreshed the dashboard nav with a primary Scanner CTA. Backend
+> remains v7; the scanner pivot is frontend + a single
+> backend-handler short-circuit.
 
 ---
 
@@ -514,12 +522,31 @@ error logs and is swallowed — sheet deletion always proceeds.
 
 ### 4.7 Drive Photo Scanner (`photo_scanner.html` → `recordCheckpoint`/`reportViolation`)
 
-A **batch, post-race** processing mode that complements the live
-`checkpoint.html` loop. Photographers dump event photos into a shared
-Drive folder; an operator opens `/scan`, pastes the folder ID, picks a
-checkpoint, and presses Start. The browser pulls each photo through
-Apps Script, runs SSD MobileNet + Tesseract, and emits the same
-`recordCheckpoint` / `reportViolation` POSTs the live page emits.
+A **post-race identity-verification** tool. The scanner is NOT a
+timing gate — it answers a single question per photo:
+*who is in this photo, and are they wearing the correct BIB?* The
+checkpoint selector that earlier versions had (START / CP1-4 /
+FINISH) is gone — there is no CP. Each unique runner is identified
+at most once per scanning session, regardless of how many burst
+shots the photographer took. Violations (`WRONG_PERSON`,
+`MULTIPLE_BIBS`, `UNREGISTERED`) continue to fire because catching
+mismatches is the remaining reason the scanner writes to the
+backend at all.
+
+Photographers dump event photos into a shared Drive folder; an
+operator opens `/scan`, pastes the folder ID, presses Start. The
+browser pulls each photo through Apps Script, runs SSD MobileNet +
+Tesseract, and emits POSTs:
+
+- `recordCheckpoint` — with the **`checkpoint_id: "photo_verified"`
+  sentinel** (Guardrail 29). The backend short-circuits to
+  `_recordPhotoVerification`, which writes the runner's `Name` +
+  `BibNumber` + `UpdatedAt` to the Results sheet **without touching
+  any CP_Time column**. Fired once per runner per session.
+- `reportViolation` — unchanged. Fires when face matches a runner
+  but OCR returns a different BIB (`WRONG_PERSON`), when multiple
+  distinct BIB blocks appear on one chest (`MULTIPLE_BIBS`), or when
+  no face match exists (`UNREGISTERED`).
 
 ```
 init():
@@ -533,52 +560,84 @@ init():
   })
 
 startScan():
-  GET /?action=getDrivePhotos&folderId=<id>
-    → [{ id, name, mimeType, thumbnailUrl }, ...]
-  for each photo, sequentially (Stop button aborts the loop):
-    GET /?action=getImageBytes&fileId=<id>
-      → { base64, mimeType }                ← un-tainted same-origin path
-    decode → <img> → draw to preview canvas at native resolution
-    detectAllFaces(canvas, SsdMobilenetv1Options{minConfidence:0.5})
-      .withFaceLandmarks().withFaceDescriptors()
+  // 1) Paginated listing — loop on hasMore so a 5000-photo folder
+  //    doesn't time out a single Apps Script request.
+  offset = 0; allPhotos = []
+  loop:
+    GET /?action=getDrivePhotos&folderId=<id>&offset=<n>&pageSize=500
+      → { data: [{id, name, mimeType, thumbnailUrl}], hasMore,
+          nextOffset, skipped }
+    allPhotos = allPhotos.concat(data)
+    if !hasMore: break
+    offset = nextOffset
 
-    for each detection:
-      match = faceMatcher.findBestMatch(descriptor)
-      isKnown = match.label !== "unknown" AND match.distance ≤ FACE_MATCH_DISTANCE
-      draw rectangle (green/red) on preview canvas
-      categorize: knownHits[] or largestUnknown
+  // 2) Resume check — if localStorage has saved dedup state for
+  //    this folderId (24-hour TTL), prompt the operator. Resume →
+  //    rehydrate seenRecords + seenViolations; Discard → clear.
+  if loadScanState(folderId):
+    decision = await promptResume(...)
+    if "resume": seenRecords/seenViolations populated from storage
+    else:        clearScanState(folderId)
 
-    ── recordCheckpoint trigger (face-only, dedup-gated) ──
-    for each known hit:
-      if !seenRecords["name:cpId"]:
-        seenRecords["name:cpId"] = true
-        POST recordCheckpoint(name, cpId, scanTimeHHMMSS, bib)
-      run single-pass OCR on chest crop (getOCRCropBox)
+  // 3) Prefetch-by-1 sequential loop — photo i+1's bytes fetch
+  //    starts BEFORE photo i's inference runs, ~2× throughput.
+  nextBytesPromise = fetchImageBytes(allPhotos[0])
+  for i in 0..allPhotos.length (Stop button aborts the loop):
+    bytesPayload = await nextBytesPromise
+    nextBytesPromise = fetchImageBytes(allPhotos[i + 1])   ← prefetch
+    processPhotoWithBytes(allPhotos[i], bytesPayload):
+      decode → <img> → draw to preview canvas at native resolution
+      detectAllFaces(canvas, SsdMobilenetv1Options{minConfidence:0.5})
+        .withFaceLandmarks().withFaceDescriptors()
 
-    ── OCR (single read per face, NO majority vote) ──
+      for each detection:
+        match = faceMatcher.findBestMatch(descriptor)
+        isKnown = match.label !== "unknown" AND match.distance ≤ FACE_MATCH_DISTANCE
+        draw rectangle (green/red) on preview canvas
+        categorize: knownHits[] or unknownHits[]   ← ALL unknowns kept
+
+    ── OCR FIRST (single read per face, NO majority vote) ──
     preprocessForOCR(crop):
       grayscale (BT.601) → integral image →
       adaptive threshold (mean − ADAPTIVE_THRESHOLD_C,
                           ADAPTIVE_THRESHOLD_BLOCK² window) →
       nearest-neighbor 2× upscale
     {text, conf} = tesseractWorker.recognize(processed)
+    readBib       = digits-only normalized text (or "" if fails validation gate)
+    multipleBibs  = RAW text \d{MULTIPLE_BIBS_MIN_BLOCK_LEN,}+ blocks
+                    if count ≥ MULTIPLE_BIBS_MIN_BLOCKS, else null
 
-    if RAW text has ≥MULTIPLE_BIBS_MIN_BLOCKS blocks of length
-       ≥MULTIPLE_BIBS_MIN_BLOCK_LEN:
-      fireViolation MULTIPLE_BIBS (dedup key "name:cpId:MULTIPLE_BIBS")
+    ── identification trigger (face + OCR-result, session-dedup) ──
+    for each known hit:
+      recordKey = name + ":" + readBib
+      if seenRecords.has(recordKey):
+        log "♻️ Already identified with BIB <readBib> this session"
+        continue                          ← same face + same OCR ≡ identical evidence
+      seenRecords.add(recordKey)
+      POST recordCheckpoint(name,
+                            checkpoint_id="photo_verified",
+                            scanTimeHHMMSS, registeredBib)
+      log "✅ <name> (BIB <registeredBib>)"
+
+    ── violations (dedup keys carry the OCR result) ──
+    if multipleBibs:
+      fireViolation MULTIPLE_BIBS
+        (dedup key "name:MULTIPLE_BIBS:" + multipleBibs.join(","))
       continue
 
-    digitsOnly = text.replace(/[^0-9]/g, "")
-    if !digitsOnly OR length ∉ [BIB_MIN_LEN, BIB_MAX_LEN] OR conf < OCR_MIN_CONFIDENCE:
-      silent reject (NO Ghost-BIB counter — no multi-frame state)
-    else if registered[name] AND digitsOnly !== registered[name]:
-      fireViolation WRONG_PERSON (dedup key "name:cpId:WRONG_PERSON")
+    if readBib AND registered[name] AND readBib !== registered[name]:
+      fireViolation WRONG_PERSON
+        (dedup key "name:WRONG_PERSON:" + readBib)
 
-    ── UNREGISTERED trigger (largest unknown per photo) ──
-    if largestUnknown exists AND !seenUnknownsPerPhoto["fileId:unknown"]:
-      seenUnknownsPerPhoto["fileId:unknown"] = true
+    silent reject (NO Ghost-BIB counter — no multi-frame state)
+      ↳ when readBib is "" because OCR failed / length / conf gate fired
+
+    ── UNREGISTERED trigger (ALL unknowns per photo, capped) ──
+    unknownHits.sort by area desc
+    reportedUnknowns = unknownHits.slice(0, MAX_UNKNOWNS_PER_PHOTO)
+    for i in 0..reportedUnknowns.length:
       fireViolation UNREGISTERED with face crop
-                    (dedup key "unknown:fileId:UNREGISTERED")
+                    (dedup key "unknown:fileId:i" — per-face-index)
 ```
 
 **Why two endpoints instead of one inline base64 payload.** The Drive
@@ -614,19 +673,60 @@ silent rejects.
 
 **Per-session deduplication.** Burst-mode photography (10 fps shutter
 on the same runner) would otherwise emit one record per photo. The
-scanner suppresses duplicates with three in-memory sets:
+scanner suppresses duplicates with three in-memory `Set` instances:
 
-| Key                                       | Purpose                                        |
-|---|---|
-| `seenRecords["name:cpId"]`                | One `recordCheckpoint` per runner per CP per session  |
-| `seenViolations["name:cpId:type"]`        | One violation per type per runner per CP per session  |
-| `seenUnknownsPerPhoto["fileId:unknown"]`  | Cap `UNREGISTERED` at ≤1 per photo (matches live)     |
+| Set                       | Element shape                                          | Purpose                                                 |
+|---|---|---|
+| `seenRecords`             | `"name:readBib"`                                       | One identification per **(name, OCR'd BIB)** pair per session. Same face + same OCR collapses; same face + DIFFERENT OCR re-fires (catches mid-session BIB changes). `readBib` is `""` when OCR failed / hit the silent-reject gate. |
+| `seenViolations`          | `"name:type:readBib"` (or `:joined-blocks` for `MULTIPLE_BIBS`; `"unknown:fileId:N"` for `UNREGISTERED` per face index) | One violation per distinct piece of evidence per session. Burst shots of identical evidence collapse; distinct misreads of the same runner fire distinct violations. UNREGISTERED uses per-face-index so a crowd photo of N unknowns produces N rows (up to `MAX_UNKNOWNS_PER_PHOTO`). |
 
-Sets reset on page reload OR when Start is pressed for a fresh batch.
+The earlier `seenUnknownsPerPhoto` set was retired in the 2026-05-18
+audit pass — the per-face-index `seenViolations` key
+(`"unknown:fileId:N"`) gives the same per-photo capping behavior
+without a parallel set. Different photos of the same unknown person
+still each fire one `UNREGISTERED` (different `fileId`); the cap on
+*within* a single photo is `MAX_UNKNOWNS_PER_PHOTO = 15`, applied at
+the iteration level before any dedup keys are computed.
+
+Sets are cleared on every Start press AND on page reload.
+
+**Why the OCR result is part of every dedup key.** A name-only
+`seenRecords` would correctly collapse burst shots, but it would
+also blindly suppress mid-batch BIB changes: if Kawin reads BIB 1234
+in photo 1, the first `WRONG_PERSON` (say, BIB 9999 in photo 5) does
+fire — but a yet-another-wrong-BIB read (8888 in photo 7) would be
+suppressed by a name-only `seenViolations` key. Folding the OCR
+result into both keys keeps burst-shot dedup intact (identical OCR ≡
+identical evidence) while letting every distinct misread surface for
+admin review. The scanner also early-returns on a `seenRecords` hit:
+the OCR has already run, the result is identical to a previously
+recorded one, so the violation outcome would be identical too —
+re-running the violation check would be redundant.
+
 **There is no backend dedup**: the backend remains stateless across
-scanner calls. A duplicate that slips through (e.g. operator re-runs
-the same folder after a reload) writes a duplicate row — admins
-clean it up via the dashboard's bulk-delete tools.
+scanner calls. **But the frontend persists its dedup state to
+`localStorage`** under `drive_scanner_v1:<folderId>` with a 24-hour
+TTL, so a closed tab / OS sleep / accidental reload doesn't doom
+the operator to re-POSTing every already-processed photo. On the
+next Start press for the same folder, a banner prompts "Found a
+previous scan for this folder · N identifications, M violations …
+Resume?" — Resume rehydrates the `Set` instances; Start Fresh
+clears the entry. State is saved on every `Set` mutation
+(debounced 2 s) and force-flushed on `finishScan("aborted"/"error")`.
+A clean `finishScan("done")` clears the entry — no resume needed
+on the next run of the same folder.
+
+**Pagination + prefetch + throttle.** `getDrivePhotos` is paged
+(`offset` / `pageSize`, default 500, max 1000) so a 5000-photo
+folder can't blow the 6-min Apps Script limit on the listing call.
+The frontend loops on `hasMore` before scanning starts and reports
+listing progress. Inside the scan loop, the next photo's bytes
+fetch starts BEFORE the current photo's inference runs
+(prefetch-by-1) — approximately doubles throughput. After every
+`recordCheckpoint` / `reportViolation` POST resolves (success or
+failure), the frontend sleeps `POST_THROTTLE_MS` (150 ms) before
+the next iteration, keeping large batches under per-user Apps
+Script URL-fetch quotas.
 
 **Timestamps are scan-time, not capture-time.** `recordCheckpoint`
 receives `new Date().toTimeString().split(" ")[0]` (HH:MM:SS at the
@@ -795,6 +895,19 @@ explicit, justified, and accompanied by an update to this file.
     only safe route. The thumbnail URL stays in the v6 contract for
     display-only consumers (dashboard `<img src>`) — those don't
     touch canvas pixels.
+29. **`checkpoint_id: "photo_verified"` is a SENTINEL, not a
+    checkpoint.** `handleRecordCheckpoint` short-circuits to
+    `_recordPhotoVerification` for this value; that helper writes
+    only `Name` + `BibNumber` + `UpdatedAt` to the Results sheet and
+    **never touches a CP_Time column**. Don't fold the sentinel back
+    into the generic ternary that maps `start` → `Start_Time` /
+    `finish` → `Finish_Time` / `N` → `CPN_Time` — there is no
+    `Photo_Verified_Time` column, and creating one would mean the
+    scanner becomes a timing gate again, defeating §4.7's purpose.
+    The sentinel is also the only non-numeric, non-start/finish cpId
+    `handleRecordCheckpoint` accepts; every other unrecognized value
+    still throws `schema_error` (defense against accidental
+    free-form cpIds from new clients).
 
 ---
 
@@ -906,6 +1019,131 @@ Reversibility: uncomment the route in `web_app.py`, add the link
 back to `dashboard.html` (any class works — `.nav-btn` keeps it
 consistent), and live mode is back. The backend never knew about
 `/checkpoint` (it's a frontend-only route).
+
+##### 2026-05-18 — Drive Scanner pivots from "timing" to "identity verification"
+
+The post-race scanner is no longer a checkpoint surrogate. The new
+mental model: *the scanner answers "who is in this photo, and are
+they wearing the correct BIB?" — nothing more.* Concrete changes:
+
+- **`templates/photo_scanner.html`** — CP selector buttons (START /
+  CP1-4 / FINISH) removed from markup; `.cp-sel` / `.cp-btn` CSS
+  removed; `checkpointId`, `CP_BUTTONS`, `setCP()`, `cpLabel()` all
+  deleted; the CP-disable loop in `setScanUI` is gone. The top-bar
+  title is renamed `🖼️ IDENTITY VERIFICATION`. Footer note rewritten
+  to reflect the new framing.
+- **Session-global dedup** — `seenRecords`, `seenViolations`,
+  `seenUnknownsPerPhoto` are now `Set` instances (cleaner intent
+  than objects-as-maps; `.has()` / `.add()` / `.clear()` at call
+  sites). Keys lose their `cpId` component:
+  `seenRecords[name]`, `seenViolations[name + ":" + type]`. The
+  `seenUnknownsPerPhoto` key is now just `fileId` (still 1
+  UNREGISTERED per photo). One identification per runner per
+  session, regardless of burst-shot count.
+- **Identification log** — successful matches now render as
+  `✅ <name> (BIB <bib>)` with the BIB inline next to the name so
+  operators can scan-read the log. A green left-border accent on
+  plain `.sb-item` rows visually pops these against duplicates /
+  skips / violations. The "Recorded:" stats label is renamed
+  "Identified:" (counter variable `stats.records` kept).
+- **Frontend POST shape** —
+  `sendRecordCheckpoint` is renamed `sendIdentification` and now
+  hardcodes `checkpoint_id: "photo_verified"`. No other field
+  changes; the action is still `recordCheckpoint` so the backend
+  routes through the existing handler.
+- **Backend `handleRecordCheckpoint`** —
+  a 5-line short-circuit at the top of the function detects
+  `cpId === "photo_verified"` and delegates to a new helper
+  `_recordPhotoVerification(name, bib)`. The helper writes
+  `Name` + `BibNumber` + `UpdatedAt` to the Results sheet (insert
+  if absent, otherwise in-place update) and invalidates the
+  results cache. **It never writes a CP_Time column.** All existing
+  cpIds (`start` / `finish` / `1-4`) take the original code path
+  unchanged. Guardrail 29 pins the sentinel semantics.
+
+Reversibility: undoing the pivot means restoring the CP selector
+markup + state and reverting `sendIdentification` to send the
+operator-selected cpId. The backend short-circuit can stay; it's
+inert when nothing sends `"photo_verified"`.
+
+**Follow-up (same day): dedup keys now factor in the OCR result.**
+The first cut of this pivot keyed `seenRecords` on `name` and
+`seenViolations` on `"name:type"`. That correctly suppressed
+burst-shot duplicates, but it had a real flaw: if Kawin reads the
+correct BIB in one photo and a *different* wrong BIB in two later
+photos, the first wrong-BIB read fires `WRONG_PERSON` (good) but the
+second one — same name, same type — is suppressed (bad). Two
+distinct BIB swaps by the same runner should produce two distinct
+violations.
+
+Fix: OCR moved to the top of `handleKnownFace`, so its result is
+available before the dedup decision. `seenRecords` keys are now
+`"name:readBib"`; `seenViolations` keys are `"name:type:readBib"`
+(or `:joined-blocks` for `MULTIPLE_BIBS`). Burst dedup still works —
+identical OCR ≡ identical key ≡ skip. A `seenRecords` hit
+early-returns the function (no point running the violation check
+when the OCR result is already known-deduped). The
+`seenUnknownsPerPhoto` set and the `UNREGISTERED` dedup key are
+unchanged — per-photo capping already handles distinct unknowns
+across photos correctly. The footer `.note` text in the scanner UI
+was updated to reflect the new contract ("Burst shots of the exact
+same runner AND BIB are skipped…"). No backend change required.
+See AI_CONTEXT §4.7 dedup table.
+
+**Audit-driven hardening (same day): four bundles applied.** A
+proactive edge-case audit surfaced eight risks ranging from
+"6-minute Apps Script timeout on huge folders" to "false
+`WRONG_PERSON` from shirt-graphic OCR garbage." All four chosen fix
+bundles landed in one pass:
+
+- **Backend hardening — `getDrivePhotos` pagination + strict mime
+  allow-list.** Added `offset` / `pageSize` params (default 500, max
+  1000), returning `hasMore` + `nextOffset` so the frontend pages
+  through. `FileIterator.next()` is used to skip past the offset
+  without triggering metadata reads. The mimeType filter is now an
+  explicit allow-list (`image/jpeg`, `image/jpg`, `image/png`,
+  `image/webp`, `image/gif`) — HEIC, RAW, TIFF, SVG, and video pass
+  the old `"image/"` prefix check, then waste 5-15 MB / file of
+  bytes-fetching before `loadImage` fails in the browser. They now
+  bump `skipped` at list time and the operator sees the count up
+  front. New constants: `SCANNER_ALLOWED_MIME_TYPES`,
+  `DRIVE_PHOTOS_DEFAULT_PAGE_SIZE`, `DRIVE_PHOTOS_MAX_PAGE_SIZE`.
+
+- **OCR rigor — tightened scanner validation gates.**
+  `OCR_MIN_CONFIDENCE` 60 → 80, `BIB_MIN_LEN` 1 → 2 in
+  `photo_scanner.html`. The relaxed values inherited from
+  `checkpoint.html` are *field-test* defaults tuned for low-light
+  live recognition; static curated photos give Tesseract a much
+  cleaner target. The old gates admitted reads like "23" (from a
+  shirt graphic) with conf 75, firing false `WRONG_PERSON` against
+  registered BIB 1234. The tightened gates close that path.
+
+- **Multi-unknown coverage — report ALL unknown faces per photo.**
+  The detection loop in `processPhotoWithBytes` no longer tracks
+  only the largest unknown; it collects all unknowns into
+  `unknownHits[]`, sorts by area desc, slices the top
+  `MAX_UNKNOWNS_PER_PHOTO` (15 — initially 5; raised to better cover group shots / pack starts), and fires one `UNREGISTERED` per
+  reportedUnknown. Per-face-index dedup key (`"unknown:fileId:N"`)
+  ensures the cap is enforced without a parallel set; the retired
+  `seenUnknownsPerPhoto` Set was dropped.
+
+- **Scan resilience — localStorage persistence, prefetch, throttle.**
+  Three new pieces. (a) `seenRecords` + `seenViolations` are
+  persisted to `localStorage.drive_scanner_v1:<folderId>` (24-hour
+  TTL) after every mutation (debounced 2 s) and force-flushed on
+  abort/error. On next Start for the same folder, a banner asks
+  "Found a previous scan… Resume?" — Resume rehydrates the Sets;
+  Start Fresh clears the entry. (b) The scan loop now prefetches
+  photo i+1's bytes via a new `fetchImageBytes(photo)` helper while
+  inference runs on photo i; `processPhoto` was renamed
+  `processPhotoWithBytes(photo, payload)` and accepts the pre-fetched
+  payload. Roughly doubles throughput. (c) A `sleep(POST_THROTTLE_MS)`
+  (150 ms default) fires after every `recordCheckpoint` and
+  `reportViolation` POST, keeping large batches under per-user
+  Apps Script URL-fetch quota.
+
+No backend schema or guardrail change. New scanner constants are
+documented in §6.8.
 
 #### 2026-05-10 — v6: Single thumbnail URL contract + dated subfolders
 
@@ -1219,17 +1457,29 @@ world accuracy and FPS without blocking the main thread.
   would need a base64-EXIF parser and fallback logic for stripped
   metadata. For most workflows the relative ordering across photos
   is what the leaderboard needs, so scan-time is fine.
-- **Drive Scanner dedup is session-scoped, not backend-enforced**:
-  the three `seen…` sets live in browser memory. If the operator
-  reloads the page mid-batch and restarts, runners detected before
-  the reload will record again (the backend writes a duplicate row).
-  Admins clean those up via the dashboard bulk-delete tools. No
-  cross-tab coordination — two operators scanning the same folder
-  simultaneously will write duplicate rows.
-- **Drive Scanner can't change CP mid-batch**: the CP buttons disable
-  themselves while a scan is running. Splitting one folder across
-  multiple CPs requires running the scan once per CP (or organizing
-  Drive folders per checkpoint, which is the recommended layout).
+- **Drive Scanner dedup is session-scoped, (name, OCR-result)-keyed,
+  not backend-enforced**: the three `seen…` `Set` instances live in
+  browser memory. `seenRecords` keys on `"name:readBib"` (one
+  identification per (name, OCR'd BIB) pair per session — burst
+  shots collapse, but a mid-session BIB change re-fires).
+  `seenViolations` keys on `"name:type:readBib"` (or with joined
+  blocks for `MULTIPLE_BIBS`). `seenUnknownsPerPhoto` keys on
+  `fileId`. **Same face + different OCR is NOT a duplicate** — it
+  re-fires identification and re-checks violations, catching BIB
+  swaps mid-batch. Reloading the page mid-batch and restarting will
+  re-identify runners seen before the reload — the backend writes a
+  duplicate row each time. Admins clean those up via the dashboard
+  bulk-delete tools. No cross-tab coordination — two operators
+  scanning the same folder simultaneously will write duplicate rows.
+- **Drive Scanner has no checkpoint concept (post-2026-05-18)**: the
+  scanner is identity-verification only, not a timing gate. There's
+  no CP selector in the UI. Every successful identification POSTs
+  `recordCheckpoint` with the sentinel `checkpoint_id:
+  "photo_verified"`; the backend short-circuits to a write that
+  touches only `BibNumber` + `UpdatedAt` (no CP_Time column).
+  Splitting recognition across CPs is impossible in the scanner; use
+  the live `checkpoint.html` (re-route it first — see 2026-05-17
+  follow-up) for that.
 - **Drive Scanner does NOT fire `NO_BIB` or `OBSCURED_BIB`**: those
   violations require the `ocrFailureCount` consecutive-failure
   counter that `checkpoint.html` maintains across many frames of the
@@ -1238,12 +1488,30 @@ world accuracy and FPS without blocking the main thread.
   unreadable simply produces no record / no violation for that
   runner. Operators should re-shoot or manually update via the
   admin UI.
-- **Drive Scanner skips images larger than ~6 MB per Apps Script
-  response cap**: `getImageBytes` returns base64 in a JSON envelope.
-  The Apps Script doGet response limit is ~50 MB, but in practice
-  network-decode latency for >10 MB images makes the scanner crawl.
-  No hard cap is enforced in code; operators with massive RAW files
-  should pre-export to JPEG/HEIC.
+- **Drive Scanner accepts only JPEG / PNG / WebP / GIF (post-audit
+  2026-05-18)**: `getDrivePhotos` filters by an explicit allow-list
+  in `SCANNER_ALLOWED_MIME_TYPES`. HEIC, RAW (`image/x-canon-cr2`,
+  `image/x-sony-arw`, etc.), TIFF, and SVG bump the `skipped`
+  counter at list time so the operator sees "150 files skipped"
+  immediately — no per-file bytes-fetching wasted on undecodable
+  inputs. Photographers on iPhone should export-as-JPEG before
+  uploading; the scanner will not pull HEIC bytes.
+- **Drive Scanner is resumable across page reloads (post-audit
+  2026-05-18)**: dedup state persists to
+  `localStorage.drive_scanner_v1:<folderId>` with a 24-hour TTL. An
+  interrupted scan (closed tab, OS sleep, browser crash) leaves
+  state behind; the next Start press for the same folder pops a
+  banner asking whether to resume or start fresh. Successful
+  completion clears the entry; aborts force-flush it.
+- **Drive Scanner uses pagination + prefetch + throttle for huge
+  folders (post-audit 2026-05-18)**: `getDrivePhotos` is paged at
+  `pageSize=500` so a 5000-photo folder doesn't hit the 6-min Apps
+  Script execution limit on the listing call. The scan loop
+  prefetches photo i+1's bytes during photo i's inference (~2×
+  throughput). Each `recordCheckpoint` / `reportViolation` POST is
+  followed by a 150 ms `POST_THROTTLE_MS` sleep, capping the
+  outgoing request rate to ~6/sec for quota safety on per-user
+  URL-fetch caps.
 
 ### 6.6 One-off setup helpers (Apps Script editor)
 
@@ -1266,7 +1534,7 @@ All are idempotent.
 | `getResults` | All `Results` rows | Cached, 12 s TTL |
 | `getViolations` | Top 20 violations (Timestamp desc) | Cached, 12 s TTL |
 | `getVerifiedViolations` | Top 20 with `Verified=true` | Cached, 12 s TTL |
-| `getDrivePhotos` | `{ folderName, count, data: [{id, name, mimeType, thumbnailUrl}] }` | Requires `folderId=<id>`. **Uncached** — folder contents change as photographers add shots. Image files only (filtered by mimeType). Sorted by name. Drive errors mapped to `not_found` / `drive_error`. |
+| `getDrivePhotos` | `{ folderName, offset, pageSize, count, skipped, hasMore, nextOffset, data: [{id, name, mimeType, thumbnailUrl}] }` | Requires `folderId=<id>`. Optional `pageSize` (default 500, max 1000) + `offset` (default 0) — frontend loops on `hasMore` so a single Apps Script request stays under the 6-min execution limit. **Uncached** — folder contents change as photographers add shots. Image mimeType strictly allow-listed (jpeg/png/webp/gif). Sorted by name within each page. Drive errors mapped to `not_found` / `drive_error`. |
 | `getImageBytes` | `{ fileId, mimeType, sizeBytes, base64 }` | Requires `fileId=<id>`. **Uncached** — per-file payload exceeds the 100 KB CacheService per-key cap. Returns the full file bytes so the scanner can decode them into a same-origin `data:` URL for canvas inference (Guardrail 28). |
 
 **POST** (JSON body, `Content-Type: text/plain` to dodge CORS preflight)
@@ -1274,7 +1542,7 @@ All are idempotent.
 |---|---|---|
 | `verifyAdmin` | `{ password }` | Returns success/failure; no token needed |
 | `registerRunner` | `{ name, bib, email?, timestamp?, photo_front…right, embeddings }` | Atomic |
-| `recordCheckpoint` | `{ name, checkpoint_id, timestamp, bib? }` | `checkpoint_id` is `"start"`, `1`, `2`, `3`, `4`, or `"finish"` |
+| `recordCheckpoint` | `{ name, checkpoint_id, timestamp, bib? }` | `checkpoint_id` is `"start"`, `1`, `2`, `3`, `4`, `"finish"`, OR the sentinel `"photo_verified"` (Drive Scanner identity-verification path; bypasses CP_Time columns — see Guardrail 29). Any other value throws `schema_error`. |
 | `reportViolation` | `{ name?, bib?, message?, violationType?, timestamp?, image? }` | `image` is base64; `violationType` defaults to `WRONG_PERSON` |
 | `verifyViolation` | `{ token, id }` | Admin |
 | `deleteViolation` | `{ token, id }` | Admin; trashes Drive image |
@@ -1348,13 +1616,19 @@ All responses are
 |---|---|---|
 | `SSD_MIN_CONFIDENCE` | `0.5` | `SsdMobilenetv1Options.minConfidence` — minimum face-score for a detection to count |
 | `FACE_MATCH_DISTANCE` | `0.45` | `findBestMatch` threshold — same as live page; lower = stricter |
-| `OCR_MIN_CONFIDENCE` | `60` | Single-pass Tesseract confidence floor (no field-test override here — static high-res photos give clean reads) |
-| `BIB_MIN_LEN` / `BIB_MAX_LEN` | `1` / `6` | Accepted BIB length range for the validation gate |
+| `OCR_MIN_CONFIDENCE` | `80` (was 60 pre-audit) | Single-pass Tesseract confidence floor. Tightened post-audit because the relaxed live-page value admitted false BIB reads from shirt graphics |
+| `BIB_MIN_LEN` / `BIB_MAX_LEN` | `2` / `6` (was `1` / `6` pre-audit) | Accepted BIB length range. Min raised to 2 post-audit to reject single-digit fragments that pass the digit-only filter on garbage reads |
 | `ADAPTIVE_THRESHOLD_BLOCK` | `15` | Local-window size for adaptive threshold (mirror of `checkpoint.html`) |
 | `ADAPTIVE_THRESHOLD_C` | `10` | Mean offset (mirror of `checkpoint.html`) |
 | `OCR_UPSCALE` | `2` | Nearest-neighbor scale factor before OCR (mirror of `checkpoint.html`) |
 | `MULTIPLE_BIBS_MIN_BLOCK_LEN` | `2` | Minimum digits per block — same shape check as the live page (Guardrail 26: run on RAW Tesseract text) |
 | `MULTIPLE_BIBS_MIN_BLOCKS` | `2` | Minimum distinct candidate blocks to fire `MULTIPLE_BIBS` |
+| `MAX_UNKNOWNS_PER_PHOTO` | `15` | Cap on `UNREGISTERED` reports per single photo. Sorted by face area desc — most prominent intruders are reported first when cap kicks in. Raised from 5 to 15 to cover group shots / pack starts where many intruders may legitimately appear in one frame. |
+| `LIST_PAGE_SIZE` | `500` | `pageSize` param sent to `getDrivePhotos`. Must be ≤ backend `DRIVE_PHOTOS_MAX_PAGE_SIZE` (1000). |
+| `POST_THROTTLE_MS` | `150` | Sleep after every `recordCheckpoint` / `reportViolation` POST. Quota safety on large batches. |
+| `STORAGE_PREFIX` | `"drive_scanner_v1:"` | localStorage key prefix for resumable scan state. Bump the `v1` suffix on incompatible schema changes. |
+| `SCAN_STATE_TTL_MS` | `86_400_000` (24h) | After this age, a saved state is dropped on load — event is presumed over. |
+| `SCAN_STATE_SAVE_DEBOUNCE_MS` | `2000` | Throttle on localStorage writes — at most one write per ~2 s of scanner activity. |
 
 ### 6.9 Configuration knobs (backend, `Code.gs`)
 
@@ -1366,6 +1640,9 @@ All responses are
 | `BATCH_DELETE_MAX` | `200` | Cap on `deleteViolationsBatch` |
 | `DEFAULT_VIOLATION_TYPE` | `"WRONG_PERSON"` | Fallback for empty/legacy rows |
 | `DEFAULT_ADMIN_TOKEN` | `"muto67"` | Used only if `ScriptProperties.ADMIN_TOKEN` is unset |
+| `DRIVE_PHOTOS_DEFAULT_PAGE_SIZE` | `500` | `getDrivePhotos` page size when caller omits `pageSize` |
+| `DRIVE_PHOTOS_MAX_PAGE_SIZE` | `1000` | Hard cap on `getDrivePhotos` page size — keeps a single page well under the 6-min Apps Script execution limit even on slow Drive metadata |
+| `SCANNER_ALLOWED_MIME_TYPES` | `{jpeg, jpg, png, webp, gif}` | Strict mimeType allow-list applied by `handleGetDrivePhotos`. Non-matches bump `skipped` at list time. |
 
 ---
 

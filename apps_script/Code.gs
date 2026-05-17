@@ -616,22 +616,57 @@ function doPost(e) {
 
 // ─── ACTION HANDLERS ────────────────────────────────────────
 
+// Strict allow-list of mimeTypes the Drive Scanner can decode in the
+// browser. Drive sometimes labels iPhone HEIC as "image/heic" and
+// Canon RAW as "image/x-canon-cr2"; an "image/*" prefix would admit
+// those, the frontend would waste megabytes per file pulling bytes,
+// and then `loadImage` would fail because Chrome/Firefox can't
+// natively decode them. Caught and skipped at list time, the
+// operator sees the skip count up front. Anything not in this map
+// is counted as `skipped` by handleGetDrivePhotos.
+const SCANNER_ALLOWED_MIME_TYPES = Object.freeze({
+  "image/jpeg": true,
+  "image/jpg":  true,        // alias some clients (Slack, older exports) use
+  "image/png":  true,
+  "image/webp": true,
+  "image/gif":  true,
+});
+
+// Pagination defaults for handleGetDrivePhotos. Page size is capped
+// so a single request stays well under the 6-minute Apps Script
+// execution limit even on slow Drive metadata responses (each file
+// is ~3 API calls × 10–50 ms ≈ ~150 ms; 1000 files ≈ 150 s budget).
+const DRIVE_PHOTOS_DEFAULT_PAGE_SIZE = 500;
+const DRIVE_PHOTOS_MAX_PAGE_SIZE = 1000;
+
 /**
  * GET handler for the Drive Photo Scanner workflow (v7+).
  *
- * Lists every image file inside a user-supplied Drive folder so the
+ * Lists image files inside a user-supplied Drive folder so the
  * browser-side scanner can iterate them and run face / OCR inference
  * locally. The folder must be shared with the script account (or
  * publicly readable) — DriveApp.getFolderById throws otherwise.
  *
- * Returns: { status, folderName, count, data: [{id, name, mimeType,
- *           thumbnailUrl}] } — thumbnailUrl follows the v6 single-URL
- * contract (drive.google.com/thumbnail?id=…&sz=w800).
+ * **Pagination.** Accepts optional `offset` (default 0) and
+ * `pageSize` (default 500, max 1000). The client loops on
+ * `hasMore` and concatenates pages. We use `FileIterator.next()` to
+ * skip past the offset — that does NOT trigger a metadata fetch
+ * (Apps Script lazy-loads file properties), so skipping is cheap.
+ *
+ * **MimeType filter.** Strict allow-list (SCANNER_ALLOWED_MIME_TYPES)
+ * — only formats the browser can decode are returned. Everything
+ * else bumps the `skipped` counter at list time so the operator
+ * doesn't waste minutes of bytes-fetching on HEIC/RAW/TIFF.
+ *
+ * Returns: { status, folderName, offset, pageSize, count, skipped,
+ *           hasMore, nextOffset, data: [{id, name, mimeType,
+ *           thumbnailUrl}] } — thumbnailUrl follows the v6 single-
+ * URL contract (drive.google.com/thumbnail?id=…&sz=w800).
  *
  * Errors are mapped to jsonErr with codes: bad_request (missing /
- * malformed folderId), not_found (folder lookup failed),
- * drive_error (iteration failed mid-scan). Per-file failures are
- * logged and skipped without aborting the batch.
+ * malformed folderId / out-of-range page params), not_found
+ * (folder lookup failed), drive_error (iteration failed mid-scan).
+ * Per-file failures are logged and skipped without aborting.
  */
 function handleGetDrivePhotos(params) {
   const folderId = String((params && params.folderId) || "").trim();
@@ -643,6 +678,10 @@ function handleGetDrivePhotos(params) {
   if (!/^[-\w]{25,80}$/.test(folderId)) {
     throw httpError("folderId has invalid format", "bad_request");
   }
+
+  const offset = Math.max(0, parseInt((params && params.offset) || "0", 10) || 0);
+  let pageSize = parseInt((params && params.pageSize) || "0", 10) || DRIVE_PHOTOS_DEFAULT_PAGE_SIZE;
+  pageSize = Math.max(1, Math.min(DRIVE_PHOTOS_MAX_PAGE_SIZE, pageSize));
 
   let folder;
   try {
@@ -661,15 +700,30 @@ function handleGetDrivePhotos(params) {
 
   const photos = [];
   let skipped = 0;
+  let hasMore = false;
   try {
     const files = folder.getFiles();
-    while (files.hasNext()) {
+
+    // Skip past previously-seen files. FileIterator.next() doesn't
+    // load metadata — it just advances the cursor — so this is fast
+    // even for offset=4000. The cost is O(offset) per request,
+    // O(n²/pageSize) total across a full folder. Acceptable for the
+    // expected 1k–10k file range.
+    for (let i = 0; i < offset && files.hasNext(); i++) {
+      files.next();
+    }
+
+    // Collect up to pageSize entries. We loop until we hit pageSize
+    // accepted files OR exhaust the iterator. Skipped files count
+    // against pageSize so a single request can't degenerate into
+    // iterating thousands of HEIC files looking for the next jpeg.
+    let seenThisPage = 0;
+    while (files.hasNext() && seenThisPage < pageSize) {
+      seenThisPage++;
       try {
         const file = files.next();
         const mimeType = file.getMimeType();
-        // Filter to bitmap images only — skips PDFs, video, and Google
-        // Docs/Sheets/Slides that happen to live in the same folder.
-        if (!mimeType || mimeType.indexOf("image/") !== 0) {
+        if (!SCANNER_ALLOWED_MIME_TYPES[mimeType]) {
           skipped++;
           continue;
         }
@@ -681,34 +735,47 @@ function handleGetDrivePhotos(params) {
           thumbnailUrl: DRIVE_THUMBNAIL_URL(id, 800),
         });
       } catch (innerErr) {
-        // A single corrupt / permission-denied file must not abort the
-        // batch — log and continue so the rest of the folder still
-        // reaches the browser.
+        // A single corrupt / permission-denied file must not abort
+        // the batch — log and continue so the rest of the page
+        // still reaches the browser.
         logErr("getDrivePhotos: per-file failure (continuing)", innerErr);
         skipped++;
       }
     }
+
+    hasMore = files.hasNext();
   } catch (err) {
     logErr("getDrivePhotos: folder iteration failed", err);
     throw httpError("Failed to list folder contents: " + err.message, "drive_error");
   }
 
   // Stable lexicographic sort so burst sequences (IMG_0001, IMG_0002, …)
-  // arrive at the scanner in the order the camera took them, which makes
-  // the dedup logic in the UI more predictable.
+  // arrive at the scanner in the order the camera took them, which
+  // makes the dedup logic in the UI more predictable. Sort is per-
+  // page only; cross-page order is the iterator's natural order
+  // (which Drive does not strictly guarantee).
   photos.sort(function (a, b) {
     return String(a.name).localeCompare(String(b.name));
   });
 
+  const nextOffset = hasMore ? (offset + photos.length + skipped) : null;
   logInfo("getDrivePhotos", {
     folderId: folderId,
     folderName: folderName,
+    offset: offset,
+    pageSize: pageSize,
     count: photos.length,
     skipped: skipped,
+    hasMore: hasMore,
   });
   return jsonOk({
     folderName: folderName,
+    offset: offset,
+    pageSize: pageSize,
     count: photos.length,
+    skipped: skipped,
+    hasMore: hasMore,
+    nextOffset: nextOffset,
     data: photos,
   });
 }
@@ -831,6 +898,16 @@ function handleRecordCheckpoint(body) {
   const timestamp = reqStr(body.timestamp, "timestamp", TIME_PATTERN, 8);
   const bib = optStr(body.bib, BIB_PATTERN, 10);
 
+  // Drive Scanner identity verification — see Guardrail 29 + §4.7.
+  // The scanner has no timing role, so it has no CP time to record;
+  // it sends the "photo_verified" sentinel and we short-circuit to a
+  // write that touches only Name + BibNumber + UpdatedAt. The
+  // timestamp field is still validated (uniform entry contract) but
+  // intentionally ignored.
+  if (cpId === "photo_verified") {
+    return _recordPhotoVerification(name, bib);
+  }
+
   const colName = cpId === "start" ? "Start_Time"
     : cpId === "finish" ? "Finish_Time"
     : "CP" + cpId + "_Time";
@@ -875,6 +952,49 @@ function handleRecordCheckpoint(body) {
 
   invalidateResults();
   return jsonOk({ message: name + " " + colName + " recorded" });
+}
+
+/**
+ * Drive Photo Scanner identity-verification write. Touches the Results
+ * sheet without writing any CP_Time column — the scanner has no
+ * timing role (see AI_CONTEXT §4.7). Inserts a row if the runner is
+ * new; otherwise updates BibNumber (when supplied) and UpdatedAt only.
+ *
+ * Kept as a separate helper, called from handleRecordCheckpoint's
+ * sentinel branch, so the original CP-aware code path is unchanged
+ * for start / 1-4 / finish (Guardrail 29).
+ */
+function _recordPhotoVerification(name, bib) {
+  const sheet = getSheet(SHEETS.RESULTS);
+  const snap = readWholeSheet(sheet);
+  const cols = {};
+  for (let i = 0; i < snap.headers.length; i++) cols[snap.headers[i]] = i;
+  const bibCol = cols.BibNumber;
+  const updCol = cols.UpdatedAt;
+  const rowIdx = snap.findRowByName(name);
+  const nowIso = new Date().toISOString();
+
+  if (rowIdx < 0) {
+    const newRow = new Array(snap.headers.length).fill("");
+    newRow[0] = name;
+    if (bibCol != null && bibCol >= 0) newRow[bibCol] = bib;
+    if (updCol != null && updCol >= 0) newRow[updCol] = nowIso;
+    sheet.appendRow(newRow);
+    logInfo("recordCheckpoint (photo_verified, new)", { name: name });
+  } else {
+    const row = snap.values[rowIdx - 2].slice();
+    if (bib && bibCol != null && bibCol >= 0) row[bibCol] = bib;
+    if (updCol != null && updCol >= 0) row[updCol] = nowIso;
+    // normalizeRowTimeCols protects against Sheets auto-converting any
+    // existing HH:MM:SS time columns to a Date object on re-write —
+    // the same defense the CP-aware path uses.
+    normalizeRowTimeCols(row, snap);
+    sheet.getRange(rowIdx, 1, 1, snap.headers.length).setValues([row]);
+    logInfo("recordCheckpoint (photo_verified, update)", { name: name });
+  }
+
+  invalidateResults();
+  return jsonOk({ message: name + " verified by photo" });
 }
 
 function handleReportViolation(body) {
