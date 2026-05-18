@@ -36,6 +36,21 @@
 > `UpdatedAt`; sort is now most-recently-identified first. Admin
 > Runners tab intentionally keeps its CP-time columns.
 >
+> Same-day follow-up (strict `NO_BIB`): the Drive Scanner now fires
+> `NO_BIB` on a single-shot basis whenever a known face yields an
+> empty/invalid OCR read. Previously the scanner silently fell back
+> to the registered BIB and logged a false-positive `✅` identification
+> against photos that had no BIB at all (caught while testing against
+> the runner-registration photo folders). Now an empty `readBib` (no
+> digits, OR failing the `BIB_MIN_LEN` / `OCR_MIN_CONFIDENCE` gate)
+> blocks `sendIdentification` entirely and fires a `NO_BIB` violation
+> instead, deduplicated per-runner-per-session via key `"name:NO_BIB"`.
+> The `MULTIPLE_BIBS` check moved above `sendIdentification` in the
+> same pass so multi-BIB photos no longer log a phantom `✅` before
+> their violation fires. `OBSCURED_BIB` remains scanner-excluded:
+> the static-photo pipeline still doesn't distinguish empty-text
+> from bad-text/conf, so both collapse to `NO_BIB`.
+>
 > Earlier in the v7 cycle (2026-05-17): added GET endpoints
 > `getDrivePhotos` + `getImageBytes`, created `templates/photo_scanner.html`
 > (`/scan`), retired the `/checkpoint` route (file kept on disk),
@@ -616,8 +631,24 @@ startScan():
     multipleBibs  = RAW text \d{MULTIPLE_BIBS_MIN_BLOCK_LEN,}+ blocks
                     if count ≥ MULTIPLE_BIBS_MIN_BLOCKS, else null
 
-    ── identification trigger (face + OCR-result, session-dedup) ──
+    ── per-known-hit pipeline (violations BEFORE identification) ──
     for each known hit:
+      // 1) MULTIPLE_BIBS — fires first because it also makes readBib
+      //    empty; running it before NO_BIB keeps the two distinct.
+      if multipleBibs:
+        fireViolation MULTIPLE_BIBS
+          (dedup key "name:MULTIPLE_BIBS:" + multipleBibs.join(","))
+        continue
+
+      // 2) NO_BIB — strict single-shot. Empty readBib (no digits OR
+      //    failing the length/conf gate) blocks sendIdentification.
+      //    NEVER fall back to the registered BIB.
+      if readBib == "":
+        fireViolation NO_BIB
+          (dedup key "name:NO_BIB" — one per runner per session)
+        continue
+
+      // 3) Identification — only reached when readBib is valid
       recordKey = name + ":" + readBib
       if seenRecords.has(recordKey):
         log "♻️ Already identified with BIB <readBib> this session"
@@ -628,18 +659,10 @@ startScan():
                             scanTimeHHMMSS, registeredBib)
       log "✅ <name> (BIB <registeredBib>)"
 
-    ── violations (dedup keys carry the OCR result) ──
-    if multipleBibs:
-      fireViolation MULTIPLE_BIBS
-        (dedup key "name:MULTIPLE_BIBS:" + multipleBibs.join(","))
-      continue
-
-    if readBib AND registered[name] AND readBib !== registered[name]:
-      fireViolation WRONG_PERSON
-        (dedup key "name:WRONG_PERSON:" + readBib)
-
-    silent reject (NO Ghost-BIB counter — no multi-frame state)
-      ↳ when readBib is "" because OCR failed / length / conf gate fired
+      // 4) WRONG_PERSON — OCR'd BIB ≠ registered
+      if registered[name] AND readBib !== registered[name]:
+        fireViolation WRONG_PERSON
+          (dedup key "name:WRONG_PERSON:" + readBib)
 
     ── UNREGISTERED trigger (ALL unknowns per photo, capped) ──
     unknownHits.sort by area desc
@@ -675,10 +698,24 @@ per photo (and one photo is one frame for that runner) — there's
 nothing to smooth, vote, or count. A single OCR read passes or fails
 the validation gate; the photographer's selects are already curated
 for clarity, so single-frame false positives are rare in practice.
-For the same reason, the scanner doesn't fire `NO_BIB` or
-`OBSCURED_BIB`: those types only exist in `checkpoint.html` to
-escalate after `NO_BIB_AFTER_FAILURES` consecutive validation-gate
-silent rejects.
+
+**Why `NO_BIB` is single-shot here, but `OBSCURED_BIB` is still
+unfired.** A curated still IS the entire evidence pool for that
+runner-in-that-photo: if the validation gate fires, the photo has
+no usable BIB and the scanner must say so — no
+`NO_BIB_AFTER_FAILURES` counter is needed because there are no
+further frames to wait for. An earlier revision tried to "silently
+reject" the empty case to mirror `checkpoint.html`'s consecutive-
+failure semantics, but that produced false-positive `✅`
+identifications against runner-registration photos (faces are
+known, no BIB visible, scanner fell back to the registered BIB and
+logged success). The fix is to fire `NO_BIB` immediately on any
+empty `readBib` for a known face, deduplicated per-runner-per-
+session via key `"name:NO_BIB"`. `OBSCURED_BIB` stays scanner-
+excluded because the scanner doesn't distinguish "empty text"
+(`NO_BIB` in `checkpoint.html`) from "text but bad length/conf"
+(`OBSCURED_BIB` in `checkpoint.html`); both validation-gate
+outcomes collapse to `NO_BIB` in the static-photo pipeline.
 
 **Per-session deduplication.** Burst-mode photography (10 fps shutter
 on the same runner) would otherwise emit one record per photo. The
@@ -687,7 +724,7 @@ scanner suppresses duplicates with three in-memory `Set` instances:
 | Set                       | Element shape                                          | Purpose                                                 |
 |---|---|---|
 | `seenRecords`             | `"name:readBib"`                                       | One identification per **(name, OCR'd BIB)** pair per session. Same face + same OCR collapses; same face + DIFFERENT OCR re-fires (catches mid-session BIB changes). `readBib` is `""` when OCR failed / hit the silent-reject gate. |
-| `seenViolations`          | `"name:type:readBib"` (or `:joined-blocks` for `MULTIPLE_BIBS`; `"unknown:fileId:N"` for `UNREGISTERED` per face index) | One violation per distinct piece of evidence per session. Burst shots of identical evidence collapse; distinct misreads of the same runner fire distinct violations. UNREGISTERED uses per-face-index so a crowd photo of N unknowns produces N rows (up to `MAX_UNKNOWNS_PER_PHOTO`). |
+| `seenViolations`          | `"name:type:readBib"` for `WRONG_PERSON`; `"name:MULTIPLE_BIBS:joined-blocks"` for `MULTIPLE_BIBS`; `"name:NO_BIB"` for `NO_BIB` (no payload suffix — no OCR result to vary on); `"unknown:fileId:N"` for `UNREGISTERED` per face index | One violation per distinct piece of evidence per session. Burst shots of identical evidence collapse; distinct misreads of the same runner fire distinct violations. `NO_BIB` collapses to one violation per known-face-per-session because every empty OCR for the same runner is the same evidence (no BIB). UNREGISTERED uses per-face-index so a crowd photo of N unknowns produces N rows (up to `MAX_UNKNOWNS_PER_PHOTO`). |
 
 The earlier `seenUnknownsPerPhoto` set was retired in the 2026-05-18
 audit pass — the per-face-index `seenViolations` key
@@ -882,11 +919,12 @@ explicit, justified, and accompanied by an update to this file.
 27. **The Drive scanner's CV pipeline deliberately diverges from
     `checkpoint.html`.** SSD MobileNet (not TinyFaceDetector),
     single-pass OCR (no majority vote), no bbox EMA, no Ghost-BIB
-    counter, no `NO_BIB` / `OBSCURED_BIB` firings. The static-image
-    and live-video tradeoffs go in opposite directions — Tiny + EMA +
-    voting exist because the live loop has 30 FPS of noisy detections
-    to lean on, while the scanner has exactly one frame per runner
-    per photo. Don't try to factor the two pipelines into shared
+    counter, no `OBSCURED_BIB` firings (single-shot `NO_BIB` IS
+    fired — see §4.7; empty and bad-length/conf both collapse to
+    `NO_BIB` in the scanner). The static-image and live-video
+    tradeoffs go in opposite directions — Tiny + EMA + voting exist
+    because the live loop has 30 FPS of noisy detections to lean on,
+    while the scanner has exactly one frame per runner per photo. Don't try to factor the two pipelines into shared
     helpers without re-deriving the validation thresholds for both
     targets. `getOCRCropBox` and `preprocessForOCR` ARE intentionally
     duplicated across `checkpoint.html` and `photo_scanner.html` —
@@ -983,9 +1021,14 @@ race. Backend `Code.gs` bumped v6 → v7; one new HTML template;
   - **Reuses the existing `recordCheckpoint` / `reportViolation` POST
     contracts** unchanged — the backend doesn't care whether the
     source is a live camera or a Drive scan. Violation types fired:
-    `WRONG_PERSON`, `MULTIPLE_BIBS`, `UNREGISTERED`. `NO_BIB` /
-    `OBSCURED_BIB` are NOT fired (they require the consecutive-
-    failure counter the live page maintains).
+    `WRONG_PERSON`, `MULTIPLE_BIBS`, `UNREGISTERED`, `NO_BIB`.
+    `NO_BIB` is single-shot in the scanner (one validation-gate
+    failure for a known face = one violation; deduplicated per-
+    runner-per-session via key `"name:NO_BIB"`) — no consecutive-
+    failure counter, because a curated still IS the entire evidence
+    pool for that runner-in-that-photo. `OBSCURED_BIB` is NOT
+    fired: the scanner doesn't distinguish empty text from
+    bad-length/conf, so both collapse to `NO_BIB`.
   - **Timestamps are scan-time HH:MM:SS, not photo capture time** —
     no EXIF parsing is implemented. Acceptable because relative
     ordering is what the leaderboard needs, and most use cases for
@@ -1566,14 +1609,19 @@ world accuracy and FPS without blocking the main thread.
   Splitting recognition across CPs is impossible in the scanner; use
   the live `checkpoint.html` (re-route it first — see 2026-05-17
   follow-up) for that.
-- **Drive Scanner does NOT fire `NO_BIB` or `OBSCURED_BIB`**: those
-  violations require the `ocrFailureCount` consecutive-failure
-  counter that `checkpoint.html` maintains across many frames of the
-  same runner. The scanner sees each runner exactly once per photo,
-  so a single failed OCR can't escalate. A photo where the BIB is
-  unreadable simply produces no record / no violation for that
-  runner. Operators should re-shoot or manually update via the
-  admin UI.
+- **Drive Scanner fires `NO_BIB` single-shot, NOT `OBSCURED_BIB`**:
+  the scanner has no `ocrFailureCount` counter — it doesn't need
+  one. A curated still IS the entire evidence pool for that
+  runner-in-that-photo, so a single failed validation-gate read
+  (empty digits OR bad length / conf) immediately fires a `NO_BIB`
+  violation for that known face, deduplicated per-runner-per-session
+  via key `"name:NO_BIB"`. `sendIdentification` is BLOCKED on empty
+  `readBib` — the scanner does NOT fall back to the registered BIB.
+  `OBSCURED_BIB` stays scanner-excluded because the scanner doesn't
+  distinguish "empty text" from "text but bad length/conf"; both
+  collapse to `NO_BIB`. Operators can still re-shoot or manually
+  update via the admin UI; the difference now is they see the
+  violation instead of a phantom `✅`.
 - **Drive Scanner accepts only JPEG / PNG / WebP / GIF (post-audit
   2026-05-18)**: `getDrivePhotos` filters by an explicit allow-list
   in `SCANNER_ALLOWED_MIME_TYPES`. HEIC, RAW (`image/x-canon-cr2`,

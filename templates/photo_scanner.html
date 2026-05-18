@@ -733,36 +733,17 @@ async function handleKnownFace(canvas, hit, photo){
  const { name, box } = hit;
  const expectedBib = runnerRegistry[name] || "";
 
- // Single OCR pass per face, BEFORE the identification gate. The
- // OCR result (or its absence) becomes part of every dedup key
- // below, so a mid-session BIB change — same face, different OCR —
- // is not blindly suppressed as a burst-shot duplicate. The
- // MULTIPLE_BIBS check still runs on RAW text before digit
- // normalization (Guardrail 26); see AI_CONTEXT §4.7 for the
- // (name, OCR-result) dedup rationale.
+ // Single OCR pass per face. Violations are checked BEFORE the
+ // identification gate so a blank or multi-BIB read can never produce
+ // a false-positive ✅ row — sendIdentification only fires when
+ // readBib is valid. MULTIPLE_BIBS still runs on RAW text before
+ // digit normalization (Guardrail 26); see AI_CONTEXT §4.7.
  const ocr = ocrReady ? await runOCRForFace(canvas, box) : null;
  const readBib = (ocr && ocr.bib) || "";                 // empty when OCR failed / silent reject
  const multipleBibs = ocr && ocr.multipleBibsBlocks;
 
- // 1) Identity verification (POST recordCheckpoint with the
- //    photo_verified sentinel). Dedup keyed on (name, readBib) —
- //    burst shots collapse, but a CHANGED OCR result re-fires.
- //    Same face + same OCR = identical evidence ⇒ skip violation
- //    check too (an identical OCR would just hit the violation
- //    dedup below anyway).
- const recordKey = name + ":" + readBib;
- if (seenRecords.has(recordKey)){
-  addLog("dup", name, `Already identified with BIB ${readBib || "—"} this session · "${photo.name}"`);
-  return;
- }
- seenRecords.add(recordKey);
- scheduleScanStateSave();
- await sendIdentification(name, expectedBib, photo);
-
- // 2) Violations — dedup keys carry the OCR result so distinct
- //    misreads of the same runner fire distinct violations. WRONG_PERSON
- //    fires on a single passing read (the scanner operates on
- //    photographer's selects, already curated for clarity).
+ // 1) MULTIPLE_BIBS — checked first because it also makes readBib
+ //    empty; running it before the NO_BIB gate keeps the two distinct.
  if (multipleBibs){
   const blocksKey = multipleBibs.join(",");
   await fireViolation({
@@ -775,7 +756,40 @@ async function handleKnownFace(canvas, hit, photo){
   return;
  }
 
- if (readBib && expectedBib && readBib !== expectedBib){
+ // 2) NO_BIB — strict single-shot enforcement. Empty readBib means
+ //    OCR found no digits OR the conf/length validation gate fired.
+ //    Either way the photo has no usable BIB for this face; NEVER
+ //    fall back to the registered BIB to manufacture a success.
+ //    Dedup key "name:NO_BIB" — one violation per runner per session
+ //    (no OCR payload to vary on, unlike WRONG_PERSON / MULTIPLE_BIBS).
+ if (!readBib){
+  await fireViolation({
+   name,
+   bib: "",
+   message: `No BIB detected on ${name} in "${photo.name}"`,
+   violationType: "NO_BIB",
+   image: cropToDataUrl(canvas, box, 0.5),
+  }, name + ":NO_BIB");
+  return;
+ }
+
+ // 3) Identity verification — only reached when readBib is valid.
+ //    POST recordCheckpoint with the photo_verified sentinel. Dedup
+ //    keyed on (name, readBib) — burst shots collapse, a CHANGED OCR
+ //    result re-fires. expectedBib (not readBib) is what gets stored:
+ //    the face match decides WHO, the registered BIB is canonical
+ //    for the spreadsheet (Guardrail 29).
+ const recordKey = name + ":" + readBib;
+ if (seenRecords.has(recordKey)){
+  addLog("dup", name, `Already identified with BIB ${readBib} this session · "${photo.name}"`);
+  return;
+ }
+ seenRecords.add(recordKey);
+ scheduleScanStateSave();
+ await sendIdentification(name, expectedBib, photo);
+
+ // 4) WRONG_PERSON — OCR'd BIB differs from registered.
+ if (expectedBib && readBib !== expectedBib){
   await fireViolation({
    name,
    bib: readBib,
