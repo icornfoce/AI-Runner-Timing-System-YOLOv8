@@ -108,10 +108,17 @@ const SCHEMA = Object.freeze({
   // this runner this session) or "" (clear). Run _migrateResultsSchema()
   // once from the Apps Script editor on any pre-strip sheet.
   Results: ["Name", "BibNumber", "UpdatedAt", "IsCheating"],
-  // ViolationType lives at the end so existing sheets keep their column
-  // order; new fields are added on the right by _migrateViolationTypeColumn.
+  // New fields land on the right of existing columns per Guardrail 15.
+  // ViolationType — added by _migrateViolationTypeColumn (v5).
+  // PhotoFileId, DetectionBoxes — added by _migrateViolationsPhotoColumns
+  //   (2026-05-20). PhotoFileId is the Drive file ID of the source photo
+  //   the violation was detected in; DetectionBoxes is a JSON-stringified
+  //   array of {x, y, width, height, label, color} entries (face boxes
+  //   + WRONG_PERSON chest crop). Both consumed by the dashboard
+  //   violation evidence modal — see §6.7.
   Violations: ["ID", "Name", "BibNumber", "Message", "ImageUrl",
-    "Timestamp", "Verified", "VerifiedAt", "ViolationType"],
+    "Timestamp", "Verified", "VerifiedAt", "ViolationType",
+    "PhotoFileId", "DetectionBoxes"],
 });
 
 const TIME_COLUMNS = Object.freeze(
@@ -1029,10 +1036,22 @@ function handleReportViolation(body) {
     imageUrl = DRIVE_THUMBNAIL_URL(saveBase64Image(folder, filename, imageBase64), 800);
   }
 
+  // Photo evidence metadata (added 2026-05-20). Scanner emits these on
+  // every reportViolation POST; older clients (and any non-scanner
+  // caller) omit them and the columns stay blank — the dashboard
+  // evidence modal renders a placeholder for blank PhotoFileId. No
+  // validation on photoFileId since Drive file IDs are opaque alpha-
+  // numeric strings. DetectionBoxes is stringified server-side so the
+  // sheet stores a stable JSON string rather than a serialized object
+  // shape that varies by Sheets cell-type coercion.
+  const photoFileId = body.photoFileId ? String(body.photoFileId).trim() : "";
+  const detectionBoxesJson = body.detectionBoxes ? JSON.stringify(body.detectionBoxes) : "";
+
   const id = "V" + Date.now();
-  // Header-mapped write so legacy sheets (no ViolationType column) still
-  // accept the row — the field is silently dropped until the migration
-  // helper adds the column. New sheets created by getSheet() include it.
+  // Header-mapped write so legacy sheets (missing ViolationType,
+  // PhotoFileId, or DetectionBoxes) still accept the row — the field
+  // is silently dropped until the matching migration helper appends
+  // the column. New sheets created by getSheet() include all of them.
   const sheet = getSheet(SHEETS.VIOLATIONS);
   const snap = readWholeSheet(sheet);
   const row = new Array(snap.headers.length).fill("");
@@ -1040,6 +1059,7 @@ function handleReportViolation(body) {
     ID: id, Name: name, BibNumber: bib, Message: message,
     ImageUrl: imageUrl, Timestamp: timestamp,
     Verified: false, VerifiedAt: "", ViolationType: violationType,
+    PhotoFileId: photoFileId, DetectionBoxes: detectionBoxesJson,
   };
   for (const key in fields) {
     const idx = snap.headerIndex(key);
@@ -1634,4 +1654,46 @@ function _migrateResultsSchema() {
     "[_migrateResultsSchema] deleted " + colsToDelete.length + " timing column(s); " +
     "IsCheating " + (appended ? "appended" : "already present") + "."
   );
+}
+
+/**
+ * One-shot Violations evidence-column migration (2026-05-20). Appends
+ * `PhotoFileId` and `DetectionBoxes` to the right of the existing
+ * Violations schema. Existing rows automatically have empty cells in
+ * the new columns — no backfill needed (the dashboard evidence modal
+ * renders a placeholder for blank PhotoFileId).
+ *
+ * Run ONCE from the Apps Script editor function dropdown after
+ * deploying. Idempotent — re-running on a migrated sheet is a no-op
+ * for any column already present.
+ *
+ * Without this run, scanner POSTs that carry photoFileId /
+ * detectionBoxes silently drop those fields (the header-mapped write
+ * in handleReportViolation skips missing columns). The endpoint still
+ * succeeds; only the evidence metadata is lost.
+ */
+function _migrateViolationsPhotoColumns() {
+  const sheet = getSheet(SHEETS.VIOLATIONS);
+  let lastCol = sheet.getLastColumn();
+  const headers = lastCol > 0
+    ? sheet.getRange(1, 1, 1, lastCol).getValues()[0]
+    : [];
+  const toAdd = ["PhotoFileId", "DetectionBoxes"];
+  let added = 0;
+  let alreadyPresent = 0;
+  for (let i = 0; i < toAdd.length; i++) {
+    const name = toAdd[i];
+    if (headers.indexOf(name) >= 0) {
+      alreadyPresent++;
+      Logger.log("[_migrateViolationsPhotoColumns] '" + name + "' already at column " +
+                 (headers.indexOf(name) + 1));
+      continue;
+    }
+    lastCol++;
+    sheet.getRange(1, lastCol).setValue(name);
+    added++;
+    Logger.log("[_migrateViolationsPhotoColumns] appended '" + name + "' at column " + lastCol);
+  }
+  if (added) invalidateViolations();
+  Logger.log("[_migrateViolationsPhotoColumns] added " + added + ", already present " + alreadyPresent);
 }

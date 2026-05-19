@@ -9,6 +9,26 @@
 > cadence, caching, or guardrails MUST update this file in the same change
 > set.
 >
+> **Last updated:** 2026-05-20 — Violations sheet gains two
+> evidence columns: `PhotoFileId` (Drive file ID of the source
+> photo) and `DetectionBoxes` (JSON-stringified array of
+> `{x, y, width, height, label, color}` from the scanner's face
+> detection pass). Both are appended to the right of existing
+> columns per Guardrail 15; new `_migrateViolationsPhotoColumns()`
+> helper backfills them with blank defaults on pre-migration
+> sheets (run once from the Apps Script editor). The dashboard
+> evidence modal — when the admin clicks a violation row — reads
+> these two fields, fetches image bytes via `getImageBytes`
+> (Guardrail 28; never the thumbnail URL against a canvas),
+> draws the photo onto a canvas at native resolution, and
+> overlays each detection box with its label. Legacy rows (no
+> PhotoFileId) get a "No source photo available" placeholder.
+> `handleReportViolation` reads `body.photoFileId || ""` and
+> `body.detectionBoxes ? JSON.stringify(body.detectionBoxes) : ""`
+> via the existing header-mapped write, so pre-migration sheets
+> silently drop the new fields without erroring — same
+> tolerance pattern as the ViolationType v5 migration.
+>
 > **Last updated:** 2026-05-20 — Results schema stripped to the
 > 4-column identity-verification shape (`Name | BibNumber |
 > UpdatedAt | IsCheating`). The 7 timing columns (`Start_Time`,
@@ -361,12 +381,26 @@ Name | BibNumber | UpdatedAt | IsCheating
 ```
 ID | Name | BibNumber | Message | ImageUrl | Timestamp
 | Verified | VerifiedAt | ViolationType
+| PhotoFileId | DetectionBoxes
 ```
 - `ID` format: `"V" + Date.now()` (e.g. `V1714827234567`). Validated by
   `ID_PATTERN = /^V\d{10,}$/`.
 - `ViolationType` is one of `NO_BIB`, `WRONG_PERSON`, `UNREGISTERED`,
   `MULTIPLE_BIBS`, `WRONG_ROUTE`, `OBSCURED_BIB`, `OTHER`. Empty
   defaults to `WRONG_PERSON` (matches `DEFAULT_VIOLATION_TYPE`).
+- `PhotoFileId` — Drive file ID of the source photo the scanner was
+  processing when this violation fired. Used by the dashboard
+  evidence modal to fetch the original bytes via `getImageBytes`
+  and draw them onto a canvas (Guardrail 28). Empty for legacy
+  rows; the modal renders a placeholder in that case.
+- `DetectionBoxes` — JSON-stringified array of detection-box entries.
+  Each entry: `{x, y, width, height, label, color}`. `color` is
+  `"green"` (matched known face), `"red"` (BIB mismatch — also
+  used for the chest-region crop when WRONG_PERSON fires), or
+  `"orange"` (UNREGISTERED unknown face). Empty for legacy rows.
+  Run `_migrateViolationsPhotoColumns()` once after deploying
+  the 2026-05-20 evidence pass to append these two columns to
+  any pre-migration sheet.
 
 ### 3.2 Google Drive
 
@@ -1908,6 +1942,7 @@ All are idempotent.
 | `_migrateHistoricalImages()` | Rewrites every legacy Drive image URL (`Runners.Photo_*`, `Violations.ImageUrl`) to the thumbnail form | Once after deploying v6 (replaces the v3 `_migrateAllImageUrls` helper, which produced now-obsolete embed URLs) |
 | `_migrateViolationTypeColumn()` | Adds the `ViolationType` column and back-fills `WRONG_PERSON` | Once after deploying v5 |
 | `_migrateResultsSchema()` | Strips the 7 retired timing columns (`Start_Time`, `CP1-4_Time`, `Finish_Time`, `Total_Duration`) from the Results sheet and appends `IsCheating` with blank defaults. Idempotent. | Once after deploying the 2026-05-20 schema strip |
+| `_migrateViolationsPhotoColumns()` | Appends `PhotoFileId` and `DetectionBoxes` to the Violations sheet (existing rows get blank cells). Idempotent. | Once after deploying the 2026-05-20 evidence pass |
 
 ### 6.7 Endpoints reference
 
@@ -1927,7 +1962,7 @@ All are idempotent.
 | `verifyAdmin` | `{ password }` | Returns success/failure; no token needed |
 | `registerRunner` | `{ name, bib, email?, timestamp?, photo_front…right, embeddings }` | Atomic |
 | `recordCheckpoint` | `{ name, checkpoint_id, timestamp, bib? }` | `checkpoint_id` is `"start"`, `1`, `2`, `3`, `4`, `"finish"`, OR the sentinel `"photo_verified"` (Drive Scanner identity-verification path; bypasses CP_Time columns — see Guardrail 29). Any other value throws `schema_error`. |
-| `reportViolation` | `{ name?, bib?, message?, violationType?, timestamp? }` | Scanner no longer attaches `image` (2026-05-19 operator decision). Backend still tolerates `image: <base64>` from any legacy client — it is base64-decoded into Drive when present and the `ImageUrl` column is filled; absent payload leaves `ImageUrl` blank. `violationType` defaults to `WRONG_PERSON`. |
+| `reportViolation` | `{ name?, bib?, message?, violationType?, timestamp?, photoFileId?, detectionBoxes? }` | Scanner no longer attaches `image` (2026-05-19 operator decision). Backend still tolerates `image: <base64>` from any legacy client — base64-decoded into Drive when present, `ImageUrl` blank when absent. `photoFileId` (Drive file ID, opaque string) and `detectionBoxes` (array; backend stringifies to JSON) added 2026-05-20 — the dashboard evidence modal consumes them. Pre-migration sheets silently drop the new fields via the header-mapped write. `violationType` defaults to `WRONG_PERSON`. |
 | `verifyViolation` | `{ token, id }` | Admin |
 | `deleteViolation` | `{ token, id }` | Admin; trashes Drive image |
 | `deleteViolationsBatch` | `{ token, ids: [V…] }` | Admin; up to 200 IDs |
