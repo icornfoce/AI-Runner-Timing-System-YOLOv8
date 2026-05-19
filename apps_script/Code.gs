@@ -102,8 +102,12 @@ const SCHEMA = Object.freeze({
   Runners: ["Name", "BibNumber", "Email", "RegisteredAt",
     "Photo_Front", "Photo_Top", "Photo_Bottom", "Photo_Left", "Photo_Right",
     "FolderUrl", "Embeddings"],
-  Results: ["Name", "BibNumber", "Start_Time", "CP1_Time", "CP2_Time",
-    "CP3_Time", "CP4_Time", "Finish_Time", "Total_Duration", "UpdatedAt"],
+  // Results lost its 7 timing columns (Start_Time / CP1-4_Time / Finish_Time /
+  // Total_Duration) on 2026-05-20 — the Drive Scanner is identity-verification
+  // only, no race timing. IsCheating is "true" (WRONG_PERSON has fired for
+  // this runner this session) or "" (clear). Run _migrateResultsSchema()
+  // once from the Apps Script editor on any pre-strip sheet.
+  Results: ["Name", "BibNumber", "UpdatedAt", "IsCheating"],
   // ViolationType lives at the end so existing sheets keep their column
   // order; new fields are added on the right by _migrateViolationTypeColumn.
   Violations: ["ID", "Name", "BibNumber", "Message", "ImageUrl",
@@ -326,7 +330,10 @@ function getSheet(name) {
       if (headers) {
         sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
         if (name === SHEETS.RESULTS) {
-          sheet.getRange("C:I").setNumberFormat("@");
+          // C = UpdatedAt (ISO string — keep Sheets from auto-parsing to Date),
+          // D = IsCheating ("true" / "false" / "" — keep Sheets from coercing
+          // the literal "true"/"false" to a boolean cell type).
+          sheet.getRange("C:D").setNumberFormat("@");
         }
       }
     }
@@ -972,6 +979,7 @@ function _recordPhotoVerification(name, bib) {
   for (let i = 0; i < snap.headers.length; i++) cols[snap.headers[i]] = i;
   const bibCol = cols.BibNumber;
   const updCol = cols.UpdatedAt;
+  const cheatCol = cols.IsCheating;
   const rowIdx = snap.findRowByName(name);
   const nowIso = new Date().toISOString();
 
@@ -980,15 +988,20 @@ function _recordPhotoVerification(name, bib) {
     newRow[0] = name;
     if (bibCol != null && bibCol >= 0) newRow[bibCol] = bib;
     if (updCol != null && updCol >= 0) newRow[updCol] = nowIso;
+    // New row: IsCheating defaults to "" (clear). Only markCheating
+    // promotes it to "true".
+    if (cheatCol != null && cheatCol >= 0) newRow[cheatCol] = "";
     sheet.appendRow(newRow);
     logInfo("recordCheckpoint (photo_verified, new)", { name: name });
   } else {
     const row = snap.values[rowIdx - 2].slice();
     if (bib && bibCol != null && bibCol >= 0) row[bibCol] = bib;
     if (updCol != null && updCol >= 0) row[updCol] = nowIso;
-    // normalizeRowTimeCols protects against Sheets auto-converting any
-    // existing HH:MM:SS time columns to a Date object on re-write —
-    // the same defense the CP-aware path uses.
+    // IsCheating intentionally NOT touched on update: a previously
+    // flagged runner stays flagged across re-verifications. Only
+    // markCheating (or a manual sheet edit) changes the flag.
+    // normalizeRowTimeCols is a no-op on the post-strip schema but
+    // preserves legacy HH:MM:SS columns on any pre-migration sheet.
     normalizeRowTimeCols(row, snap);
     sheet.getRange(rowIdx, 1, 1, snap.headers.length).setValues([row]);
     logInfo("recordCheckpoint (photo_verified, update)", { name: name });
@@ -1213,6 +1226,29 @@ function handleDeleteRunner(body) {
 }
 
 function handleUpdateRunner(body) {
+  // Deprecated 2026-05-20: the Results schema dropped its 7 timing
+  // columns (Start_Time / CP1-4_Time / Finish_Time / Total_Duration)
+  // when the Drive Scanner pivoted to identity-verification only. This
+  // endpoint used to edit those columns; there is nothing left for it
+  // to edit. Function shell retained so the doPost dispatcher still
+  // routes the action and any legacy client gets a clear deprecation
+  // response rather than a cryptic schema_error from a missing column.
+  return ContentService
+    .createTextOutput(JSON.stringify({
+      status: "error",
+      code: "deprecated",
+      message: "updateRunner is no longer supported",
+    }))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
+// ============================================================
+// LEGACY updateRunner body kept below for reference / restoration if
+// race timing is ever reinstated. The shell above short-circuits before
+// any of this runs; this code is unreachable and only documents the
+// pre-deprecation behavior.
+// ============================================================
+function _legacyHandleUpdateRunner_unused(body) {
   requireAdmin(body);
   const name = reqStr(body.name, "name", NAME_PATTERN, 50);
 
@@ -1527,4 +1563,75 @@ function _migrateViolationTypeColumn() {
     invalidateViolations();
   }
   Logger.log("Backfilled " + backfilled + " row(s) with default '" + DEFAULT_VIOLATION_TYPE + "'");
+}
+
+/**
+ * One-shot Results schema migration (2026-05-20). Strips the 7 timing
+ * columns the Drive Scanner pivot retired (Start_Time, CP1-4_Time,
+ * Finish_Time, Total_Duration) and appends IsCheating in their place.
+ * The new SCHEMA["Results"] is [Name, BibNumber, UpdatedAt, IsCheating].
+ *
+ * Run ONCE from the Apps Script editor's function dropdown after
+ * deploying — pre-deploy Results sheets keep their wide shape until
+ * this runs. Idempotent on three axes:
+ *   • A sheet with no timing columns left has nothing to delete.
+ *   • A sheet that already has IsCheating skips the append.
+ *   • An empty sheet (header only) still gets the column shape fixed.
+ *
+ * Existing rows are NOT rewritten beyond column deletion / append; the
+ * IsCheating cell for pre-migration rows is blank, which the
+ * leaderboard renders as "✅ Clear" (see §6.5).
+ */
+function _migrateResultsSchema() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName(SHEETS.RESULTS);
+  if (!sheet) {
+    Logger.log("[_migrateResultsSchema] Results sheet not found — nothing to migrate.");
+    return;
+  }
+  const lastCol = sheet.getLastColumn();
+  if (lastCol === 0) {
+    Logger.log("[_migrateResultsSchema] sheet has no columns — nothing to migrate.");
+    return;
+  }
+  const headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+
+  // Find the timing columns by name. Delete rightmost-first so the
+  // 1-indexed deleteColumn argument doesn't shift under us as earlier
+  // columns disappear.
+  const stripCols = ["Start_Time", "CP1_Time", "CP2_Time", "CP3_Time",
+                     "CP4_Time", "Finish_Time", "Total_Duration"];
+  const colsToDelete = [];
+  for (let i = 0; i < headers.length; i++) {
+    if (stripCols.indexOf(headers[i]) >= 0) colsToDelete.push(i + 1);
+  }
+  colsToDelete.sort(function (a, b) { return b - a; });
+  for (let i = 0; i < colsToDelete.length; i++) {
+    sheet.deleteColumn(colsToDelete[i]);
+  }
+
+  // Re-read after deletions; the header layout has shifted.
+  const newLastCol = sheet.getLastColumn();
+  const newHeaders = newLastCol > 0
+    ? sheet.getRange(1, 1, 1, newLastCol).getValues()[0]
+    : [];
+
+  let appended = false;
+  if (newHeaders.indexOf("IsCheating") < 0) {
+    const appendCol = newLastCol + 1;
+    sheet.getRange(1, appendCol).setValue("IsCheating");
+    // Force plain-text format so a literal "true" / "false" cell
+    // value doesn't get coerced to a boolean by Sheets (which would
+    // round-trip via the JSON API as a boolean — breaking the
+    // leaderboard's String(r.IsCheating).toLowerCase() === "true"
+    // predicate).
+    sheet.getRange(1, appendCol, sheet.getMaxRows(), 1).setNumberFormat("@");
+    appended = true;
+  }
+
+  invalidateResults();
+  Logger.log(
+    "[_migrateResultsSchema] deleted " + colsToDelete.length + " timing column(s); " +
+    "IsCheating " + (appended ? "appended" : "already present") + "."
+  );
 }

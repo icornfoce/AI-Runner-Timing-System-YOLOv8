@@ -9,6 +9,32 @@
 > cadence, caching, or guardrails MUST update this file in the same change
 > set.
 >
+> **Last updated:** 2026-05-20 — Results schema stripped to the
+> 4-column identity-verification shape (`Name | BibNumber |
+> UpdatedAt | IsCheating`). The 7 timing columns (`Start_Time`,
+> `CP1-4_Time`, `Finish_Time`, `Total_Duration`) are gone — the
+> Drive Scanner has no timing role, so the columns were dead
+> weight that rendered as `-` everywhere they were displayed.
+> New helper `_migrateResultsSchema()` (run once from the Apps
+> Script editor) deletes the timing columns and appends
+> `IsCheating` with blank defaults; idempotent. `IsCheating` is
+> `"true"` when WRONG_PERSON has fired for this runner (set by
+> the soon-to-be-added `markCheating` POST action), `"false"` if
+> explicitly cleared, or `""` (which renders as ✅ Clear on the
+> leaderboard). `_recordPhotoVerification` writes `IsCheating=""`
+> on insert and leaves it alone on update — a previously flagged
+> runner stays flagged across re-verifications. `handleUpdateRunner`
+> is now a deprecation stub: the timing columns it used to edit
+> no longer exist, so it returns
+> `{status:"error", code:"deprecated", message:"updateRunner is
+> no longer supported"}`. The function shell is kept so the
+> `doPost` dispatcher still routes the action and any legacy
+> client gets a clear response rather than a cryptic
+> `schema_error`. Sheet creation now formats columns C:D as
+> plain text (`@`) — both `UpdatedAt` (ISO string) and
+> `IsCheating` (literal "true"/"false") would otherwise be
+> auto-coerced by Sheets.
+>
 > **Last updated:** 2026-05-19 — Drive Scanner gains a
 > **High-Performance Local Mode**. `templates/photo_scanner.html`
 > now (a) explicitly pins TF.js to the `webgl` backend before model
@@ -306,15 +332,30 @@ Name | BibNumber | Email | RegisteredAt
 - `Embeddings` is a JSON-stringified array of 128 floats (averaged across
   the 5 angles by the frontend).
 
-**`Results`** — one row per runner who has crossed any timing point.
+**`Results`** — one row per runner identified by the Drive Scanner.
 ```
-Name | BibNumber | Start_Time | CP1_Time | CP2_Time | CP3_Time | CP4_Time
-| Finish_Time | Total_Duration | UpdatedAt
+Name | BibNumber | UpdatedAt | IsCheating
 ```
-- All time columns are **plain text** `HH:MM:SS` (column C–I forced to
-  `@` format on first creation to stop Sheets from converting to Date).
-- `Total_Duration` is auto-computed as `Finish - Start` formatted `M:SS`
-  whenever both Start and Finish are present.
+- `Name` is the foreign key to `Runners.Name`. `BibNumber` is the
+  runner's registered BIB at identification time. `UpdatedAt` is
+  the ISO timestamp of the most recent identification POST. The
+  scanner has no timing role (post-2026-05-18 pivot) so there are
+  no CP_Time columns.
+- `IsCheating` is `"true"` when WRONG_PERSON has fired for this
+  runner this event (set by the `markCheating` POST action — see
+  §6.7), `"false"` if an admin explicitly cleared the flag, or
+  `""` for never-flagged runners. The public leaderboard renders
+  `"true"` as 🚨 Cheating and everything else as ✅ Clear.
+- Columns C:D (`UpdatedAt` + `IsCheating`) are forced to plain-text
+  format (`@`) on sheet creation — Sheets would otherwise parse the
+  ISO timestamp as a Date and coerce literal `"true"`/`"false"`
+  strings to boolean cell types (breaking the leaderboard's
+  string predicate).
+- **Pre-2026-05-20 sheets** carry the old 10-column shape
+  (`Name | BibNumber | Start_Time | CP1-4_Time | Finish_Time |
+  Total_Duration | UpdatedAt`). Run `_migrateResultsSchema()` once
+  from the Apps Script editor to strip the timing columns and
+  append `IsCheating` with blank defaults (see §6.6).
 
 **`Violations`** — one row per detected anomaly.
 ```
@@ -1866,6 +1907,7 @@ All are idempotent.
 | `_consolidateDuplicateRootFolders()` | Merges duplicate `RunnerFaces`/`ViolationEvidence` folders into one canonical folder | If a race ever creates duplicates (predates the lock fix) |
 | `_migrateHistoricalImages()` | Rewrites every legacy Drive image URL (`Runners.Photo_*`, `Violations.ImageUrl`) to the thumbnail form | Once after deploying v6 (replaces the v3 `_migrateAllImageUrls` helper, which produced now-obsolete embed URLs) |
 | `_migrateViolationTypeColumn()` | Adds the `ViolationType` column and back-fills `WRONG_PERSON` | Once after deploying v5 |
+| `_migrateResultsSchema()` | Strips the 7 retired timing columns (`Start_Time`, `CP1-4_Time`, `Finish_Time`, `Total_Duration`) from the Results sheet and appends `IsCheating` with blank defaults. Idempotent. | Once after deploying the 2026-05-20 schema strip |
 
 ### 6.7 Endpoints reference
 
@@ -1890,7 +1932,7 @@ All are idempotent.
 | `deleteViolation` | `{ token, id }` | Admin; trashes Drive image |
 | `deleteViolationsBatch` | `{ token, ids: [V…] }` | Admin; up to 200 IDs |
 | `deleteRunner` | `{ token, name }` | Admin; trashes folder + clears Results |
-| `updateRunner` | `{ token, name, Start_Time?, CP1_Time?, …, Finish_Time? }` | Admin; edits time columns on the **Results** sheet; recomputes `Total_Duration` |
+| `updateRunner` | (none — deprecated 2026-05-20) | **Deprecated**: returns `{status:"error", code:"deprecated", message:"updateRunner is no longer supported"}` for any call. The timing columns it used to edit no longer exist on the Results sheet (see §3.1). Function shell retained so the dispatcher still routes the action. |
 | `editRunnerProfile` | `{ token, name, bib? }` | Admin; edits BIB on the **Runners** sheet for the runner with the given Name. Cascades to `Results.BibNumber` if a Results row exists. Empty `bib` clears the value. Invalidates runners + results caches. Distinct from `updateRunner` (which targets time columns); see §6.2 2026-05-18 entry. |
 
 All responses are
