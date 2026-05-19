@@ -9,6 +9,28 @@
 > cadence, caching, or guardrails MUST update this file in the same change
 > set.
 >
+> **Last updated:** 2026-05-20 — Two new POST actions:
+> `markCheating` (unauthenticated, scanner-called) and
+> `updateRunnerPhoto` (admin-gated). `markCheating` writes
+> `"true"` / `"false"` to `Results.IsCheating` for the named
+> runner — inserts a minimal row if the runner has no Results
+> row yet. Distinct from the `photo_verified` sentinel
+> (Guardrail 29 sibling): the sentinel writes Name + BibNumber +
+> UpdatedAt without touching IsCheating; `markCheating` writes
+> IsCheating without touching the others. The scanner queues a
+> `markCheating(name, isCheating=true)` POST through the same
+> `enqueueThrottledPost` serial queue after every successful
+> WRONG_PERSON fire (Guardrail 30 invariant preserved).
+> `updateRunnerPhoto` accepts `{token, name, angle,
+> photoBase64, mimeType?}`; angle must be one of
+> front/top/bottom/left/right. Trashes the existing Drive file
+> for that angle (try-catch isolated per Guardrail 2), uploads
+> the new image via `saveBase64Image` into
+> `RunnerFaces/<name>/YYYY-MM-DD/`, and rewrites the
+> `Photo_<Angle>` cell with the new thumbnail URL.
+> Invalidates the runners cache. Admin Runners tab UI for both
+> operations lands in Unit 7.
+>
 > **Last updated:** 2026-05-20 — Admin can now rename a runner
 > via a new `renameRunner` POST action, and `editRunnerProfile`
 > accepts an optional `email` field. The rename is a cascade
@@ -1991,6 +2013,8 @@ All are idempotent.
 | `updateRunner` | (none — deprecated 2026-05-20) | **Deprecated**: returns `{status:"error", code:"deprecated", message:"updateRunner is no longer supported"}` for any call. The timing columns it used to edit no longer exist on the Results sheet (see §3.1). Function shell retained so the dispatcher still routes the action. |
 | `editRunnerProfile` | `{ token, name, bib?, email? }` | Admin; edits BIB and/or Email on the **Runners** sheet for the runner with the given Name. Both fields are independently optional (frontend posts whichever changed); supplying neither is a `bad_request`. BIB cascades to `Results.BibNumber` if a Results row exists. Empty string clears the corresponding cell. Email validated against `EMAIL_PATTERN` when non-empty; NOT propagated to Results. Invalidates runners cache (and results cache when BIB cascade happens). |
 | `renameRunner` | `{ token, oldName, newName }` | Admin; cascade-renames Runners.Name + every matching Results.Name + every matching Violations.Name + the `RunnerFaces/<oldName>` Drive folder (try-catch isolated per Guardrail 2). Rejects with `conflict` if `newName` already exists in Runners. Invalidates all three caches. NOT transactional across sheets — Apps Script crash mid-cascade leaves a partially renamed state; the next rename / manual edit reconciles. |
+| `markCheating` | `{ name, isCheating }` | **No admin token** — called by the automated Drive Scanner after WRONG_PERSON fires (Guardrail 29 sibling — distinct write path from `photo_verified`). Writes `"true"` / `"false"` to `Results.IsCheating` for the named runner. Inserts a minimal row if the runner has no Results row yet. Invalidates the results cache. |
+| `updateRunnerPhoto` | `{ token, name, angle, photoBase64, mimeType? }` | Admin; trashes the old Drive file for the angle (try-catch isolated, Guardrail 2), uploads the new base64 image via `saveBase64Image`, rewrites the `Photo_<Angle>` cell with the new thumbnail URL. `angle` must be one of `front` / `top` / `bottom` / `left` / `right`. Invalidates the runners cache. |
 
 All responses are
 `{ status: "success", … }` or `{ status: "error", code, message }`.

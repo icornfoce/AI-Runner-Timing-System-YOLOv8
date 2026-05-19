@@ -621,6 +621,8 @@ function doPost(e) {
       case "updateRunner":     return handleUpdateRunner(body);
       case "editRunnerProfile": return handleEditRunnerProfile(body);
       case "renameRunner":     return handleRenameRunner(body);
+      case "markCheating":     return handleMarkCheating(body);
+      case "updateRunnerPhoto": return handleUpdateRunnerPhoto(body);
       default:
         return jsonErr("Unknown action: " + action, "bad_request");
     }
@@ -1523,6 +1525,150 @@ function _cascadeRenameInSheet(sheet, oldName, newName) {
     }
   }
   return count;
+}
+
+/**
+ * Set or clear the Results.IsCheating cell for a runner. Called by the
+ * Drive Scanner automatically after a WRONG_PERSON violation fires
+ * (see AI_CONTEXT §4.7). Intentionally NOT admin-gated: the scanner is
+ * an automated browser-side caller with no admin token, and the write
+ * is narrowly scoped to a single cell on a single row.
+ *
+ * Distinct from `_recordPhotoVerification` (Guardrail 29) — markCheating
+ * MUST stay a separate POST action. The photo_verified sentinel writes
+ * Name/BibNumber/UpdatedAt without touching IsCheating; markCheating
+ * writes IsCheating without touching the other identity fields.
+ * Folding them together would couple two semantically distinct events
+ * (an identification + a cheating flag) into one write — confusing the
+ * sentinel's "this is who's in the photo" contract.
+ *
+ * If no Results row exists for the runner yet, insert one with
+ * IsCheating set and blank Name/UpdatedAt/BibNumber. This handles the
+ * pathological case where WRONG_PERSON fires before sendIdentification
+ * had a chance to write a Results row (e.g., a WRONG_PERSON read in
+ * the very first photo for that runner).
+ */
+function handleMarkCheating(body) {
+  const name = reqStr(body.name, "name", NAME_PATTERN, 50);
+  // Coerce to a stable string. The leaderboard's predicate is
+  // String(r.IsCheating).toLowerCase() === "true" so "true" / "false"
+  // round-trip through Sheets-as-plain-text correctly. Boolean input
+  // (true/false from a JS POST) and string input ("true"/"false") both
+  // collapse to the same canonical string here.
+  const isCheatingStr = (body.isCheating === true || String(body.isCheating).toLowerCase() === "true")
+    ? "true" : "false";
+
+  const sheet = getSheet(SHEETS.RESULTS);
+  const snap = readWholeSheet(sheet);
+  const cheatCol = snap.headerIndex("IsCheating");
+  if (cheatCol < 0) {
+    throw httpError("Results sheet missing IsCheating column — run _migrateResultsSchema", "schema_error");
+  }
+  const rowIdx = snap.findRowByName(name);
+
+  let inserted = false;
+  if (rowIdx < 0) {
+    // No identification yet — insert a minimal row. Header-mapped write
+    // tolerates pre-migration sheets (extra timing columns just stay blank).
+    const newRow = new Array(snap.headers.length).fill("");
+    const fields = { Name: name, IsCheating: isCheatingStr };
+    for (const key in fields) {
+      const idx = snap.headerIndex(key);
+      if (idx >= 0) newRow[idx] = fields[key];
+    }
+    sheet.appendRow(newRow);
+    inserted = true;
+  } else {
+    // Existing row — narrow setValue on the IsCheating cell only.
+    // Intentionally do NOT touch UpdatedAt / BibNumber here; the
+    // identification's own write is the source of truth for those.
+    sheet.getRange(rowIdx, cheatCol + 1).setValue(isCheatingStr);
+  }
+
+  invalidateResults();
+  logInfo("markCheating", { name: name, isCheating: isCheatingStr, inserted: inserted });
+  return jsonOk({
+    message: name + " marked " + (isCheatingStr === "true" ? "cheating" : "clear"),
+    name: name,
+    isCheating: isCheatingStr,
+    inserted: inserted,
+  });
+}
+
+/**
+ * Admin-only: replace one of a runner's 5 angle photos. Trashes the
+ * existing Drive file for that angle (try-catch isolated per
+ * Guardrail 2 — Drive failure must not block the sheet write), uploads
+ * the new base64-encoded image via saveBase64Image (which handles
+ * date-subfolder creation under LockService), and rewrites the
+ * Runners.Photo_<Angle> cell with the new thumbnail URL.
+ *
+ * Angle must be one of front / top / bottom / left / right (the same
+ * angle set register.html captures). The column name is title-case:
+ * "Photo_Front", "Photo_Top", etc.
+ */
+function handleUpdateRunnerPhoto(body) {
+  requireAdmin(body);
+  const name = reqStr(body.name, "name", NAME_PATTERN, 50);
+  const angleRaw = reqStr(body.angle, "angle", null, 20);
+  const angle = String(angleRaw).toLowerCase();
+  const ALLOWED_ANGLES = ["front", "top", "bottom", "left", "right"];
+  if (ALLOWED_ANGLES.indexOf(angle) < 0) {
+    throw httpError("angle must be one of " + ALLOWED_ANGLES.join("/"), "bad_request");
+  }
+  if (!body.photoBase64) {
+    throw httpError("photoBase64 is required", "bad_request");
+  }
+  // mimeType is informational — saveBase64Image always writes as JPEG.
+  // We accept and log it for diagnostic / future-format purposes.
+
+  // Column name: Photo_<TitleCaseAngle>
+  const colName = "Photo_" + angle.charAt(0).toUpperCase() + angle.slice(1);
+
+  const runnersSheet = getSheet(SHEETS.RUNNERS);
+  const runnersSnap = readWholeSheet(runnersSheet);
+  const runnerRowIdx = runnersSnap.findRowByName(name);
+  if (runnerRowIdx < 0) throw httpError("Runner not found: " + name, "not_found");
+  const colIdx = runnersSnap.headerIndex(colName);
+  if (colIdx < 0) throw httpError("Runners sheet missing " + colName + " column", "schema_error");
+
+  // Trash the existing file for this angle (if any). Isolated try-catch
+  // so a missing / already-trashed file doesn't block the new upload.
+  const oldUrl = String(runnersSnap.values[runnerRowIdx - 2][colIdx] || "");
+  if (oldUrl) {
+    try {
+      const oldFileId = extractDriveFileId(oldUrl);
+      if (oldFileId) {
+        trashDriveFile(oldFileId);
+        logInfo("updateRunnerPhoto: trashed old file", { name: name, angle: angle, fileId: oldFileId });
+      }
+    } catch (e) {
+      logErr("updateRunnerPhoto: trash old file failed (continuing)", e);
+    }
+  }
+
+  // Upload the new image into the runner's RunnerFaces/<name>/ folder.
+  // saveBase64Image creates a YYYY-MM-DD subfolder lazily (v6+), so
+  // multiple replacements on the same day share a subfolder.
+  const root = getRootFolder(RUNNER_FACES_FOLDER);
+  const personFolder = getOrCreateFolder(root, name);
+  const filename = name + "_" + angle + "_" + Date.now() + ".jpg";
+  const newFileId = saveBase64Image(personFolder, filename, body.photoBase64);
+  const newUrl = DRIVE_THUMBNAIL_URL(newFileId, 800);
+
+  // Rewrite the cell with the new thumbnail URL. The dashboard
+  // runners-tab thumbnail panel re-fetches the Runners cache on the
+  // next poll and the new URL goes live (≤ 15 s).
+  runnersSheet.getRange(runnerRowIdx, colIdx + 1).setValue(newUrl);
+
+  invalidateRunners();
+  logInfo("updateRunnerPhoto", { name: name, angle: angle, newFileId: newFileId });
+  return jsonOk({
+    message: "Photo updated for " + name + " / " + angle,
+    name: name,
+    angle: angle,
+    photoUrl: newUrl,
+  });
 }
 
 // ============================================================
