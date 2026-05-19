@@ -843,6 +843,45 @@ async function processPhotoWithBytes(photo, payload){
   }
  }
 
+ // Slice the reported-unknowns set NOW (before OCR / drawing) so we
+ // can include them in detectionBoxes without re-sorting later. Sort
+ // by area desc so most prominent intruders are reported first when
+ // the cap kicks in.
+ unknownHits.sort((a, b) => b.area - a.area);
+ const reportedUnknowns = unknownHits.slice(0, MAX_UNKNOWNS_PER_PHOTO);
+
+ // Build the per-photo detectionBoxes array (added 2026-05-20). Every
+ // reportViolation POST for this photo carries a snapshot of this
+ // array, so the dashboard evidence modal can redraw the original
+ // photo with the same color-coded overlays the admin would have
+ // seen live. Collection happens AFTER categorization and BEFORE OCR
+ // — collected boxes are pixel coordinates on the clean canvas
+ // (Guardrail 31). For each WRONG_PERSON, handleKnownFace later
+ // pushes a red chest-region box derived from getOCRCropBox.
+ //   green  = matched known face       — "Name: <name>"
+ //   orange = unknown / unregistered   — "Not in system"
+ //   red    = OCR chest crop for WRONG_PERSON — "BIB found: X | Registered: Y"
+ const detectionBoxes = [];
+ for (const hit of knownHits){
+  hit.boxIdx = detectionBoxes.length;
+  detectionBoxes.push({
+   x: hit.box.x, y: hit.box.y,
+   width: hit.box.width, height: hit.box.height,
+   label: `Name: ${hit.name}`,
+   color: "green",
+  });
+ }
+ for (let i = 0; i < reportedUnknowns.length; i++){
+  const u = reportedUnknowns[i];
+  u.boxIdx = detectionBoxes.length;
+  detectionBoxes.push({
+   x: u.box.x, y: u.box.y,
+   width: u.box.width, height: u.box.height,
+   label: "Not in system",
+   color: "orange",
+  });
+ }
+
  // OCR FIRST — canvas still holds ONLY the original photo pixels
  // at this point. Every `runOCRForFace` slice inside
  // `handleKnownFace` therefore reads clean pixels. (Violation
@@ -850,18 +889,15 @@ async function processPhotoWithBytes(photo, payload){
  // pixel-reader in this pipeline, but Guardrail #31 still applies
  // — `drawDetectionBox` MUST stay after the OCR pass below.)
  for (const hit of knownHits){
-  await handleKnownFace(canvas, hit, photo);
+  await handleKnownFace(canvas, hit, photo, detectionBoxes);
  }
 
- // UNREGISTERED — one fire per distinct unknown face, capped per
- // photo. Sort by area descending so the most prominent intruders
- // are reported first when the cap kicks in. Per-index dedup key
- // (`"unknown:fileId:N"`) ensures the same face index in the same
- // photo can't double-fire even if the loop is re-entered somehow,
- // while different faces and different photos each get their own
- // violation row. Crops below still come from the clean canvas.
- unknownHits.sort((a, b) => b.area - a.area);
- const reportedUnknowns = unknownHits.slice(0, MAX_UNKNOWNS_PER_PHOTO);
+ // UNREGISTERED — one fire per distinct unknown face. Per-index
+ // dedup key (`"unknown:fileId:N"`) ensures the same face index in
+ // the same photo can't double-fire even if the loop is re-entered.
+ // Each call gets a snapshot of detectionBoxes so the queued POST
+ // sees a stable array even if later WRONG_PERSON mutations append
+ // to the live array.
  for (let i = 0; i < reportedUnknowns.length; i++){
   const u = reportedUnknowns[i];
   await fireViolation({
@@ -869,6 +905,8 @@ async function processPhotoWithBytes(photo, payload){
    bib: "",
    message: `Unregistered face #${i + 1} in photo "${photo.name}"`,
    violationType: "UNREGISTERED",
+   photoFileId: photo.id,
+   detectionBoxes: detectionBoxes.slice(),
   }, "unknown:" + photo.id + ":" + i);
  }
 
@@ -910,7 +948,12 @@ async function processPhotoWithBytes(photo, payload){
 }
 
 // ── PER-FACE HANDLING ───────────────────────────────────────
-async function handleKnownFace(canvas, hit, photo){
+// `detectionBoxes` is the per-photo array built upstream in
+// `processPhotoWithBytes`. WRONG_PERSON pushes a red chest-region
+// entry into it before firing the violation, so the dashboard
+// evidence modal redraws "kawin's face matched (green) AND the
+// chest crop OCR'd to the wrong BIB (red)".
+async function handleKnownFace(canvas, hit, photo, detectionBoxes){
  const { name, box } = hit;
  const expectedBib = runnerRegistry[name] || "";
 
@@ -932,6 +975,8 @@ async function handleKnownFace(canvas, hit, photo){
    bib: "",
    message: `Multiple BIBs detected on ${name} in "${photo.name}": ${multipleBibs.join(", ")}`,
    violationType: "MULTIPLE_BIBS",
+   photoFileId: photo.id,
+   detectionBoxes: detectionBoxes.slice(),
   }, name + ":MULTIPLE_BIBS:" + blocksKey);
   return;
  }
@@ -948,6 +993,8 @@ async function handleKnownFace(canvas, hit, photo){
    bib: "",
    message: `No BIB detected on ${name} in "${photo.name}"`,
    violationType: "NO_BIB",
+   photoFileId: photo.id,
+   detectionBoxes: detectionBoxes.slice(),
   }, name + ":NO_BIB");
   return;
  }
@@ -967,14 +1014,58 @@ async function handleKnownFace(canvas, hit, photo){
  scheduleScanStateSave();
  await sendIdentification(name, expectedBib, photo);
 
- // 4) WRONG_PERSON — OCR'd BIB differs from registered.
+ // 4) WRONG_PERSON — OCR'd BIB differs from registered. Two failure
+ //    directions collapse here (see AI_CONTEXT §4.7):
+ //      (a) Face matches runner A, OCR reads BIB belonging to B   → fired
+ //      (b) OCR reads BIB X, face attached doesn't own X          → same fire,
+ //          because `expectedBib = runnerRegistry[name]` is keyed
+ //          off the FACE match, not the OCR'd digits.
+ //    Both manifest as `expectedBib !== readBib`. Before firing,
+ //    push a red chest-region box into the shared detectionBoxes
+ //    array so the evidence modal can overlay "wrong BIB read
+ //    here" on top of the green face-match box.
  if (expectedBib && readBib !== expectedBib){
-  await fireViolation({
+  const { bx, by, bw, bh } = getOCRCropBox(box, canvas);
+  detectionBoxes.push({
+   x: bx, y: by, width: bw, height: bh,
+   label: `BIB found: ${readBib} | Registered: ${expectedBib}`,
+   color: "red",
+  });
+  const fired = await fireViolation({
    name,
    bib: readBib,
    message: `Expected BIB ${expectedBib}, Found ${readBib} in "${photo.name}"`,
    violationType: "WRONG_PERSON",
+   photoFileId: photo.id,
+   detectionBoxes: detectionBoxes.slice(),
   }, name + ":WRONG_PERSON:" + readBib);
+
+  // markCheating — auto-flag the runner in Results.IsCheating
+  // after every fresh WRONG_PERSON fire (skipped on dedup hit so a
+  // duplicate of the same evidence doesn't re-write the flag,
+  // though re-writing would be idempotent anyway). Routed through
+  // the same enqueueThrottledPost serial queue per Guardrail 30 so
+  // the outbound POST rate stays ≤ 1 per 150 ms. Fire-and-forget
+  // (no await on the queue's promise) — the violation itself is
+  // the primary evidence; this is a derived flag the leaderboard
+  // reflects, and a network blip here doesn't block the scan.
+  if (fired){
+   enqueueThrottledPost(async () => {
+    try {
+     await fetch(API, {
+      method: "POST",
+      headers: { "Content-Type": "text/plain" },
+      body: JSON.stringify({
+       action: "markCheating",
+       name,
+       isCheating: true,
+      }),
+     });
+    } catch (e){
+     console.warn("markCheating failed for", name, e);
+    }
+   });
+  }
  }
 }
 
@@ -1166,6 +1257,11 @@ async function sendIdentification(name, bib, photo){
  });
 }
 
+// Returns `true` if the violation actually fired, `false` if the
+// dedup short-circuit hit. Callers (currently the WRONG_PERSON
+// branch in handleKnownFace) use the boolean to decide whether to
+// queue a follow-up markCheating POST — re-firing markCheating on
+// every burst-suppressed duplicate would be a waste of quota.
 async function fireViolation(payload, dedupKey){
  // Synchronous reserve-then-add — must happen BEFORE the first await
  // so two concurrent photo tasks with the same dedupKey can't both
@@ -1173,12 +1269,12 @@ async function fireViolation(payload, dedupKey){
  // check + add executes atomically relative to other microtasks.
  if (seenViolations.has(dedupKey)){
   addLog("dup", payload.name, `Duplicate violation suppressed (${payload.violationType})`);
-  return;
+  return false;
  }
  seenViolations.add(dedupKey);
  scheduleScanStateSave();
  addLog("viol", payload.name, `⚠️ ${payload.message}`);
- return enqueueThrottledPost(async () => {
+ await enqueueThrottledPost(async () => {
   try {
    await fetch(API, {
     method: "POST",
@@ -1190,6 +1286,12 @@ async function fireViolation(payload, dedupKey){
      message: payload.message,
      violationType: payload.violationType,
      timestamp: new Date().toISOString(),
+     // Photo-evidence metadata — empty/null when omitted by the
+     // caller; the backend's handleReportViolation accepts both
+     // shapes. The dashboard evidence modal degrades to a
+     // placeholder when PhotoFileId is empty.
+     photoFileId: payload.photoFileId || "",
+     detectionBoxes: payload.detectionBoxes || [],
     }),
    });
    stats.violations++;
@@ -1199,6 +1301,7 @@ async function fireViolation(payload, dedupKey){
    addLog("err", payload.name, "Failed to send violation: " + (e.message || e));
   }
  });
+ return true;
 }
 
 // Promise-based sleep helper for the per-POST throttle.

@@ -9,6 +9,33 @@
 > cadence, caching, or guardrails MUST update this file in the same change
 > set.
 >
+> **Last updated:** 2026-05-20 — Drive Scanner now emits
+> `photoFileId` + `detectionBoxes` on every `reportViolation`
+> POST, and queues a `markCheating(name, isCheating=true)` POST
+> after every successful WRONG_PERSON fire. The detection-box
+> array is built in `processPhotoWithBytes` after categorization
+> but BEFORE OCR (Guardrail 31): one green entry per matched
+> face (`"Name: <name>"`), one orange entry per reported unknown
+> (`"Not in system"`). In `handleKnownFace`, the WRONG_PERSON
+> branch additionally pushes a red chest-region entry derived
+> from `getOCRCropBox(box, canvas)` with label `"BIB found: X |
+> Registered: Y"` BEFORE calling fireViolation. Each fireViolation
+> call attaches a `.slice()` snapshot of the array so later
+> mutations don't leak into the already-queued POST. `fireViolation`
+> now returns `true` on fire / `false` on dedup-suppressed; the
+> WRONG_PERSON path uses the boolean to decide whether to queue
+> the markCheating follow-up (skipping the queue on dedup hits
+> avoids quota-wasting re-writes — though markCheating itself is
+> idempotent). The markCheating POST routes through the same
+> `enqueueThrottledPost` serial queue per Guardrail 30 — the
+> 150 ms gap is preserved regardless of how many WRONG_PERSON
+> fires the scan produces. Documented explicitly: both
+> directions of cheating mismatch (Face ≠ Registered BIB AND
+> BIB ≠ Registered Face) collapse onto the existing WRONG_PERSON
+> path, because `expectedBib = runnerRegistry[name]` is keyed off
+> the FACE match — so either direction surfaces as
+> `expectedBib !== readBib`. No new violation type is needed.
+>
 > **Last updated:** 2026-05-20 — Two new POST actions:
 > `markCheating` (unauthenticated, scanner-called) and
 > `updateRunnerPhoto` (admin-gated). `markCheating` writes
@@ -808,10 +835,34 @@ Tesseract, and emits POSTs:
   `_recordPhotoVerification`, which writes the runner's `Name` +
   `BibNumber` + `UpdatedAt` to the Results sheet **without touching
   any CP_Time column**. Fired once per runner per session.
-- `reportViolation` — unchanged. Fires when face matches a runner
-  but OCR returns a different BIB (`WRONG_PERSON`), when multiple
-  distinct BIB blocks appear on one chest (`MULTIPLE_BIBS`), or when
-  no face match exists (`UNREGISTERED`).
+- `reportViolation` — fires when face matches a runner but OCR
+  returns a different BIB (`WRONG_PERSON`), when multiple distinct
+  BIB blocks appear on one chest (`MULTIPLE_BIBS`), or when no face
+  match exists (`UNREGISTERED`). Since 2026-05-20 the payload also
+  carries `photoFileId` (Drive ID of the source photo) and
+  `detectionBoxes` (JSON-stringified by the backend) so the
+  dashboard evidence modal can redraw the original photo with the
+  same color-coded overlays the admin would have seen live.
+- `markCheating` — queued after every fresh WRONG_PERSON fire
+  (skipped on dedup). Writes `Results.IsCheating = "true"` for the
+  named runner so the public leaderboard's Status column flips to
+  🚨 Cheating on the next 5 s poll. Routes through
+  `enqueueThrottledPost` so Guardrail 30's serial-queue invariant
+  is preserved (the 150 ms gap applies to markCheating too).
+
+**Two cheating-detection directions, same path.** A `WRONG_PERSON`
+fires when the face match identifies runner A in the photo but the
+OCR'd BIB belongs to a different registered runner B
+(*Face ≠ Registered BIB*). The opposite framing — *BIB ≠ Registered
+Face*, where the OCR reads BIB X but the face attached to that BIB
+in the Runners sheet isn't the face the scanner sees — manifests
+identically in the code: `expectedBib = runnerRegistry[name]` is
+keyed off the FACE match's `name`, so either direction of mismatch
+collapses to the same `expectedBib !== readBib` predicate. No
+separate violation type or trigger is needed. The evidence boxes
+make the direction visible to the admin: the green "Name: X" box
+sits on the matched face; the red "BIB found: Y | Registered: Z"
+box sits over the chest region where the OCR ran.
 
 ```
 init():
@@ -861,10 +912,19 @@ startScan():
         isKnown = match.label !== "unknown" AND match.distance ≤ FACE_MATCH_DISTANCE
         categorize: knownHits[] or unknownHits[]   ← ALL unknowns kept
                                                      (NO drawing yet — Guardrail #31)
+      reportedUnknowns = unknownHits.sort(by area desc).slice(0, MAX_UNKNOWNS_PER_PHOTO)
+      ── Build detectionBoxes (after categorization, before OCR) ──
+      detectionBoxes = []
+      for each knownHit:        push {box, label: "Name: <name>",     color: "green"}
+      for each reportedUnknown: push {box, label: "Not in system",    color: "orange"}
       ── OCR runs here, while canvas is still CLEAN ──
-      for each knownHit: handleKnownFace(canvas, hit) → OCR + MULTIPLE_BIBS/NO_BIB/WRONG_PERSON violations (metadata only, no image attached since 2026-05-19)
-      for each unknownHit (sorted by area, capped at MAX_UNKNOWNS_PER_PHOTO):
-        fireViolation UNREGISTERED (metadata only, no image attached since 2026-05-19)
+      for each knownHit: handleKnownFace(canvas, hit, photo, detectionBoxes)
+        → OCR + MULTIPLE_BIBS/NO_BIB/WRONG_PERSON violations
+        → on WRONG_PERSON, push {chestBox, label: "BIB found: X | Registered: Y", color: "red"} into detectionBoxes
+        → fireViolation snapshots detectionBoxes.slice() into the POST body
+        → if WRONG_PERSON fired (not dedup'd), enqueue markCheating(name, true) via enqueueThrottledPost
+      for each reportedUnknown:
+        fireViolation UNREGISTERED with photoFileId + detectionBoxes.slice()
       ── ONLY NOW: paint UI overlays for operator feedback ──
       for each knownHit:    drawDetectionBox(ctx, hit.box, hit.name,   isViolation=false)
       for each unknownHit:  drawDetectionBox(ctx, u.box,   "Unknown",  isViolation=true)
