@@ -35,4 +35,10 @@ def admin():
     return render_template('dashboard.html')
 
 if __name__ == '__main__':
-    app.run(debug=True, port=5000)
+    # High-Performance Local Mode: threaded=True lets the Flask dev
+    # server handle template requests from multiple browser tabs /
+    # concurrent fetches without head-of-line blocking. Safe here
+    # because every route in this file is a pure render_template
+    # with zero shared mutable server-side state — all AI work runs
+    # in the browser.
+    app.run(debug=True, port=5000, threaded=True)

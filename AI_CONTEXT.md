@@ -9,6 +9,129 @@
 > cadence, caching, or guardrails MUST update this file in the same change
 > set.
 >
+> **Last updated:** 2026-05-19 — Drive Scanner gains a
+> **High-Performance Local Mode**. `templates/photo_scanner.html`
+> now (a) explicitly pins TF.js to the `webgl` backend before model
+> load (`await faceapi.tf.setBackend('webgl'); await faceapi.tf.ready();`,
+> with a CPU fallback) so the local GPU does the inference, and
+> (b) processes photos concurrently via a semaphore worker pool
+> (`SCAN_CONCURRENCY = 4` in flight at all times) instead of the
+> prior single-flight prefetch-by-1 sequential loop. All
+> `recordCheckpoint` and `reportViolation` POSTs are now funneled
+> through a single serial 150 ms-throttled queue
+> (`enqueueThrottledPost`) so concurrency does NOT multiply the
+> outbound POST burst rate — the per-user Apps Script URL-fetch
+> quota guard is preserved exactly. `web_app.py` flips its dev
+> server to `threaded=True` so multiple browser tabs / template
+> fetches don't serialize through one worker. As a same-day
+> follow-up the inline script also monkey-patches
+> `HTMLCanvasElement.prototype.getContext` at module-load time to
+> default every `'2d'` context to `{ willReadFrequently: true }`,
+> silencing Chrome's "Multiple readback operations using
+> `getImageData` are faster with the `willReadFrequently`
+> attribute set to true" warning and steering both face-api's
+> internal scratch canvases AND our OCR preprocess canvases onto
+> the CPU-backed-buffer fast path. The patch is a no-op for
+> `'webgl'` contexts, so TF.js inference is untouched. Backend,
+> Apps Script contracts, sheet schemas, and all model versions
+> are unchanged. New Guardrail #30 pins the serial-queue
+> invariant.
+>
+> Same-day follow-up (detection selectivity): `SSD_MIN_CONFIDENCE`
+> raised from `0.5` → `0.7` and a new `MIN_FACE_SIZE = 60` px gate
+> added in `photo_scanner.html` after operator-reported false
+> positives on an advertising banner (`image_2.png`) plus a wave of
+> tiny deeply-out-of-focus background detections cluttering the
+> `UNREGISTERED` log. Both gates apply BEFORE face matching, OCR,
+> and `UNREGISTERED` reporting — they short-circuit downstream cost
+> as well as suppressing the noise. The detection result loop now
+> reads from a `detections = rawDetections.filter(...)` variable;
+> downstream code is unchanged because the filtered array keeps the
+> original variable name. Detector choice stays SSD MobileNet
+> (Guardrail 27 unchanged); this is a tuning change, not a new
+> architectural invariant, so no new Guardrail. Values can be
+> dialled down (0.65 / 50 px) if a real foreground runner is ever
+> seen falling through both gates.
+>
+> Same-day revert (concurrency = 1 + crop-before-draw): operator
+> reported severe correctness regressions from the HPLM
+> `SCAN_CONCURRENCY = 4`. Image 1: face-api hallucinating faces on
+> empty space / text. Image 2: violation crops saved to Drive
+> showing pure black, wrong body parts (legs instead of face), and
+> red "Unknown" UI bounding boxes baked into the saved pixels.
+> Root cause is two-fold: (a) `#preview-canvas` is a shared DOM
+> element, so concurrent `processPhotoWithBytes` tasks raced on
+> `canvas.width = …; drawImage(…)` and read each other's pixels
+> mid-detection; (b) `drawDetectionBox` was painted on that canvas
+> BEFORE `runOCRForFace` / `cropToDataUrl` read back from it, so
+> even at concurrency=1 the UI overlays would be baked into every
+> violation crop and the green name label would corrupt the chest
+> region Tesseract sees. Fixes: `SCAN_CONCURRENCY` reverted to
+> `1`; `processPhotoWithBytes` reordered so categorization is
+> followed by ALL crops + OCR on the still-clean canvas, with UI
+> overlays painted in a final pass for operator feedback only.
+> Semaphore worker pool, `enqueueThrottledPost` queue, WebGL
+> backend pin, `willReadFrequently` canvas patch, and Flask
+> `threaded=True` all kept — orthogonal to these bugs. New
+> Guardrail #31 pins the crop-before-draw invariant. Operator's
+> explicit trade: *"make it more accurate, it can be slower."*
+>
+> Same-day follow-up (OCR recall): operator hit a false `NO_BIB`
+> on a tight-portrait photo with a massive, legibly-printed BIB
+> "4532". Root cause was the 2026-05-17 audit-era
+> `OCR_MIN_CONFIDENCE = 80` — too strict for browser Tesseract,
+> which on a 2× upscaled adaptive-threshold crop typically scores
+> printed BIBs in the **60s–70s**, never above 80. Lowered to
+> `65`; the audit-era false-positive path (sponsor-logo "S2 3X"
+> → "23" at conf=75) is now blocked instead by the unchanged
+> `BIB_MIN_LEN = 2` plus the 2026-05-19 detection-side gates
+> (`SSD_MIN_CONFIDENCE = 0.7`, `MIN_FACE_SIZE = 60`). Also widened
+> `getOCRCropBox` factors from `0.5/0.6/1.0/3.0` to
+> `0.7/0.5/1.4/3.0` of faceH (wider horizontal padding for off-
+> center BIBs on shoulder-strap vests; higher top edge for tight-
+> portrait BIBs that hug the chin) and mirrored the change into
+> `templates/checkpoint.html` per Guardrail 27 — both files move
+> in lockstep. Added a DEBUG-only dashed-blue chest-box overlay
+> (`?debug=1`) in the Guardrail #31 post-crop UI pass so the
+> operator can visually confirm exactly which region Tesseract
+> sees per face. No new Guardrails — tuning only.
+>
+> Same-day follow-up (violation crops removed entirely): operator
+> directed *"เราจะไม่ตัดรูปอีกเเล้ว"* ("we won't crop images
+> anymore"). The four `fireViolation` call sites (UNREGISTERED,
+> MULTIPLE_BIBS, NO_BIB, WRONG_PERSON) no longer attach an `image`
+> field, and the `cropToDataUrl` helper has been deleted from
+> `templates/photo_scanner.html`. `reportViolation` payloads now
+> carry metadata only (`name` / `bib` / `message` / `violationType`
+> / `timestamp`). The backend was already tolerant —
+> `apps_script/Code.gs` line ~1007 reads `body.image || ""` and
+> skips the Drive upload when empty, leaving the Violations
+> sheet's `ImageUrl` column blank for new rows. No backend or
+> schema change; existing violation rows keep their saved
+> `ImageUrl` values, only new rows are imageless. The DEBUG
+> dashed-blue chest-box overlay survives (preview-only, never was
+> sent over the wire). Guardrail #31 is partially superseded —
+> its "violation crops" clause is now moot since no crops are
+> generated; the OCR clean-canvas clause is the only load-bearing
+> half. The guardrail body is annotated to reflect this so a
+> future reintroduction of image saving still has the design
+> wisdom captured.
+>
+> Same-day follow-up (recall floor lowered further): operator
+> reported *"เอา 60px ออก เเละมันยังอ่าน bib ไม่ได้"* ("remove the
+> 60px and BIB still can't be read"). Two changes: (a)
+> `MIN_FACE_SIZE` disabled — set from `60` to `0`. The size gate
+> was filtering out borderline-small faces the operator wanted
+> processed; banner hallucinations are now blocked primarily by
+> `SSD_MIN_CONFIDENCE = 0.7`. (b) `OCR_MIN_CONFIDENCE` lowered
+> further: `65 → 50`. Browser Tesseract on adaptive-threshold
+> crops with slight blur or stylized fonts can dip into the 50s;
+> 65 was still over-rejecting legibly-printed BIBs. 50 is near the
+> floor of useful Tesseract output. Short-graphic false-positive
+> defense relies on `BIB_MIN_LEN = 2` (unchanged) and the face
+> match. Both knobs are tuning, not architecture — no guardrail
+> change.
+>
 > **Last updated:** 2026-05-18 — Drive Scanner pivots from "timing"
 > to "identity verification" and lands a four-bundle audit-fix pass.
 > The checkpoint selector (START / CP1-4 / FINISH) is gone; the
@@ -611,22 +734,37 @@ startScan():
     nextBytesPromise = fetchImageBytes(allPhotos[i + 1])   ← prefetch
     processPhotoWithBytes(allPhotos[i], bytesPayload):
       decode → <img> → draw to preview canvas at native resolution
-      detectAllFaces(canvas, SsdMobilenetv1Options{minConfidence:0.5})
+      detectAllFaces(canvas, SsdMobilenetv1Options{minConfidence:0.7})
         .withFaceLandmarks().withFaceDescriptors()
+      drop detections with box.width<MIN_FACE_SIZE OR box.height<MIN_FACE_SIZE   ← size gate (banner/background noise)
 
       for each detection:
         match = faceMatcher.findBestMatch(descriptor)
         isKnown = match.label !== "unknown" AND match.distance ≤ FACE_MATCH_DISTANCE
-        draw rectangle (green/red) on preview canvas
         categorize: knownHits[] or unknownHits[]   ← ALL unknowns kept
+                                                     (NO drawing yet — Guardrail #31)
+      ── OCR runs here, while canvas is still CLEAN ──
+      for each knownHit: handleKnownFace(canvas, hit) → OCR + MULTIPLE_BIBS/NO_BIB/WRONG_PERSON violations (metadata only, no image attached since 2026-05-19)
+      for each unknownHit (sorted by area, capped at MAX_UNKNOWNS_PER_PHOTO):
+        fireViolation UNREGISTERED (metadata only, no image attached since 2026-05-19)
+      ── ONLY NOW: paint UI overlays for operator feedback ──
+      for each knownHit:    drawDetectionBox(ctx, hit.box, hit.name,   isViolation=false)
+      for each unknownHit:  drawDetectionBox(ctx, u.box,   "Unknown",  isViolation=true)
 
     ── OCR FIRST (single read per face, NO majority vote) ──
+    getOCRCropBox(box, canvas) → {bx, by, bw, bh}
+        bx = box.x - 0.7·faceH    ← widened 2026-05-19
+        by = box.y + 0.5·faceH    ← higher (was 0.6) to catch chin-level BIBs
+        bw = box.width + 1.4·faceH  ← wider (was 1.0) for off-center BIBs
+        bh = 3.0·faceH              ← unchanged
+        (mirrored in checkpoint.html per Guardrail 27)
     preprocessForOCR(crop):
       grayscale (BT.601) → integral image →
       adaptive threshold (mean − ADAPTIVE_THRESHOLD_C,
                           ADAPTIVE_THRESHOLD_BLOCK² window) →
       nearest-neighbor 2× upscale
     {text, conf} = tesseractWorker.recognize(processed)
+    validate: BIB_MIN_LEN ≤ digits ≤ BIB_MAX_LEN AND conf ≥ OCR_MIN_CONFIDENCE (= 65)
     readBib       = digits-only normalized text (or "" if fails validation gate)
     multipleBibs  = RAW text \d{MULTIPLE_BIBS_MIN_BLOCK_LEN,}+ blocks
                     if count ≥ MULTIPLE_BIBS_MIN_BLOCKS, else null
@@ -762,17 +900,29 @@ clears the entry. State is saved on every `Set` mutation
 A clean `finishScan("done")` clears the entry — no resume needed
 on the next run of the same folder.
 
-**Pagination + prefetch + throttle.** `getDrivePhotos` is paged
-(`offset` / `pageSize`, default 500, max 1000) so a 5000-photo
-folder can't blow the 6-min Apps Script limit on the listing call.
-The frontend loops on `hasMore` before scanning starts and reports
-listing progress. Inside the scan loop, the next photo's bytes
-fetch starts BEFORE the current photo's inference runs
-(prefetch-by-1) — approximately doubles throughput. After every
-`recordCheckpoint` / `reportViolation` POST resolves (success or
-failure), the frontend sleeps `POST_THROTTLE_MS` (150 ms) before
-the next iteration, keeping large batches under per-user Apps
-Script URL-fetch quotas.
+**Pagination + concurrency + serial-throttled POSTs (High-Performance
+Local Mode, 2026-05-19).** `getDrivePhotos` is paged (`offset` /
+`pageSize`, default 500, max 1000) so a 5000-photo folder can't blow
+the 6-min Apps Script limit on the listing call. The frontend loops
+on `hasMore` before scanning starts and reports listing progress.
+Inside the scan loop, photos are now processed by a semaphore-style
+worker pool that keeps `SCAN_CONCURRENCY` (default 4) photo tasks
+in flight at all times. Each task owns its own
+fetch → face-api inference → Tesseract OCR → POST pipeline; the
+concurrency win comes from overlapping DIFFERENT stages across
+photos (one photo on the GPU while another is fetching bytes and a
+third is in OCR), not from parallelizing the same stage — the
+single WebGL context and single Tesseract worker serialize their
+own stages internally. TF.js is explicitly pinned to the `webgl`
+backend at `init()` time (with CPU fallback) so the local GPU
+actually gets used. This replaces the prior prefetch-by-1
+sequential loop — N-way concurrency provides N-way overlapped
+fetches naturally. All `recordCheckpoint` and `reportViolation`
+POSTs are funneled through `enqueueThrottledPost`, a single serial
+queue that sleeps `POST_THROTTLE_MS` (150 ms) AFTER each POST. With
+the queue, the actual outbound POST cadence stays ≤ 1 per 150 ms
+regardless of how many photo tasks are concurrent — see Guardrail
+#30 for why this serial-queue shape is load-bearing.
 
 **Timestamps are scan-time, not capture-time.** `recordCheckpoint`
 receives `new Date().toTimeString().split(" ")[0]` (HH:MM:SS at the
@@ -955,6 +1105,64 @@ explicit, justified, and accompanied by an update to this file.
     `handleRecordCheckpoint` accepts; every other unrecognized value
     still throws `schema_error` (defense against accidental
     free-form cpIds from new clients).
+30. **`POST_THROTTLE_MS` MUST be enforced by a single serial queue,
+    not by a per-task `await sleep` inside `sendIdentification` /
+    `fireViolation`.** Since 2026-05-19 the Drive Scanner runs
+    `SCAN_CONCURRENCY` photo tasks in parallel. If each task slept
+    `POST_THROTTLE_MS` independently, N concurrent tasks would each
+    sleep 150 ms in parallel and the actual outbound POST burst
+    rate would multiply by N — blowing the per-user Apps Script
+    URL-fetch quota guard that the throttle exists to enforce. The
+    correct shape is `enqueueThrottledPost(workFn)`, a queue that
+    chains promises through a `postQueueTail` so at most one POST
+    is in flight at a time with a ≥ 150 ms gap between successive
+    POSTs. Don't "simplify" this back into per-call sleeps unless
+    `SCAN_CONCURRENCY = 1`. If you bump `SCAN_CONCURRENCY`, verify
+    in DevTools Network that consecutive `script.google.com` POSTs
+    still stay ≥ 150 ms apart — that's the canary that the queue
+    is intact. Note also: the synchronous `if (set.has(k)) return;
+    set.add(k);` reserve-then-add idiom inside `fireViolation` (and
+    at the `sendIdentification` call site) is also load-bearing
+    under concurrency — moving the `.add()` past an `await` would
+    let two concurrent tasks both pass the dedup check and
+    double-POST. Status note (2026-05-19 revert): with
+    `SCAN_CONCURRENCY` back at `1` the queue is effectively redundant
+    (one POST in flight anyway), but kept in place so the invariant
+    is intact for any future concurrency raise once the shared
+    `#preview-canvas` is properly refactored per Guardrail #31.
+31. **OCR (`runOCRForFace`) MUST read pixels from `#preview-canvas`
+    BEFORE any `drawDetectionBox` / `faceapi.draw.*` overlay is
+    painted on it.** Painting UI overlays first lets the green name
+    label corrupt the chest region Tesseract reads, dropping OCR
+    confidence and producing false `NO_BIB` / `WRONG_PERSON`
+    decisions. `processPhotoWithBytes` enforces this by categorizing
+    detections without drawing, then running `handleKnownFace`
+    (`runOCRForFace` + violation decisions) on the still-clean
+    canvas, and ONLY THEN walking `knownHits` / `unknownHits` a
+    final time to paint overlays for operator feedback (plus the
+    DEBUG dashed-blue chest-box overlay if `?debug=1`). Don't
+    "restore" the per-detection drawing for snappier operator
+    feedback without first refactoring the working canvas to be
+    per-task (then both can coexist — paint immediately on the
+    per-task offscreen canvas, compose onto the preview element
+    at end-of-photo for display only). Do not move OCR
+    (`runOCRForFace`) above the categorization phase if a future
+    change ever reintroduces any drawing inside that phase.
+    Incident: 2026-05-19 — operator saw pure-black / wrong-body-part
+    / red-box violation crops in Drive caused jointly with the
+    `SCAN_CONCURRENCY = 4` race; this guardrail pins the half of
+    the bug that survives even at concurrency=1. **Historical
+    annotation (2026-05-19, same-day):** the violation-crop half of
+    this guardrail is now MOOT — the operator subsequently directed
+    the scanner to stop attaching `image` to any `fireViolation`
+    payload, and the `cropToDataUrl` helper was deleted. No image
+    is saved to Drive for new violations, so the "UI baked into
+    pixels" failure mode has no remaining attack surface. The OCR
+    clean-canvas clause is the only load-bearing half today. If a
+    future change reintroduces image saving (a re-added
+    `cropToDataUrl` call, or `faceapi.toDataURL` over the preview),
+    the full guardrail snaps back into effect — read the original
+    body, not just the OCR sentence.
 
 ---
 
@@ -1677,7 +1885,7 @@ All are idempotent.
 | `verifyAdmin` | `{ password }` | Returns success/failure; no token needed |
 | `registerRunner` | `{ name, bib, email?, timestamp?, photo_front…right, embeddings }` | Atomic |
 | `recordCheckpoint` | `{ name, checkpoint_id, timestamp, bib? }` | `checkpoint_id` is `"start"`, `1`, `2`, `3`, `4`, `"finish"`, OR the sentinel `"photo_verified"` (Drive Scanner identity-verification path; bypasses CP_Time columns — see Guardrail 29). Any other value throws `schema_error`. |
-| `reportViolation` | `{ name?, bib?, message?, violationType?, timestamp?, image? }` | `image` is base64; `violationType` defaults to `WRONG_PERSON` |
+| `reportViolation` | `{ name?, bib?, message?, violationType?, timestamp? }` | Scanner no longer attaches `image` (2026-05-19 operator decision). Backend still tolerates `image: <base64>` from any legacy client — it is base64-decoded into Drive when present and the `ImageUrl` column is filled; absent payload leaves `ImageUrl` blank. `violationType` defaults to `WRONG_PERSON`. |
 | `verifyViolation` | `{ token, id }` | Admin |
 | `deleteViolation` | `{ token, id }` | Admin; trashes Drive image |
 | `deleteViolationsBatch` | `{ token, ids: [V…] }` | Admin; up to 200 IDs |
@@ -1747,11 +1955,26 @@ All responses are
 | `DISMISSED_MAX` | `500` | FIFO cap on dismissed-alert memory |
 
 #### `photo_scanner.html` — Drive scanner
+
+**`getOCRCropBox` geometry (mirrored in `checkpoint.html` per Guardrail 27):**
+widened 2026-05-19 to `bx = box.x − 0.7·faceH`, `by = box.y + 0.5·faceH`,
+`bw = box.width + 1.4·faceH`, `bh = 3.0·faceH` (was `0.5 / 0.6 / 1.0 / 3.0`).
+The slightly higher top edge captures tight-portrait BIBs that hug the chin;
+the wider horizontal padding captures off-center BIBs on shoulder-strap race
+vests. `preprocessForOCR`'s adaptive threshold rejects the extra skin pixels
+uniformly, so widening adds no OCR noise. A DEBUG-only (`?debug=1`)
+dashed-blue rectangle in the final UI pass of `processPhotoWithBytes`
+visualises this exact region per known face — painted AFTER every
+`runOCRForFace` read completes (Guardrail #31 OCR clause; the
+violation-crop clause is moot since 2026-05-19 — see Guardrail #31
+body for the annotation).
+
 | Constant | Default | Effect |
 |---|---|---|
-| `SSD_MIN_CONFIDENCE` | `0.5` | `SsdMobilenetv1Options.minConfidence` — minimum face-score for a detection to count |
+| `SSD_MIN_CONFIDENCE` | `0.7` (was `0.5` pre-2026-05-19) | `SsdMobilenetv1Options.minConfidence` — minimum face-score for a detection to count. Raised from face-api's 0.5 default to filter banner/poster hallucinations that scored 0.50–0.65 on event photos. Real foreground faces score 0.85+, so the bump is safe. Pair with `MIN_FACE_SIZE`. |
+| `MIN_FACE_SIZE` | `0` (was `60` for ~hours of 2026-05-19, then DISABLED same day per operator request) | Post-detect size gate. When > 0, detections with `box.width < MIN_FACE_SIZE OR box.height < MIN_FACE_SIZE` are dropped BEFORE face matching, OCR, and `UNREGISTERED` reporting. Currently `0` (no-op pass-through) because operator reported borderline-small faces being filtered out of OCR. Banner / poster hallucinations are now caught primarily by `SSD_MIN_CONFIDENCE = 0.7`. Re-enable to e.g. `60` if `UNREGISTERED` rows from banner art come back in volume. |
 | `FACE_MATCH_DISTANCE` | `0.45` | `findBestMatch` threshold — same as live page; lower = stricter |
-| `OCR_MIN_CONFIDENCE` | `80` (was 60 pre-audit) | Single-pass Tesseract confidence floor. Tightened post-audit because the relaxed live-page value admitted false BIB reads from shirt graphics |
+| `OCR_MIN_CONFIDENCE` | `50` (history: `60` initial → `80` 2026-05-17 audit → `65` 2026-05-19 → `50` 2026-05-19 same-day) | Single-pass Tesseract confidence floor. Each step down was driven by operator-reported false `NO_BIB` on legibly-printed BIBs that browser Tesseract simply doesn't score at the prior floor. `50` is near the floor of useful Tesseract output — reads below this are usually genuinely garbage. Short-graphic false-positive defense (the original reason `80` was tried in the audit) now relies on `BIB_MIN_LEN = 2` (unchanged) and the face-match gate; `SSD_MIN_CONFIDENCE = 0.7` keeps banner art out of the detection pipeline in the first place. If sponsor-logo false `WRONG_PERSON` reads come back, raise to ~60 first; only raise above 65 if you have a real foreground-portrait sample that scores 65+. |
 | `BIB_MIN_LEN` / `BIB_MAX_LEN` | `2` / `6` (was `1` / `6` pre-audit) | Accepted BIB length range. Min raised to 2 post-audit to reject single-digit fragments that pass the digit-only filter on garbage reads |
 | `ADAPTIVE_THRESHOLD_BLOCK` | `15` | Local-window size for adaptive threshold (mirror of `checkpoint.html`) |
 | `ADAPTIVE_THRESHOLD_C` | `10` | Mean offset (mirror of `checkpoint.html`) |
@@ -1760,7 +1983,8 @@ All responses are
 | `MULTIPLE_BIBS_MIN_BLOCKS` | `2` | Minimum distinct candidate blocks to fire `MULTIPLE_BIBS` |
 | `MAX_UNKNOWNS_PER_PHOTO` | `15` | Cap on `UNREGISTERED` reports per single photo. Sorted by face area desc — most prominent intruders are reported first when cap kicks in. Raised from 5 to 15 to cover group shots / pack starts where many intruders may legitimately appear in one frame. |
 | `LIST_PAGE_SIZE` | `500` | `pageSize` param sent to `getDrivePhotos`. Must be ≤ backend `DRIVE_PHOTOS_MAX_PAGE_SIZE` (1000). |
-| `POST_THROTTLE_MS` | `150` | Sleep after every `recordCheckpoint` / `reportViolation` POST. Quota safety on large batches. |
+| `SCAN_CONCURRENCY` | `1` (was `4` for ~hours of 2026-05-19, reverted same day) | Number of photos processed in parallel by the semaphore worker pool inside `startScan`. **Pinned at 1** because `processPhotoWithBytes` writes to the shared `#preview-canvas` DOM element; concurrent `canvas.width = …; ctx.drawImage(…)` produced wrong-coordinate detections, pure-black crops, and "runner's legs instead of face" violation images saved to Drive. The pool is kept in place — at concurrency=1 it degenerates to single-flight sequential processing identical to the pre-HPLM loop. Path back to >1 REQUIRES first replacing `#preview-canvas` with a per-task `document.createElement('canvas')` inside `processPhotoWithBytes` (then `drawImage` the result onto the preview element only at end-of-photo, for display). See Guardrail #31. |
+| `POST_THROTTLE_MS` | `150` | Tail gap inside `enqueueThrottledPost`'s serial queue — every `recordCheckpoint` / `reportViolation` POST is followed by this sleep before the next queued POST runs. Quota safety on large batches; guarantees ≥ 150 ms between outbound POSTs even when `SCAN_CONCURRENCY > 1`. **Guardrail 30**: do not move this sleep back into per-task code. |
 | `STORAGE_PREFIX` | `"drive_scanner_v1:"` | localStorage key prefix for resumable scan state. Bump the `v1` suffix on incompatible schema changes. |
 | `SCAN_STATE_TTL_MS` | `86_400_000` (24h) | After this age, a saved state is dropped on load — event is presumed over. |
 | `SCAN_STATE_SAVE_DEBOUNCE_MS` | `2000` | Throttle on localStorage writes — at most one write per ~2 s of scanner activity. |

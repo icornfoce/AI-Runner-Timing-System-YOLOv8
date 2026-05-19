@@ -157,6 +157,29 @@ body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--txt);min-
 <script src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 <script>
+// ── CANVAS PERF HINT (High-Performance Local Mode, 2026-05-19) ──
+// Default every 2D canvas context to willReadFrequently:true so
+// repeated getImageData reads — face-api descriptor extraction +
+// our OCR preprocess pipeline — hit a CPU-backed buffer instead
+// of round-tripping through the GPU each time. Without this hint
+// Chrome prints "Multiple readback operations using getImageData
+// are faster with the willReadFrequently attribute set to true."
+// and silently re-creates the backing store on the slow path.
+// Patched at module-load time, BEFORE face-api or our own code
+// creates any canvas — otherwise face-api's internal scratch
+// canvases (which we can't reach from userland) would still be on
+// the slow path. Patch is a no-op for non-'2d' contexts (e.g.
+// 'webgl' contexts used by TF.js for inference are untouched).
+(function patchCanvasGetContextForReadback(){
+ const orig = HTMLCanvasElement.prototype.getContext;
+ HTMLCanvasElement.prototype.getContext = function(type, attrs){
+  if (type === '2d'){
+   attrs = Object.assign({ willReadFrequently: true }, attrs || {});
+  }
+  return orig.call(this, type, attrs);
+ };
+})();
+
 // ── ENDPOINTS / CDN ─────────────────────────────────────────
 // Same API + model URL as checkpoint.html — keep them in sync if either
 // is ever rotated. CDN tags pinned (Guardrail 8: @master silently broke
@@ -172,8 +195,27 @@ const DEBUG = new URLSearchParams(location.search).get("debug") === "1";
 // SSD MobileNet — slower than TinyFaceDetector but produces tighter,
 // higher-recall boxes on high-resolution static photos (typical event
 // shots are 4K). The scanner doesn't need 30 FPS, so the accuracy
-// trade-off swings in SSD's favor (Task 3).
-const SSD_MIN_CONFIDENCE = 0.5;
+// trade-off swings in SSD's favor (Guardrail 27 pins this choice).
+// minConfidence raised from face-api's 0.5 default to 0.7 (2026-05-19)
+// after operator reports of banner/poster hallucinations scoring
+// 0.50–0.65 on event photos. Real foreground runner faces score 0.85+,
+// so the bump is safe. Pair with MIN_FACE_SIZE below — both gates run
+// BEFORE recognition / OCR, so false positives never reach those stages.
+const SSD_MIN_CONFIDENCE = 0.7;
+
+// Minimum face-box dimension in pixels. Detections with width OR
+// height below this are dropped BEFORE recognition / OCR /
+// UNREGISTERED reporting. DISABLED (value=0) on 2026-05-19 per
+// operator request — the 60 px gate was filtering out faces small
+// enough to land in the BIB-unreadable bucket on photos where the
+// operator wanted them processed anyway. The filter code path is
+// kept (one-liner in `processPhotoWithBytes`) so re-enabling is a
+// single-line change: set to e.g. 60 to filter banner / poster
+// hallucinations and tiny background detections on 4K event photos.
+// Re-enable if `UNREGISTERED` violations from banner art come back
+// in volume (the other downstream gate is `SSD_MIN_CONFIDENCE = 0.7`
+// — that catches most banner hallucinations on its own).
+const MIN_FACE_SIZE = 0;
 // Same threshold as checkpoint.html — tighter than face-api's 0.5
 // default. False matches are more costly than missed ones because a
 // false match writes a wrong runner's row.
@@ -188,16 +230,20 @@ const FACE_MATCH_DISTANCE = 0.45;
 const ADAPTIVE_THRESHOLD_BLOCK = 15;        // odd; 11–19 typical
 const ADAPTIVE_THRESHOLD_C = 10;
 const OCR_UPSCALE = 2;                      // nearest-neighbor
-// Scanner-specific thresholds — TIGHTER than the live page's
-// field-test values (60 / 1). Static photos give Tesseract a clean
-// target, so the relaxed gates don't earn their cost here — they
-// just admit garbage from shirt graphics / sponsor logos as
-// false BIBs. Audit finding #2: a shirt logo "S2 3X" can OCR to
-// "23" with conf=75, passing the old gate and firing a false
-// WRONG_PERSON for a runner with registered BIB 1234. Tightening
-// conf ≥ 80 and length ≥ 2 closes the most common false-positive
-// path without hurting recall on legitimate BIBs.
-const OCR_MIN_CONFIDENCE = 80;              // was 60
+// Scanner-specific OCR validation gate. History: 60 (initial) →
+// 80 (2026-05-17 audit, suppress sponsor-logo false positives like
+// "S2 3X" → "23" at conf=75) → 65 (2026-05-19, false NO_BIB on
+// tight-portrait BIBs scoring in the 70s) → 50 (2026-05-19 same-
+// day, operator reports BIBs STILL unreadable at 65 — browser
+// Tesseract on adaptive-threshold crops can dip into the 50s on
+// printed digits with slight blur or stylized fonts). 50 is near
+// the floor of useful Tesseract output — below this most reads
+// are genuinely garbage. The load-bearing identity gate remains
+// `faceMatcher.findBestMatch`; short-graphic false positives are
+// guarded by `BIB_MIN_LEN = 2` (unchanged) and `SSD_MIN_CONFIDENCE
+// = 0.7`. If false-positive BIB reads come back from sponsor
+// logos, raise to ~60 before raising further.
+const OCR_MIN_CONFIDENCE = 50;              // 60 → 80 (audit) → 65 → 50 (2026-05-19, BIB still failing at 65)
 const BIB_MIN_LEN = 2;                      // was 1
 const BIB_MAX_LEN = 6;
 
@@ -231,7 +277,34 @@ const SCAN_STATE_SAVE_DEBOUNCE_MS = 2000;          // throttle localStorage writ
 // per-user URL-fetch quota and avoid hammering setValues throttling
 // on the Results sheet. 150 ms × 1000 photos = +150 s wall time,
 // negligible compared to the ~1-hour scan time.
+//
+// IMPORTANT: under High-Performance Local Mode photos are processed
+// concurrently (SCAN_CONCURRENCY > 1), so this throttle MUST run
+// inside a single serial queue (see enqueueThrottledPost) rather
+// than as a per-task sleep — otherwise N concurrent tasks would
+// each sleep 150 ms in parallel and the POST burst rate would
+// multiply by N, blowing the quota guard.
 const POST_THROTTLE_MS = 150;
+
+// Number of photos processed in parallel by the semaphore worker
+// pool inside `startScan`. PINNED AT 1 — `processPhotoWithBytes`
+// writes to the shared `#preview-canvas` DOM element
+// (`canvas.width = …; ctx.drawImage(…)`), so any concurrent task
+// races on it: photo A's detection can read pixels that photo B
+// has just overwritten, producing wrong-coordinate detections.
+// (Historically, the same race also produced pure-black,
+// wrong-body-part, and UI-baked-into-pixels violation crops saved
+// to Drive — that's why HPLM shipped at `4` was reverted on
+// 2026-05-19. The crop pipeline was subsequently removed entirely,
+// but the underlying detection race remains and pins this constant.) The semaphore pool around this constant stays in
+// place — at `1` it degenerates to single-flight sequential
+// processing identical to the pre-HPLM loop. Path back to >1
+// REQUIRES first making the working canvas per-task (e.g.
+// `document.createElement('canvas')` inside `processPhotoWithBytes`
+// and `drawImage`-ing the result onto `#preview-canvas` only at
+// the end of the photo, for display). See AI_CONTEXT §6.8 +
+// Guardrail #31.
+const SCAN_CONCURRENCY = 1;
 
 // Pagination request size (must be ≤ DRIVE_PHOTOS_MAX_PAGE_SIZE in
 // Code.gs). Used by the listing loop in startScan.
@@ -270,6 +343,23 @@ const stats = { photos: 0, records: 0, violations: 0, skipped: 0, errors: 0 };
 // ── INIT ────────────────────────────────────────────────────
 async function init(){
  try {
+  // 0) High-Performance Local Mode — force TF.js to the WebGL
+  // backend BEFORE any model weights are loaded so the model
+  // tensors get uploaded to GPU memory directly. The default
+  // auto-select sometimes lands on CPU/WASM (especially in
+  // Chromium with hardware acceleration toggled off), which makes
+  // ssdMobilenetv1 painfully slow. Fall back to CPU if WebGL2 is
+  // unavailable — slow scan is still better than a crashed init.
+  try {
+   await faceapi.tf.setBackend('webgl');
+   await faceapi.tf.ready();
+  } catch (e){
+   console.warn('[scanner] WebGL backend unavailable, falling back:', e);
+   await faceapi.tf.setBackend('cpu');
+   await faceapi.tf.ready();
+  }
+  console.log('[scanner] TF backend in use:', faceapi.tf.getBackend());
+
   // 1) Load models — SSD MobileNet + landmarks + recognition. SSD's
   // weight file is ~5MB (vs 200KB for Tiny) but only loaded once per
   // session, so the latency is acceptable.
@@ -530,33 +620,61 @@ async function startScan(){
 
  document.getElementById("preview-empty").classList.add("hidden");
 
- // 3) Sequential processing with prefetch-by-1 — fetch photo i+1's
- //    bytes WHILE inference runs on photo i (Audit fix #7). Memory
- //    stays bounded (only 2 images decoded simultaneously, one in
- //    transit and one in inference), wall time approximately halves.
- let nextBytesPromise = fetchImageBytes(allPhotos[0]);
- for (let i = 0; i < allPhotos.length; i++){
-  if (abortScan) break;
-  const p = allPhotos[i];
-  setProgress(i, allPhotos.length, p.name);
-
-  // Await the (possibly already-resolved) prefetched payload.
-  const bytesPayload = await nextBytesPromise;
-  // Kick off prefetch for i+1 BEFORE running inference on i.
-  nextBytesPromise = (i + 1 < allPhotos.length && !abortScan)
-   ? fetchImageBytes(allPhotos[i + 1])
-   : null;
-
-  try {
-   await processPhotoWithBytes(p, bytesPayload);
-  } catch (e){
-   console.warn("processPhotoWithBytes failed for", p.name, e);
-   stats.errors++;
-   logSkip(p.name, "Error: " + (e.message || e));
-  }
-  stats.photos++;
-  refreshStats();
- }
+ // 3) Concurrent processing — High-Performance Local Mode. A
+ //    semaphore-style worker pool keeps SCAN_CONCURRENCY photo tasks
+ //    in flight at all times until the queue drains. Each task owns
+ //    its own fetch → inference → OCR → POST pipeline; concurrency
+ //    overlaps DIFFERENT stages across photos (one on the GPU while
+ //    another is fetching bytes), which is where the wall-time win
+ //    comes from. Preferred over chunked `Promise.all(batch)` because
+ //    chunked batches suffer a convoy effect — the next batch can't
+ //    start until the slowest photo in the current batch finishes.
+ //
+ //    Burst-rate quota safety: POSTs go through the enqueueThrottledPost
+ //    serial queue, so concurrency here does NOT multiply the outbound
+ //    POST rate. The 150 ms gap between Apps Script POSTs is preserved.
+ //
+ //    Replaces the prior prefetch-by-1 sequential loop — N-way
+ //    concurrency provides N-way overlapped fetches naturally.
+ const total = allPhotos.length;
+ let nextIndex = 0;
+ let inFlight = 0;
+ let completed = 0;
+ await new Promise((resolveAll) => {
+  const launch = () => {
+   if (abortScan && inFlight === 0){ resolveAll(); return; }
+   while (!abortScan && inFlight < SCAN_CONCURRENCY && nextIndex < total){
+    const p = allPhotos[nextIndex++];
+    inFlight++;
+    (async () => {
+     try {
+      const bytesPayload = await fetchImageBytes(p);
+      if (abortScan) return;
+      await processPhotoWithBytes(p, bytesPayload);
+     } catch (e){
+      console.warn("processPhotoWithBytes failed for", p.name, e);
+      stats.errors++;
+      logSkip(p.name, "Error: " + (e.message || e));
+     } finally {
+      // Progress reports the LAST-completed filename rather than the
+      // currently-processing one — with multiple photos in flight,
+      // "currently processing X" is undefined, so we surface the
+      // most-recent completion as a recognizable signal of forward
+      // motion. The X/total counter is still authoritative.
+      stats.photos++;
+      completed++;
+      setProgress(completed, total, p.name);
+      refreshStats();
+      inFlight--;
+      if (nextIndex >= total && inFlight === 0) resolveAll();
+      else launch();
+     }
+    })();
+   }
+   if (nextIndex >= total && inFlight === 0) resolveAll();
+  };
+  launch();
+ });
 
  setProgress(allPhotos.length, allPhotos.length, "");
  finishScan(abortScan ? "aborted" : "done");
@@ -665,26 +783,52 @@ async function processPhotoWithBytes(photo, payload){
  const ctx = canvas.getContext("2d");
  ctx.drawImage(img, 0, 0);
 
- // SSD MobileNet — explicit options for clarity. Default minConfidence
- // is 0.5; we keep it explicit so the threshold is visible at the call
- // site rather than buried in face-api defaults.
+ // SSD MobileNet — explicit options so the threshold is visible at the
+ // call site. minConfidence is SSD_MIN_CONFIDENCE (0.7 as of 2026-05-19,
+ // raised from face-api's 0.5 default — see constant comment).
  const detectorOpts = new faceapi.SsdMobilenetv1Options({ minConfidence: SSD_MIN_CONFIDENCE });
- const detections = await faceapi
+ const rawDetections = await faceapi
   .detectAllFaces(canvas, detectorOpts)
   .withFaceLandmarks()
   .withFaceDescriptors();
+
+ // Size gate — drop sub-MIN_FACE_SIZE boxes BEFORE face matching,
+ // OCR, and UNREGISTERED reporting. The confidence threshold alone
+ // is not sufficient: banner hallucinations occasionally pass 0.7,
+ // and far-background real faces pass at any threshold but aren't
+ // identifiable anyway. Keep the variable name `detections` for the
+ // filtered array so the downstream loop is unchanged.
+ const detections = rawDetections.filter(d => {
+  const b = d.detection.box;
+  return b.width >= MIN_FACE_SIZE && b.height >= MIN_FACE_SIZE;
+ });
+ if (DEBUG && detections.length < rawDetections.length){
+  console.log(`[debug] size-gate dropped ${rawDetections.length - detections.length} of ${rawDetections.length} detection(s) in "${photo.name}"`);
+ }
 
  if (DEBUG) console.log("[debug] photo", { name: photo.name, faces: detections.length });
 
  if (detections.length === 0){
   stats.skipped++;
-  logSkip(photo.name, "No faces detected");
+  // Distinguish "no faces found" from "all detections were too small" —
+  // the latter is signal that MIN_FACE_SIZE may be tuned too high if it
+  // happens often on photos the operator expected to identify.
+  if (rawDetections.length > 0){
+   logSkip(photo.name, `All ${rawDetections.length} detection(s) below ${MIN_FACE_SIZE}px size gate`);
+  } else {
+   logSkip(photo.name, "No faces detected");
+  }
   return;
  }
 
- // Categorize and draw overlay boxes for operator feedback. We
- // capture EVERY unknown face's box so we can report all of them
- // below (capped at MAX_UNKNOWNS_PER_PHOTO) — a crowd photo
+ // Categorize WITHOUT drawing yet. UI overlays must NOT be on the
+ // canvas when `handleKnownFace` (OCR + violation crops) and the
+ // UNREGISTERED crop loop below read pixels back — otherwise the
+ // red/green `drawDetectionBox` outlines get baked into every
+ // violation image saved to Drive, AND the green name label
+ // corrupts the chest region Tesseract OCRs. Guardrail #31.
+ // We capture EVERY unknown face's box so we can report all of
+ // them below (capped at MAX_UNKNOWNS_PER_PHOTO) — a crowd photo
  // shouldn't lose 4 of 5 intruders to a "largest only" filter.
  const knownHits = [];
  const unknownHits = [];
@@ -692,17 +836,19 @@ async function processPhotoWithBytes(photo, payload){
   const match = faceMatcher.findBestMatch(det.descriptor);
   const isKnown = match.label !== "unknown" && match.distance <= FACE_MATCH_DISTANCE;
   if (isKnown){
-   drawDetectionBox(ctx, det.detection.box, match.label, false);
    knownHits.push({ name: match.label, distance: match.distance, box: det.detection.box });
   } else {
-   drawDetectionBox(ctx, det.detection.box, "Unknown", true);
    const b = det.detection.box;
    unknownHits.push({ box: b, area: b.width * b.height });
   }
  }
 
- // Record each known face (with dedup) + run OCR for BIB-mismatch /
- // multiple-bibs violations.
+ // OCR FIRST — canvas still holds ONLY the original photo pixels
+ // at this point. Every `runOCRForFace` slice inside
+ // `handleKnownFace` therefore reads clean pixels. (Violation
+ // crops were removed 2026-05-19; OCR is now the only canvas
+ // pixel-reader in this pipeline, but Guardrail #31 still applies
+ // — `drawDetectionBox` MUST stay after the OCR pass below.)
  for (const hit of knownHits){
   await handleKnownFace(canvas, hit, photo);
  }
@@ -713,7 +859,7 @@ async function processPhotoWithBytes(photo, payload){
  // (`"unknown:fileId:N"`) ensures the same face index in the same
  // photo can't double-fire even if the loop is re-entered somehow,
  // while different faces and different photos each get their own
- // violation row.
+ // violation row. Crops below still come from the clean canvas.
  unknownHits.sort((a, b) => b.area - a.area);
  const reportedUnknowns = unknownHits.slice(0, MAX_UNKNOWNS_PER_PHOTO);
  for (let i = 0; i < reportedUnknowns.length; i++){
@@ -723,8 +869,43 @@ async function processPhotoWithBytes(photo, payload){
    bib: "",
    message: `Unregistered face #${i + 1} in photo "${photo.name}"`,
    violationType: "UNREGISTERED",
-   image: cropToDataUrl(canvas, u.box, 0.5),
   }, "unknown:" + photo.id + ":" + i);
+ }
+
+ // DRAW UI LAST — operator-feedback overlay paints AFTER all
+ // crops & OCR are done. Nothing downstream reads canvas pixels,
+ // so painting now is safe. Operator UX trade: boxes appear
+ // together at the end of the photo instead of one-at-a-time as
+ // detections are categorized — the operator has explicitly
+ // accepted this in favor of correct crops ("make it more
+ // accurate, it can be slower"). See Guardrail #31.
+ for (const hit of knownHits){
+  drawDetectionBox(ctx, hit.box, hit.name, false);
+ }
+ for (const u of unknownHits){
+  drawDetectionBox(ctx, u.box, "Unknown", true);
+ }
+
+ // DEBUG chest-crop overlay — visualises exactly the rectangle
+ // runOCRForFace just sent to Tesseract. Painted as part of the
+ // final UI pass AFTER every runOCRForFace read has completed
+ // (Guardrail #31 — OCR must see a clean canvas). Violation
+ // crops were removed 2026-05-19 so there's no longer a saved
+ // image to bake this into, but the OCR-clean-canvas invariant
+ // stays. Only known faces have an OCR pass, so unknowns are
+ // skipped. Gated on ?debug=1; in production this overlay would
+ // compete with the green/red detection boxes for operator
+ // attention.
+ if (DEBUG){
+  ctx.save();
+  ctx.strokeStyle = 'rgba(96, 165, 250, 0.85)';   // Tailwind blue-400 @ 85%
+  ctx.lineWidth = Math.max(2, Math.round(canvas.width / 1000));
+  ctx.setLineDash([8, 6]);
+  for (const hit of knownHits){
+   const { bx, by, bw, bh } = getOCRCropBox(hit.box, canvas);
+   if (bw > 0 && bh > 0) ctx.strokeRect(bx, by, bw, bh);
+  }
+  ctx.restore();
  }
 }
 
@@ -751,7 +932,6 @@ async function handleKnownFace(canvas, hit, photo){
    bib: "",
    message: `Multiple BIBs detected on ${name} in "${photo.name}": ${multipleBibs.join(", ")}`,
    violationType: "MULTIPLE_BIBS",
-   image: cropToDataUrl(canvas, box, 0.5),
   }, name + ":MULTIPLE_BIBS:" + blocksKey);
   return;
  }
@@ -768,7 +948,6 @@ async function handleKnownFace(canvas, hit, photo){
    bib: "",
    message: `No BIB detected on ${name} in "${photo.name}"`,
    violationType: "NO_BIB",
-   image: cropToDataUrl(canvas, box, 0.5),
   }, name + ":NO_BIB");
   return;
  }
@@ -795,7 +974,6 @@ async function handleKnownFace(canvas, hit, photo){
    bib: readBib,
    message: `Expected BIB ${expectedBib}, Found ${readBib} in "${photo.name}"`,
    violationType: "WRONG_PERSON",
-   image: cropToDataUrl(canvas, box, 0.5),
   }, name + ":WRONG_PERSON:" + readBib);
  }
 }
@@ -844,10 +1022,17 @@ async function runOCRForFace(srcCanvas, box){
 // behavior stays consistent between live and scanner modes. Uses the
 // source canvas dimensions instead of a video element — same math.
 function getOCRCropBox(box, srcCanvas){
+ // Factors widened 2026-05-19: was 0.5 / 0.6 / 1.0 / 3.0. The wider
+ // horizontal padding (0.7 each side) captures BIBs that sit off-
+ // center on shoulder-strap race vests; the higher top edge (0.5
+ // instead of 0.6 faceH) captures tight-portrait BIBs that hug the
+ // chin. Bottom unchanged — 3·faceH already extends to ~2 face-
+ // heights below the chin, covering the whole torso. Mirrored in
+ // `checkpoint.html` per Guardrail 27.
  const faceH = box.height;
- const bx = Math.max(0, box.x - faceH * 0.5);
- const by = Math.max(0, box.y + faceH * 0.6);
- const bw = Math.min(box.width + faceH * 1.0, srcCanvas.width - bx);
+ const bx = Math.max(0, box.x - faceH * 0.7);
+ const by = Math.max(0, box.y + faceH * 0.5);
+ const bw = Math.min(box.width + faceH * 1.4, srcCanvas.width - bx);
  const bh = Math.min(faceH * 3.0, srcCanvas.height - by);
  return { bx, by, bw, bh };
 }
@@ -922,6 +1107,26 @@ function preprocessForOCR(srcCanvas){
 // UpdatedAt, never a CP_Time column. reportViolation is reused as-is.
 // Timestamp is scan-time HH:MM:SS — see AI_CONTEXT §6.5 for the
 // EXIF-vs-scan-time tradeoff.
+//
+// Serial POST queue — every recordCheckpoint / reportViolation goes
+// through enqueueThrottledPost so that even when SCAN_CONCURRENCY > 1
+// the actual outbound POST cadence stays ≤ 1 per POST_THROTTLE_MS.
+// Without this, N concurrent photo tasks would each sleep
+// POST_THROTTLE_MS in parallel and the per-user Apps Script
+// URL-fetch quota would blow up under bursts.
+let postQueueTail = Promise.resolve();
+function enqueueThrottledPost(workFn){
+ const result = postQueueTail.then(async () => {
+  try { return await workFn(); }
+  finally { await sleep(POST_THROTTLE_MS); }
+ });
+ // Swallow errors on the chain so one failure doesn't poison the
+ // whole queue — individual workFns surface their own errors via
+ // their own returned promise.
+ postQueueTail = result.catch(() => {});
+ return result;
+}
+
 async function sendIdentification(name, bib, photo){
  const timeStr = new Date().toTimeString().split(" ")[0];
  // Prominent display: "✅ Kawin (BIB 1234)" with the BIB inline next
@@ -929,38 +1134,43 @@ async function sendIdentification(name, bib, photo){
  // BIB falls back to "—" when a runner has no registered BIB (rare).
  const nameWithBib = `${name} (BIB ${bib || "—"})`;
  addLog("ok", nameWithBib, `${timeStr} · ${photo.name}`);
- try {
-  const resp = await fetch(API, {
-   method: "POST",
-   headers: { "Content-Type": "text/plain" },
-   body: JSON.stringify({
-    action: "recordCheckpoint",
-    name,
-    checkpoint_id: "photo_verified",       // sentinel — see Guardrail 29
-    timestamp: timeStr,
-    bib,
-   }),
-   redirect: "follow",
-  });
-  const result = await resp.json();
-  if (!result || result.status !== "success"){
+ return enqueueThrottledPost(async () => {
+  try {
+   const resp = await fetch(API, {
+    method: "POST",
+    headers: { "Content-Type": "text/plain" },
+    body: JSON.stringify({
+     action: "recordCheckpoint",
+     name,
+     checkpoint_id: "photo_verified",       // sentinel — see Guardrail 29
+     timestamp: timeStr,
+     bib,
+    }),
+    redirect: "follow",
+   });
+   const result = await resp.json();
+   if (!result || result.status !== "success"){
+    stats.errors++;
+    addLog("err", name, "Identification write failed: " + ((result && result.message) || "Unknown"));
+   } else {
+    stats.records++;
+    refreshStats();
+   }
+  } catch (e){
    stats.errors++;
-   addLog("err", name, "Identification write failed: " + ((result && result.message) || "Unknown"));
-  } else {
-   stats.records++;
-   refreshStats();
+   addLog("err", name, "Network error: " + (e.message || e));
   }
- } catch (e){
-  stats.errors++;
-  addLog("err", name, "Network error: " + (e.message || e));
- }
- // POST_THROTTLE_MS — quota safety. Applied even on failure so a
- // backend outage doesn't trigger a burst of retries against an
- // already-struggling endpoint.
- await sleep(POST_THROTTLE_MS);
+  // POST_THROTTLE_MS is enforced by enqueueThrottledPost's `finally`
+  // tail, so no in-function sleep is needed here. The throttle still
+  // applies even on failure — see queue helper above.
+ });
 }
 
 async function fireViolation(payload, dedupKey){
+ // Synchronous reserve-then-add — must happen BEFORE the first await
+ // so two concurrent photo tasks with the same dedupKey can't both
+ // pass the check and double-fire. JS is single-threaded, so this
+ // check + add executes atomically relative to other microtasks.
  if (seenViolations.has(dedupKey)){
   addLog("dup", payload.name, `Duplicate violation suppressed (${payload.violationType})`);
   return;
@@ -968,27 +1178,27 @@ async function fireViolation(payload, dedupKey){
  seenViolations.add(dedupKey);
  scheduleScanStateSave();
  addLog("viol", payload.name, `⚠️ ${payload.message}`);
- try {
-  await fetch(API, {
-   method: "POST",
-   headers: { "Content-Type": "text/plain" },
-   body: JSON.stringify({
-    action: "reportViolation",
-    name: payload.name,
-    bib: payload.bib,
-    message: payload.message,
-    violationType: payload.violationType,
-    timestamp: new Date().toISOString(),
-    image: payload.image,
-   }),
-  });
-  stats.violations++;
-  refreshStats();
- } catch (e){
-  stats.errors++;
-  addLog("err", payload.name, "Failed to send violation: " + (e.message || e));
- }
- await sleep(POST_THROTTLE_MS);
+ return enqueueThrottledPost(async () => {
+  try {
+   await fetch(API, {
+    method: "POST",
+    headers: { "Content-Type": "text/plain" },
+    body: JSON.stringify({
+     action: "reportViolation",
+     name: payload.name,
+     bib: payload.bib,
+     message: payload.message,
+     violationType: payload.violationType,
+     timestamp: new Date().toISOString(),
+    }),
+   });
+   stats.violations++;
+   refreshStats();
+  } catch (e){
+   stats.errors++;
+   addLog("err", payload.name, "Failed to send violation: " + (e.message || e));
+  }
+ });
 }
 
 // Promise-based sleep helper for the per-POST throttle.
@@ -1008,20 +1218,14 @@ function loadImage(src){
  });
 }
 
-// Crop a region of `srcCanvas` (padded by `padFactor` × face height on
-// each side) and return as a JPEG data URL — same format the live
-// pipeline sends to reportViolation (Apps Script base64-decodes it).
-function cropToDataUrl(srcCanvas, box, padFactor){
- const pad = box.height * (padFactor || 0);
- const cx = Math.max(0, box.x - pad);
- const cy = Math.max(0, box.y - pad);
- const cw = Math.min(box.width + pad * 2, srcCanvas.width - cx);
- const ch = Math.min(box.height + pad * 2, srcCanvas.height - cy);
- const c = document.createElement("canvas");
- c.width = cw; c.height = ch;
- c.getContext("2d").drawImage(srcCanvas, cx, cy, cw, ch, 0, 0, cw, ch);
- return c.toDataURL("image/jpeg", 0.7);
-}
+// cropToDataUrl was removed 2026-05-19 — the scanner no longer
+// generates per-violation image crops (operator decision: stop
+// "ตัดรูป"). reportViolation payloads now carry only metadata
+// (name / bib / message / violationType / timestamp); the backend
+// at `handleReportViolation` tolerates a missing `image` field
+// (`apps_script/Code.gs` line ~1007: `const imageBase64 = body.image || ""`)
+// and skips the Drive upload, leaving the Violations sheet's
+// `ImageUrl` column empty for new rows.
 
 function drawDetectionBox(ctx, box, label, isViolation){
  ctx.save();

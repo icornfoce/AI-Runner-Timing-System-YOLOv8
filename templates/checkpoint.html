@@ -468,10 +468,16 @@ function consensusBib(name){
 //   bw = box.width + 1.0·faceH     ← roughly 2× face width
 //   bh = 3.0·faceH                 ← extends well below the chest
 function getOCRCropBox(box, video){
+ // Factors widened 2026-05-19: was 0.5 / 0.6 / 1.0 / 3.0. Mirrored
+ // from `photo_scanner.html`'s getOCRCropBox per Guardrail 27 — the
+ // scanner-side tuning (tight-portrait BIBs near the chin, off-
+ // center BIBs on race vests) carries over to live mode if the
+ // /checkpoint route is ever re-enabled. Both files must move in
+ // lockstep.
  const faceH = box.height;
- const bx = Math.max(0, box.x - faceH * 0.5);
- const by = Math.max(0, box.y + faceH * 0.6);
- const bw = Math.min(box.width + faceH * 1.0, video.videoWidth - bx);
+ const bx = Math.max(0, box.x - faceH * 0.7);
+ const by = Math.max(0, box.y + faceH * 0.5);
+ const bw = Math.min(box.width + faceH * 1.4, video.videoWidth - bx);
  const bh = Math.min(faceH * 3.0, video.videoHeight - by);
  return {bx:bx, by:by, bw:bw, bh:bh};
 }
