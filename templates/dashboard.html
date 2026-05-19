@@ -464,6 +464,31 @@
         .btn-sv:disabled, .btn-cn:disabled { opacity: .55; cursor: not-allowed }
         .btn-cn { background: rgba(255, 255, 255, .04); color: var(--mut); border: 1px solid var(--bdr) }
         .btn-cn:hover { color: var(--txt) }
+        .inline-name-input, .inline-email-input {
+          background: rgba(255,255,255,.04);
+          color: var(--txt);
+          border: 1px solid var(--bdr);
+          border-radius: 6px;
+          padding: 0.25rem 0.5rem;
+          font: inherit;
+          width: 100%;
+          max-width: 200px;
+        }
+        .inline-name-input:focus, .inline-email-input:focus {
+          outline: none;
+          border-color: #2dd4a8;
+          background: rgba(29,158,117,.15);
+        }
+        .btn-ph { background: rgba(96,165,250,.12); color: #60a5fa; border: 1px solid rgba(96,165,250,.4) }
+        .btn-ph:hover { background: rgba(96,165,250,.2) }
+        .btn-rp { background: rgba(255,255,255,.04); color: var(--mut); border: 1px solid var(--bdr); font-size: .7rem }
+        .btn-rp:hover { color: var(--pri); border-color: var(--pri) }
+        .photo-panel-row td { background: rgba(255,255,255,.02); padding: 0.6rem !important }
+        .photo-panel-grid { display: flex; flex-wrap: wrap; gap: 0.8rem; justify-content: flex-start }
+        .photo-panel-item { display: flex; flex-direction: column; align-items: center; gap: 0.3rem; min-width: 120px }
+        .photo-panel-item img { width: 120px; height: 120px; object-fit: cover; border-radius: 8px; border: 1px solid rgba(255,255,255,.1); background: rgba(0,0,0,.3) }
+        .photo-panel-item .ph-empty { width: 120px; height: 120px; border-radius: 8px; border: 1px dashed var(--bdr); display: flex; align-items: center; justify-content: center; color: var(--mut); font-size: .75rem }
+        .photo-panel-label { font-size: .75rem; color: var(--mut); text-transform: uppercase; letter-spacing: 0.05em }
         .inline-bib-input {
             width: 90px; padding: .3rem .5rem; border-radius: 6px;
             border: 1px solid var(--pri); background: rgba(29, 158, 117, .08);
@@ -917,11 +942,19 @@
         let typeFilter = "ALL";
         const selectedViolationIds = new Set();
 
-        // Inline-edit state for the Runners admin tab. Holds the Name of
-        // the row currently being edited (BIB-only), or null when no row
-        // is in edit mode. Survives the 15-second admin poll's
-        // renderAdminTab() re-render because renderRunnerRow keys on it.
-        let editingRunner = null;
+        // Inline-edit state for the Runners admin tab. Generalized
+        // 2026-05-20 from a single BIB-only string to a (name, field)
+        // pair so Name/BIB/Email can each be inline-edited. At most
+        // one field on one runner is in edit mode at a time. Survives
+        // the 15 s admin poll's renderAdminTab() re-render because
+        // renderRunnerRow keys on both fields.
+        let editingRunner = null;        // Name of the runner being edited, or null
+        let editingField = null;         // "name" | "bib" | "email" | null
+        // Per-runner photo panel expansion (5 angle thumbnails). The Set
+        // persists across renders so the panel doesn't snap closed on
+        // every admin poll. Cleared on switchTab (so tab navigation
+        // resets the UI cleanly).
+        const expandedPhotoPanels = new Set();
 
         // ── HTML ESCAPE (anti-XSS) ──
         // All data interpolated into innerHTML must pass through esc(). Raw
@@ -1229,35 +1262,86 @@
             const el = document.getElementById("admin-loading");
             if (el) el.style.display = on ? "flex" : "none";
         }
-        function switchTab(t, el) { adminTab = t; editingRunner = null; document.querySelectorAll(".tab").forEach(b => b.classList.remove("on")); el.classList.add("on"); renderAdminTab(); }
+        function switchTab(t, el) {
+            adminTab = t;
+            editingRunner = null;
+            editingField = null;
+            expandedPhotoPanels.clear();
+            document.querySelectorAll(".tab").forEach(b => b.classList.remove("on"));
+            el.classList.add("on");
+            renderAdminTab();
+        }
 
+        // Render a single runner row + (optionally) its trailing photo
+        // panel row. Each editable cell flips between read-only display
+        // and an inline input keyed off (editingRunner, editingField).
         function renderRunnerRow(r) {
-            const isEditing = (editingRunner === r.Name);
-            // BIB cell flips between plain text and an inline input when
-            // the row is in edit mode. Element id contains the unescaped
-            // name (getElementById uses literal string matching, not CSS
-            // selector parsing, so dots / dashes / underscores are safe).
-            const bibCell = isEditing
-                ? `<td><input class="inline-bib-input" id="edit-bib-${attr(r.Name)}" value="${attr(r.BibNumber || "")}" maxlength="10" autocomplete="off"></td>`
-                : `<td>${esc(r.BibNumber || "-")}</td>`;
-            // Actions: in edit mode show Save + Cancel; otherwise Edit + Delete.
-            const actionsCell = isEditing
-                ? `<td style="white-space:nowrap"><button class="btn-sm btn-sv" data-save-runner="${attr(r.Name)}">💾</button> <button class="btn-sm btn-cn" data-cancel-runner="${attr(r.Name)}">✖</button></td>`
-                : `<td style="white-space:nowrap"><button class="btn-sm btn-ed" data-edit-runner="${attr(r.Name)}">✏️</button> <button class="btn-sm btn-dl" data-del-runner="${attr(r.Name)}">🗑️</button></td>`;
-            return `<tr>` +
-                `<td style="font-weight:600">${esc(r.Name)}</td>` +
-                bibCell +
-                `<td style="font-size:.8rem;color:var(--mut)">${esc(r.Email || "-")}</td>` +
-                `<td class="tt">${esc(r.Start_Time)}</td>` +
-                `<td class="tt">${esc(r.CP1_Time)}</td>` +
-                `<td class="tt">${esc(r.CP2_Time)}</td>` +
-                `<td class="tt">${esc(r.CP3_Time)}</td>` +
-                `<td class="tt">${esc(r.CP4_Time)}</td>` +
-                `<td class="tt">${esc(r.Finish_Time)}</td>` +
-                `<td class="tt">${esc(r.Total_Duration)}</td>` +
-                `<td>${r.FolderUrl ? `<a href="${attr(r.FolderUrl)}" target="_blank" rel="noopener" style="color:var(--pri);font-size:.8rem">📂</a>` : "-"}</td>` +
-                actionsCell +
-                `</tr>`;
+            const editing = editingRunner === r.Name;
+            const editingName  = editing && editingField === "name";
+            const editingBib   = editing && editingField === "bib";
+            const editingEmail = editing && editingField === "email";
+            const expanded = expandedPhotoPanels.has(r.Name);
+
+            const nameCell = editingName
+                ? `<td><input class="inline-name-input" id="edit-name-${attr(r.Name)}" value="${attr(r.Name)}" maxlength="50" autocomplete="off"> ` +
+                  `<button class="btn-sm btn-sv" data-save-name="${attr(r.Name)}" title="Save (cascade rename)">💾</button> ` +
+                  `<button class="btn-sm btn-cn" data-cancel-edit="1">✖</button></td>`
+                : `<td style="font-weight:600">${esc(r.Name)} ` +
+                  `<button class="btn-sm btn-ed" data-edit-name="${attr(r.Name)}" title="Rename (cascade)">✏️</button></td>`;
+
+            const bibCell = editingBib
+                ? `<td><input class="inline-bib-input" id="edit-bib-${attr(r.Name)}" value="${attr(r.BibNumber || "")}" maxlength="10" autocomplete="off"> ` +
+                  `<button class="btn-sm btn-sv" data-save-bib="${attr(r.Name)}">💾</button> ` +
+                  `<button class="btn-sm btn-cn" data-cancel-edit="1">✖</button></td>`
+                : `<td>${esc(r.BibNumber || "-")} ` +
+                  `<button class="btn-sm btn-ed" data-edit-bib="${attr(r.Name)}" title="Edit BIB">✏️</button></td>`;
+
+            const emailCell = editingEmail
+                ? `<td><input class="inline-email-input" id="edit-email-${attr(r.Name)}" value="${attr(r.Email || "")}" maxlength="100" autocomplete="off" placeholder="user@example.com"> ` +
+                  `<button class="btn-sm btn-sv" data-save-email="${attr(r.Name)}">💾</button> ` +
+                  `<button class="btn-sm btn-cn" data-cancel-edit="1">✖</button></td>`
+                : `<td style="font-size:.8rem;color:var(--mut)">${esc(r.Email || "-")} ` +
+                  `<button class="btn-sm btn-ed" data-edit-email="${attr(r.Name)}" title="Edit Email">✏️</button></td>`;
+
+            const photosCell = `<td><button class="btn-sm btn-ph" data-view-photos="${attr(r.Name)}">${expanded ? "▼ ปิด" : "▶ ดูรูป"}</button></td>`;
+
+            const driveCell = r.FolderUrl
+                ? `<td><a href="${attr(r.FolderUrl)}" target="_blank" rel="noopener" style="color:var(--pri);font-size:.8rem">📂</a></td>`
+                : `<td>-</td>`;
+
+            const actionsCell = `<td style="white-space:nowrap"><button class="btn-sm btn-dl" data-del-runner="${attr(r.Name)}" title="Delete runner">🗑️</button></td>`;
+
+            const mainRow = `<tr>` + nameCell + bibCell + emailCell + photosCell + driveCell + actionsCell + `</tr>`;
+
+            // Photo panel row — visible only when expanded. colspan covers
+            // all 6 columns above. Thumbnails are <img src=THUMBNAIL_URL>
+            // only — never feed thumbnail URLs to a canvas (Guardrail 11).
+            // Each angle has a hidden <input type="file"> that the Replace
+            // button clicks programmatically; the change handler reads the
+            // File via FileReader and POSTs updateRunnerPhoto.
+            if (!expanded) return mainRow;
+
+            const angles = [
+                ["front",  "Front",  r.Photo_Front],
+                ["top",    "Top",    r.Photo_Top],
+                ["bottom", "Bottom", r.Photo_Bottom],
+                ["left",   "Left",   r.Photo_Left],
+                ["right",  "Right",  r.Photo_Right],
+            ];
+            const panelItems = angles.map(([key, label, url]) => {
+                const img = url
+                    ? `<img src="${attr(url)}" data-img="${attr(url)}" alt="${esc(label)} angle for ${esc(r.Name)}" loading="lazy">`
+                    : `<div class="ph-empty">— no photo —</div>`;
+                return `<div class="photo-panel-item">` +
+                    `<div class="photo-panel-label">${esc(label)}</div>` +
+                    img +
+                    `<input type="file" accept="image/*" id="upload-${attr(r.Name)}-${key}" data-photo-name="${attr(r.Name)}" data-photo-angle="${key}" style="display:none">` +
+                    `<button class="btn-sm btn-rp" data-replace-photo="${attr(r.Name)}|${key}">↻ Replace</button>` +
+                    `</div>`;
+            }).join("");
+            const panelRow = `<tr class="photo-panel-row"><td colspan="6"><div class="photo-panel-grid">${panelItems}</div></td></tr>`;
+
+            return mainRow + panelRow;
         }
 
         function renderViolationRow(v) {
@@ -1294,23 +1378,25 @@
             // edited, blocking the next Edit click on a different runner.
             if (editingRunner && !runners.some(r => r.Name === editingRunner)) {
                 editingRunner = null;
+                editingField = null;
             }
+            // Same for expanded photo panels — drop stale entries for
+            // runners that no longer exist.
+            Array.from(expandedPhotoPanels).forEach(name => {
+                if (!runners.some(r => r.Name === name)) expandedPhotoPanels.delete(name);
+            });
             if (adminTab === "runners") {
-                const merged = runners.map(rn => {
-                    const res = results.find(r => r.Name === rn.Name) || {};
-                    return {
-                        ...rn,
-                        Start_Time: res.Start_Time || "-",
-                        CP1_Time: res.CP1_Time || "-",
-                        CP2_Time: res.CP2_Time || "-",
-                        CP3_Time: res.CP3_Time || "-",
-                        CP4_Time: res.CP4_Time || "-",
-                        Finish_Time: res.Finish_Time || "-",
-                        Total_Duration: res.Total_Duration || "-",
-                    };
-                }).filter(r => (r.Name || "").toLowerCase().includes(q) || String(r.BibNumber).includes(q));
-                if (!merged.length) { body.innerHTML = `<div class="empty">ไม่พบข้อมูลนักวิ่ง</div>`; return; }
-                body.innerHTML = `<table><thead><tr><th>ชื่อ</th><th>BIB</th><th>Email</th><th>Start</th><th>CP1</th><th>CP2</th><th>CP3</th><th>CP4</th><th>Finish</th><th>เวลา</th><th>Drive</th><th>จัดการ</th></tr></thead><tbody>${merged.map(renderRunnerRow).join("")}</tbody></table>`;
+                // Post-2026-05-20: no more timing column merge from
+                // results — the Results schema dropped Start_Time /
+                // CP1-4_Time / Finish_Time / Total_Duration. Runners
+                // rows go in directly; the only cross-sheet join left
+                // (IsCheating) is for the public leaderboard, not this
+                // admin table.
+                const filtered = runners.filter(r =>
+                    (r.Name || "").toLowerCase().includes(q) ||
+                    String(r.BibNumber || "").includes(q));
+                if (!filtered.length) { body.innerHTML = `<div class="empty">ไม่พบข้อมูลนักวิ่ง</div>`; return; }
+                body.innerHTML = `<table><thead><tr><th>ชื่อ</th><th>BIB</th><th>Email</th><th>รูป</th><th>Drive</th><th>จัดการ</th></tr></thead><tbody>${filtered.map(renderRunnerRow).join("")}</tbody></table>`;
             } else {
                 // Single-pass combined search + type filter — was two
                 // sequential .filter() chains. Avoids one full traversal.
@@ -1378,28 +1464,52 @@
             const body = document.getElementById("admin-body");
             if (!body) return;
             body.addEventListener("click", e => {
-                const t = e.target.closest("[data-img], [data-verify], [data-del-runner], [data-del-violation], [data-edit-runner], [data-save-runner], [data-cancel-runner]");
+                const t = e.target.closest(
+                    "[data-img], [data-verify], [data-del-runner], [data-del-violation], " +
+                    "[data-edit-name], [data-save-name], " +
+                    "[data-edit-bib], [data-save-bib], " +
+                    "[data-edit-email], [data-save-email], " +
+                    "[data-cancel-edit], [data-view-photos], [data-replace-photo]"
+                );
                 if (!t) return;
                 if (t.dataset.img != null) openLb(t.dataset.img);
                 else if (t.dataset.verify != null) verifyV(t.dataset.verify);
                 else if (t.dataset.delRunner != null) confirmDel("runner", t.dataset.delRunner);
                 else if (t.dataset.delViolation != null) confirmDel("violation", t.dataset.delViolation);
-                else if (t.dataset.editRunner != null) {
-                    editingRunner = t.dataset.editRunner;
-                    renderAdminTab();
-                    // Focus the input so the operator can type immediately.
-                    const inp = document.getElementById("edit-bib-" + editingRunner);
-                    if (inp) { inp.focus(); inp.select(); }
-                }
-                else if (t.dataset.cancelRunner != null) {
+                else if (t.dataset.editName != null)  startInlineEdit(t.dataset.editName,  "name");
+                else if (t.dataset.editBib != null)   startInlineEdit(t.dataset.editBib,   "bib");
+                else if (t.dataset.editEmail != null) startInlineEdit(t.dataset.editEmail, "email");
+                else if (t.dataset.cancelEdit != null) {
                     editingRunner = null;
+                    editingField = null;
                     renderAdminTab();
                 }
-                else if (t.dataset.saveRunner != null) {
-                    saveRunnerBib(t.dataset.saveRunner, t);
+                else if (t.dataset.saveName != null)  saveRunnerName(t.dataset.saveName, t);
+                else if (t.dataset.saveBib != null)   saveRunnerBib(t.dataset.saveBib, t);
+                else if (t.dataset.saveEmail != null) saveRunnerEmail(t.dataset.saveEmail, t);
+                else if (t.dataset.viewPhotos != null) {
+                    const name = t.dataset.viewPhotos;
+                    if (expandedPhotoPanels.has(name)) expandedPhotoPanels.delete(name);
+                    else expandedPhotoPanels.add(name);
+                    renderAdminTab();
+                }
+                else if (t.dataset.replacePhoto != null) {
+                    // "name|angle" — pipe is safe because angle is from a
+                    // fixed allow-list and name passes NAME_PATTERN.
+                    const [pname, pangle] = t.dataset.replacePhoto.split("|");
+                    const fileInput = document.getElementById(`upload-${pname}-${pangle}`);
+                    if (fileInput) fileInput.click();
                 }
             });
             body.addEventListener("change", e => {
+                // File-input change → replaceRunnerPhoto.
+                const fileEl = e.target.closest("input[type='file'][data-photo-name]");
+                if (fileEl) {
+                    const file = fileEl.files && fileEl.files[0];
+                    if (file) replaceRunnerPhoto(fileEl.dataset.photoName, fileEl.dataset.photoAngle, file);
+                    fileEl.value = "";  // allow picking the same file twice
+                    return;
+                }
                 const cb = e.target.closest("[data-cb-id]");
                 if (!cb) return;
                 const id = cb.dataset.cbId;
@@ -1408,6 +1518,18 @@
                 renderAdminTab();
             });
         })();
+
+        // Begin inline-edit on (name, field). Re-renders so the cell
+        // flips to its input form, then focuses + selects the text so
+        // the operator can type immediately.
+        function startInlineEdit(name, field) {
+            editingRunner = name;
+            editingField = field;
+            renderAdminTab();
+            const idMap = { name: "edit-name-", bib: "edit-bib-", email: "edit-email-" };
+            const inp = document.getElementById(idMap[field] + name);
+            if (inp) { inp.focus(); inp.select(); }
+        }
 
         // Re-bound on every render for the controls that live in the
         // toolbar (type-filter, cb-all, bulk-del button) — those nodes are
@@ -1479,9 +1601,6 @@
                 const d = await adminPost({ action: "editRunnerProfile", name: name, bib: newBib });
                 if (!d || d.status !== "success") {
                     alert("บันทึกไม่สำเร็จ: " + ((d && d.message) || "Unknown"));
-                    // Restore the button so the operator can retry; loadAdminData
-                    // below will re-render anyway, but a transient flash of the
-                    // saving state would be confusing.
                     buttonEl.disabled = false;
                     buttonEl.textContent = "💾";
                     input.disabled = false;
@@ -1495,6 +1614,7 @@
                 const res = results.find(x => x.Name === name);
                 if (res) res.BibNumber = newBib;
                 editingRunner = null;
+                editingField = null;
             } catch (e) {
                 alert("บันทึกไม่สำเร็จ: เชื่อมต่อเซิร์ฟเวอร์ไม่ได้");
                 buttonEl.disabled = false;
@@ -1503,6 +1623,164 @@
                 return;
             }
             loadAdminData();
+        }
+
+        // Inline runner-Email save. Empty value clears the cell.
+        // EMAIL_PATTERN is enforced server-side; we mirror it client-side
+        // to give the operator immediate feedback.
+        async function saveRunnerEmail(name, buttonEl) {
+            const input = document.getElementById("edit-email-" + name);
+            if (!input) return;
+            const newEmail = input.value.trim();
+            if (newEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(newEmail)) {
+                alert("รูปแบบอีเมลไม่ถูกต้อง (หรือเว้นว่างเพื่อล้างค่า)");
+                return;
+            }
+            buttonEl.disabled = true;
+            buttonEl.textContent = "⏳";
+            input.disabled = true;
+            try {
+                const d = await adminPost({ action: "editRunnerProfile", name: name, email: newEmail });
+                if (!d || d.status !== "success") {
+                    alert("บันทึกไม่สำเร็จ: " + ((d && d.message) || "Unknown"));
+                    buttonEl.disabled = false;
+                    buttonEl.textContent = "💾";
+                    input.disabled = false;
+                    return;
+                }
+                const r = runners.find(x => x.Name === name);
+                if (r) r.Email = newEmail;
+                editingRunner = null;
+                editingField = null;
+            } catch (e) {
+                alert("บันทึกไม่สำเร็จ: เชื่อมต่อเซิร์ฟเวอร์ไม่ได้");
+                buttonEl.disabled = false;
+                buttonEl.textContent = "💾";
+                input.disabled = false;
+                return;
+            }
+            loadAdminData();
+        }
+
+        // Inline runner-Name save — the heavyweight one. Renaming
+        // cascades through Runners + Results + Violations + the Drive
+        // folder, so we prompt the operator with an explicit warning
+        // before firing renameRunner.
+        async function saveRunnerName(oldName, buttonEl) {
+            const input = document.getElementById("edit-name-" + oldName);
+            if (!input) return;
+            const newName = input.value.trim();
+            if (!/^[a-zA-Z0-9_\-.]{1,50}$/.test(newName)) {
+                alert("Name ต้องเป็น A-Z, 0-9, _ - . (1–50 ตัว)");
+                return;
+            }
+            if (newName === oldName) {
+                editingRunner = null;
+                editingField = null;
+                renderAdminTab();
+                return;
+            }
+            const confirmed = await confirmDialog(
+                `⚠️ Rename "${oldName}" → "${newName}"?\n\n` +
+                `This will cascade across:\n` +
+                `• Runners.Name (this row)\n` +
+                `• Every Results row for this runner\n` +
+                `• Every Violations row for this runner\n` +
+                `• The Drive folder RunnerFaces/${oldName}\n\n` +
+                `Continue?`
+            );
+            if (!confirmed) return;
+            buttonEl.disabled = true;
+            buttonEl.textContent = "⏳";
+            input.disabled = true;
+            try {
+                const d = await adminPost({ action: "renameRunner", oldName, newName });
+                if (!d || d.status !== "success") {
+                    alert("Rename ไม่สำเร็จ: " + ((d && d.message) || "Unknown"));
+                    buttonEl.disabled = false;
+                    buttonEl.textContent = "💾";
+                    input.disabled = false;
+                    return;
+                }
+                editingRunner = null;
+                editingField = null;
+                // No optimistic local rewrite — the next loadAdminData
+                // call pulls the authoritative state, and trying to
+                // rewrite every reference in `runners` + `results` +
+                // `violations` locally would duplicate the backend
+                // cascade logic for marginal UI smoothness.
+            } catch (e) {
+                alert("Rename ไม่สำเร็จ: เชื่อมต่อเซิร์ฟเวอร์ไม่ได้");
+                buttonEl.disabled = false;
+                buttonEl.textContent = "💾";
+                input.disabled = false;
+                return;
+            }
+            loadAdminData();
+        }
+
+        // Replace one of a runner's 5 angle photos. The hidden file
+        // input is triggered by the Replace button in the photo panel;
+        // the change event fires this with (name, angle, File).
+        async function replaceRunnerPhoto(name, angle, file) {
+            if (!file || !file.type.startsWith("image/")) {
+                alert("กรุณาเลือกไฟล์รูปภาพ");
+                return;
+            }
+            // FileReader → data URL. We pass the base64 portion (no
+            // "data:<mime>;base64," prefix) to the backend; its
+            // saveBase64Image helper also accepts the full data URL —
+            // stripping the prefix client-side keeps payload size down.
+            const dataUrl = await new Promise((resolve, reject) => {
+                const fr = new FileReader();
+                fr.onload  = () => resolve(fr.result);
+                fr.onerror = () => reject(new Error("File read failed"));
+                fr.readAsDataURL(file);
+            }).catch(e => { alert("อ่านไฟล์ไม่สำเร็จ: " + (e.message || e)); return null; });
+            if (!dataUrl) return;
+            const base64 = dataUrl.split(",")[1] || dataUrl;
+
+            try {
+                const d = await adminPost({
+                    action: "updateRunnerPhoto",
+                    name, angle, photoBase64: base64, mimeType: file.type,
+                });
+                if (!d || d.status !== "success") {
+                    alert("อัพโหลดไม่สำเร็จ: " + ((d && d.message) || "Unknown"));
+                    return;
+                }
+            } catch (e) {
+                alert("อัพโหลดไม่สำเร็จ: เชื่อมต่อเซิร์ฟเวอร์ไม่ได้");
+                return;
+            }
+            loadAdminData();
+        }
+
+        // Promise-based wrapper around #confirm-modal. Returns true if
+        // the operator clicks OK, false on Cancel / backdrop / Esc.
+        // Used by saveRunnerName (the cascade rename warning); generic
+        // enough to be reused for any future dialog.
+        function confirmDialog(message) {
+            return new Promise(resolve => {
+                const modal = document.getElementById("confirm-modal");
+                const msgEl = document.getElementById("confirm-msg");
+                const okEl  = document.getElementById("confirm-ok");
+                msgEl.textContent = message;
+                modal.classList.add("on");
+                const cleanup = (result) => {
+                    modal.classList.remove("on");
+                    okEl.onclick = null;
+                    resolve(result);
+                };
+                okEl.onclick = () => cleanup(true);
+                // closeConfirm() (existing Cancel handler) just removes
+                // the .on class; we hook the same click but also resolve
+                // false. The existing global closeConfirm is preserved
+                // so other call sites (confirmDel, bulkDeleteSelected)
+                // still work — they don't await a resolve.
+                const cancelBtn = modal.querySelector("[onclick='closeConfirm()']");
+                if (cancelBtn) cancelBtn.onclick = () => cleanup(false);
+            });
         }
         function confirmDel(type, id) {
             document.getElementById("confirm-msg").textContent = type === "runner" ? `ลบ "${id}" จากระบบ?` : "ลบ violation นี้?";

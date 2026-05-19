@@ -9,6 +9,32 @@
 > cadence, caching, or guardrails MUST update this file in the same change
 > set.
 >
+> **Last updated:** 2026-05-20 — Admin Runners tab gains full
+> inline editing for Name (cascade rename), BIB, Email, and
+> per-angle photo replacement; legacy CP-time columns dropped
+> from the table (the Results schema no longer carries them).
+> New 6-column layout: `ชื่อ | BIB | Email | รูป | Drive |
+> จัดการ`. Inline-edit state generalized from a single
+> `editingRunner` string to a (name, field) pair — at most one
+> field on one runner is in edit mode at a time. Each cell has
+> an ✏️ Edit button that flips it to an input + 💾 Save / ✖
+> Cancel. The Photos column has a `▶ ดูรูป` button that toggles
+> an expanded row underneath showing all 5 angle thumbnails
+> (`<img src="<thumbnail URL>">` only — Guardrail 11; never
+> canvas). Each thumbnail has a `↻ Replace` button that triggers
+> a hidden `<input type="file">`; on file pick, a `FileReader`
+> reads the image as a base64 data URL, the `data:<mime>;base64,`
+> prefix is stripped, and the result is POSTed to
+> `updateRunnerPhoto`. Rename triggers a promise-based confirm
+> dialog warning the operator about the cascade (Runners.Name +
+> every Results.Name + every Violations.Name + the
+> `RunnerFaces/<oldName>` Drive folder); only on confirm does
+> the `renameRunner` POST fire. State cleanup hooks in
+> `switchTab` (clears editingRunner / editingField / expanded
+> photo panels) and `renderAdminTab` (drops stale entries for
+> deleted runners). All edits use `adminPost` so the admin token
+> is auto-injected from sessionStorage.
+>
 > **Last updated:** 2026-05-20 — Public leaderboard gains a
 > Status column. The 5-col layout is now `# | ชื่อ | BIB |
 > สถานะ | Verified At`. The Status cell reads
