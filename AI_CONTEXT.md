@@ -9,6 +9,18 @@
 > cadence, caching, or guardrails MUST update this file in the same change
 > set.
 >
+> **Last updated:** 2026-05-20 — Public leaderboard gains a
+> Status column. The 5-col layout is now `# | ชื่อ | BIB |
+> สถานะ | Verified At`. The Status cell reads
+> `String(r.IsCheating || "").toLowerCase() === "true"` and
+> renders `🚨 Cheating` (red) on match, `✅ Clear` (green)
+> otherwise. Empty `IsCheating` (never flagged) and explicit
+> `"false"` both render as Clear — only the literal string
+> `"true"` triggers the cheating badge. The leaderboard polls
+> at 5 s (`POLL_RESULTS_MS`), so a fresh WRONG_PERSON fire
+> flips the badge within one poll cycle of the scanner's
+> markCheating POST landing.
+>
 > **Last updated:** 2026-05-20 — Drive Scanner now emits
 > `photoFileId` + `detectionBoxes` on every `reportViolation`
 > POST, and queues a `markCheating(name, isCheating=true)` POST
@@ -727,7 +739,7 @@ never blocks the render loop.
 
 | Source | Endpoint | Cadence | Notes |
 |---|---|---|---|
-| Public leaderboard | `getResults` | **5 s** | `POLL_RESULTS_MS`. Post-2026-05-18 the table renders only `Name` / `BibNumber` / `UpdatedAt` (formatted as "YYYY-MM-DD HH:MM:SS" via `formatVerifiedAt`); CP times are still fetched in the payload but no longer displayed. |
+| Public leaderboard | `getResults` | **5 s** | `POLL_RESULTS_MS`. Post-2026-05-20 the table renders 5 cols: `# / Name / BibNumber / Status / UpdatedAt`. Status reads `r.IsCheating`: literal `"true"` → 🚨 Cheating; anything else → ✅ Clear. UpdatedAt is formatted via `formatVerifiedAt` as "YYYY-MM-DD HH:MM:SS". Sort by UpdatedAt desc; empty UpdatedAt sorts last. |
 | Public alerts | `getVerifiedViolations` | **10 s** | `POLL_VIOLATIONS_MS`; only `Verified=true` |
 | Admin tab | `getRunners`, `getViolations`, `getResults` (parallel) | **15 s** | `POLL_ADMIN_MS`; only when admin panel is active |
 

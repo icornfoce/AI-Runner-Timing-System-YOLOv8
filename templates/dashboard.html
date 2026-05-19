@@ -801,6 +801,7 @@
                         <th>#</th>
                         <th>ชื่อ</th>
                         <th>BIB</th>
+                        <th>สถานะ</th>
                         <th>Verified At</th>
                     </tr>
                 </thead>
@@ -1073,9 +1074,19 @@
             tb.innerHTML = sorted.map((r, i) => {
                 const rank = i + 1;
                 const rc = rank === 1 ? "rank-1" : rank === 2 ? "rank-2" : rank === 3 ? "rank-3" : "";
+                // IsCheating is the literal string "true" when WRONG_PERSON
+                // has fired for this runner (markCheating POST writes it).
+                // Anything else — "false", "", undefined — renders as Clear.
+                // String() + toLowerCase() handles all serialization shapes
+                // the JSON API might return.
+                const isCheating = String(r.IsCheating || "").toLowerCase() === "true";
+                const statusCell = isCheating
+                    ? `<td style="color:#e53e3e;font-weight:600">🚨 Cheating</td>`
+                    : `<td style="color:var(--pri)">✅ Clear</td>`;
                 return `<tr><td class="${rc}" style="font-weight:700">#${rank}</td>` +
                     `<td style="font-weight:600">${esc(r.Name || "-")}</td>` +
                     `<td>${esc(r.BibNumber || "-")}</td>` +
+                    statusCell +
                     `<td class="tt">${esc(formatVerifiedAt(r.UpdatedAt))}</td></tr>`;
             }).join("");
         }
