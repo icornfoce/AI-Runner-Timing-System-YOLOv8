@@ -620,6 +620,7 @@ function doPost(e) {
       case "deleteRunner":     return handleDeleteRunner(body);
       case "updateRunner":     return handleUpdateRunner(body);
       case "editRunnerProfile": return handleEditRunnerProfile(body);
+      case "renameRunner":     return handleRenameRunner(body);
       default:
         return jsonErr("Unknown action: " + action, "bad_request");
     }
@@ -1338,31 +1339,49 @@ function _legacyHandleUpdateRunner_unused(body) {
 function handleEditRunnerProfile(body) {
   requireAdmin(body);
   const name = reqStr(body.name, "name", NAME_PATTERN, 50);
-  const newBib = optStr(body.bib, BIB_PATTERN, 10);
+  // BIB and Email are independently optional — the frontend's inline
+  // edit posts whichever field changed. Missing keys leave the
+  // corresponding cell untouched; explicit empty string clears the
+  // cell. Email pattern is enforced when non-empty.
+  const hasBib = body.bib !== undefined;
+  const hasEmail = body.email !== undefined;
+  if (!hasBib && !hasEmail) {
+    throw httpError("Nothing to update — supply bib or email", "bad_request");
+  }
+  const newBib = hasBib ? optStr(body.bib, BIB_PATTERN, 10) : null;
+  const newEmail = hasEmail ? optStr(body.email, EMAIL_PATTERN, 100) : null;
 
-  // 1) Update Runners.BibNumber for the named row.
+  // 1) Update Runners — BibNumber and/or Email for the named row.
   const runnersSheet = getSheet(SHEETS.RUNNERS);
   const runnersSnap = readWholeSheet(runnersSheet);
   const runnerRowIdx = runnersSnap.findRowByName(name);
   if (runnerRowIdx < 0) throw httpError("Runner not found: " + name, "not_found");
 
-  const runnersBibCol = runnersSnap.headerIndex("BibNumber");
-  if (runnersBibCol < 0) throw httpError("Runners sheet missing BibNumber column", "schema_error");
-  runnersSheet.getRange(runnerRowIdx, runnersBibCol + 1).setValue(newBib);
+  if (hasBib) {
+    const runnersBibCol = runnersSnap.headerIndex("BibNumber");
+    if (runnersBibCol < 0) throw httpError("Runners sheet missing BibNumber column", "schema_error");
+    runnersSheet.getRange(runnerRowIdx, runnersBibCol + 1).setValue(newBib);
+  }
+  if (hasEmail) {
+    const runnersEmailCol = runnersSnap.headerIndex("Email");
+    if (runnersEmailCol < 0) throw httpError("Runners sheet missing Email column", "schema_error");
+    runnersSheet.getRange(runnerRowIdx, runnersEmailCol + 1).setValue(newEmail);
+  }
 
-  // 2) If a Results row exists for the same name, propagate the new
-  //    BIB so the leaderboard stays in sync. The runner may not have
-  //    crossed any timing point yet — the absence of a Results row
-  //    is fine.
+  // 2) If a Results row exists AND BIB changed, propagate the new BIB
+  //    so the leaderboard stays in sync. Email is intentionally NOT
+  //    propagated — Results carries only identity/verification cells.
   let resultsUpdated = false;
-  const resultsSheet = getSheet(SHEETS.RESULTS);
-  const resultsSnap = readWholeSheet(resultsSheet);
-  const resultsRowIdx = resultsSnap.findRowByName(name);
-  if (resultsRowIdx > 0) {
-    const resultsBibCol = resultsSnap.headerIndex("BibNumber");
-    if (resultsBibCol >= 0) {
-      resultsSheet.getRange(resultsRowIdx, resultsBibCol + 1).setValue(newBib);
-      resultsUpdated = true;
+  if (hasBib) {
+    const resultsSheet = getSheet(SHEETS.RESULTS);
+    const resultsSnap = readWholeSheet(resultsSheet);
+    const resultsRowIdx = resultsSnap.findRowByName(name);
+    if (resultsRowIdx > 0) {
+      const resultsBibCol = resultsSnap.headerIndex("BibNumber");
+      if (resultsBibCol >= 0) {
+        resultsSheet.getRange(resultsRowIdx, resultsBibCol + 1).setValue(newBib);
+        resultsUpdated = true;
+      }
     }
   }
 
@@ -1373,13 +1392,137 @@ function handleEditRunnerProfile(body) {
   invalidateRunners();
   if (resultsUpdated) invalidateResults();
 
-  logInfo("editRunnerProfile", { name: name, bib: newBib, resultsUpdated: resultsUpdated });
-  return jsonOk({
-    message: "Updated BIB for " + name,
+  logInfo("editRunnerProfile", {
     name: name,
-    bib: newBib,
+    bib: hasBib ? newBib : "(unchanged)",
+    email: hasEmail ? newEmail : "(unchanged)",
     resultsUpdated: resultsUpdated,
   });
+  return jsonOk({
+    message: "Updated profile for " + name,
+    name: name,
+    bib: hasBib ? newBib : undefined,
+    email: hasEmail ? newEmail : undefined,
+    resultsUpdated: resultsUpdated,
+  });
+}
+
+/**
+ * Cascade-rename a runner. The Name cell is the primary key in Runners
+ * AND a foreign key in Results, Violations, and the Drive folder path
+ * (`RunnerFaces/<name>/`). Renaming touches all four:
+ *
+ *   1. Runners.Name           — single row.
+ *   2. Results.Name           — every matching row (single setValues batch).
+ *   3. Violations.Name        — every matching row (the only place in this
+ *                                codebase that mutates Violations.Name —
+ *                                handleDeleteRunner deliberately does NOT,
+ *                                to preserve the audit trail. Renaming is
+ *                                conceptually different: the audit trail
+ *                                is preserved, only the runner's primary
+ *                                key changes).
+ *   4. Drive folder           — DriveApp folder rename, try-catch isolated
+ *                                per Guardrail 2 so Drive failure does not
+ *                                block the sheet writes.
+ *
+ * All three caches are invalidated (Guardrail 1).
+ *
+ * Concurrency note: this handler is NOT transactional across sheets. If
+ * Apps Script crashes mid-cascade, a partial rename can leave some sheets
+ * pointing at the old name and others at the new name. The window is tiny
+ * (Apps Script runtime stability is high), and the next admin rename or
+ * manual sheet edit will reconcile.
+ */
+function handleRenameRunner(body) {
+  requireAdmin(body);
+  const oldName = reqStr(body.oldName, "oldName", NAME_PATTERN, 50);
+  const newName = reqStr(body.newName, "newName", NAME_PATTERN, 50);
+  if (oldName === newName) {
+    throw httpError("oldName equals newName — nothing to rename", "bad_request");
+  }
+
+  // Verify oldName exists in Runners, and newName does NOT (avoid
+  // accidentally merging two runner identities).
+  const runnersSheet = getSheet(SHEETS.RUNNERS);
+  const runnersSnap = readWholeSheet(runnersSheet);
+  const runnerRowIdx = runnersSnap.findRowByName(oldName);
+  if (runnerRowIdx < 0) throw httpError("Runner not found: " + oldName, "not_found");
+  if (runnersSnap.findRowByName(newName) > 0) {
+    throw httpError("Runner already exists: " + newName, "conflict");
+  }
+
+  // 1) Runners.Name — single cell write.
+  const runnersNameCol = runnersSnap.headerIndex("Name");
+  if (runnersNameCol < 0) throw httpError("Runners sheet missing Name column", "schema_error");
+  runnersSheet.getRange(runnerRowIdx, runnersNameCol + 1).setValue(newName);
+
+  // 2) Results.Name — cascade. Single read snapshot, in-memory rewrite,
+  //    targeted setValue per matching row.
+  const resultsSheet = getSheet(SHEETS.RESULTS);
+  const resultsCascaded = _cascadeRenameInSheet(resultsSheet, oldName, newName);
+
+  // 3) Violations.Name — cascade with the same shape.
+  const violationsSheet = getSheet(SHEETS.VIOLATIONS);
+  const violationsCascaded = _cascadeRenameInSheet(violationsSheet, oldName, newName);
+
+  // 4) Drive folder rename — try-catch isolated per Guardrail 2.
+  //    Iterates every RunnerFaces root (defensive against duplicates;
+  //    _consolidateDuplicateRootFolders fixes that separately).
+  let driveRenamed = false;
+  try {
+    const root = DriveApp.getRootFolder();
+    const runnerRoots = root.getFoldersByName(RUNNER_FACES_FOLDER);
+    while (runnerRoots.hasNext()) {
+      const rf = runnerRoots.next();
+      const personFolders = rf.getFoldersByName(oldName);
+      while (personFolders.hasNext()) {
+        personFolders.next().setName(newName);
+        driveRenamed = true;
+      }
+    }
+  } catch (e) {
+    logErr("renameRunner: Drive folder rename failed for " + oldName + " -> " + newName + " (continuing)", e);
+  }
+
+  invalidateRunners();
+  invalidateResults();
+  invalidateViolations();
+
+  logInfo("renameRunner", {
+    oldName: oldName, newName: newName,
+    resultsCascaded: resultsCascaded,
+    violationsCascaded: violationsCascaded,
+    driveRenamed: driveRenamed,
+  });
+  return jsonOk({
+    message: "Renamed " + oldName + " -> " + newName,
+    oldName: oldName,
+    newName: newName,
+    resultsCascaded: resultsCascaded,
+    violationsCascaded: violationsCascaded,
+    driveRenamed: driveRenamed,
+  });
+}
+
+// Internal: rename every row whose Name cell matches oldName. Returns
+// the count of cells rewritten. Single sheet read, per-row setValue
+// (Apps Script's setValue is cheap on a per-cell basis; the alternative
+// — a full-column batch setValues — would also work but requires
+// reading the whole column even when there are zero matches).
+function _cascadeRenameInSheet(sheet, oldName, newName) {
+  const snap = readWholeSheet(sheet);
+  const nameCol = snap.headerIndex("Name");
+  if (nameCol < 0) return 0;
+  let count = 0;
+  // snap.values is 0-indexed from the row AFTER the header.
+  for (let i = 0; i < snap.values.length; i++) {
+    if (String(snap.values[i][nameCol]) === oldName) {
+      // Sheet row index = i + 2 (header is row 1, first data row is row 2).
+      sheet.getRange(i + 2, nameCol + 1).setValue(newName);
+      count++;
+    }
+  }
+  return count;
 }
 
 // ============================================================

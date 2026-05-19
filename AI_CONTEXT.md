@@ -9,6 +9,27 @@
 > cadence, caching, or guardrails MUST update this file in the same change
 > set.
 >
+> **Last updated:** 2026-05-20 — Admin can now rename a runner
+> via a new `renameRunner` POST action, and `editRunnerProfile`
+> accepts an optional `email` field. The rename is a cascade
+> across Runners.Name (single cell), Results.Name (every
+> matching row), Violations.Name (every matching row — the only
+> place in the codebase that mutates Violations.Name; renaming
+> is conceptually distinct from deletion, which deliberately
+> preserves the audit trail), and the Drive folder
+> `RunnerFaces/<name>` (DriveApp `.setName(newName)` wrapped in
+> a try-catch per Guardrail 2 so Drive failure does not block
+> the sheet writes). All three caches are invalidated. Pre-
+> existing safeguards: reject if `oldName === newName` or if
+> `newName` already exists in Runners (avoids accidentally
+> merging two identities). `editRunnerProfile` now accepts
+> `email` alongside `bib`; both are independently optional —
+> the inline editor on the admin Runners tab posts whichever
+> field changed. Email is validated against the existing
+> `EMAIL_PATTERN`; empty string clears the cell. Email is
+> intentionally NOT propagated to Results — Results carries
+> only identity/verification cells.
+>
 > **Last updated:** 2026-05-20 — Violations sheet gains two
 > evidence columns: `PhotoFileId` (Drive file ID of the source
 > photo) and `DetectionBoxes` (JSON-stringified array of
@@ -1968,7 +1989,8 @@ All are idempotent.
 | `deleteViolationsBatch` | `{ token, ids: [V…] }` | Admin; up to 200 IDs |
 | `deleteRunner` | `{ token, name }` | Admin; trashes folder + clears Results |
 | `updateRunner` | (none — deprecated 2026-05-20) | **Deprecated**: returns `{status:"error", code:"deprecated", message:"updateRunner is no longer supported"}` for any call. The timing columns it used to edit no longer exist on the Results sheet (see §3.1). Function shell retained so the dispatcher still routes the action. |
-| `editRunnerProfile` | `{ token, name, bib? }` | Admin; edits BIB on the **Runners** sheet for the runner with the given Name. Cascades to `Results.BibNumber` if a Results row exists. Empty `bib` clears the value. Invalidates runners + results caches. Distinct from `updateRunner` (which targets time columns); see §6.2 2026-05-18 entry. |
+| `editRunnerProfile` | `{ token, name, bib?, email? }` | Admin; edits BIB and/or Email on the **Runners** sheet for the runner with the given Name. Both fields are independently optional (frontend posts whichever changed); supplying neither is a `bad_request`. BIB cascades to `Results.BibNumber` if a Results row exists. Empty string clears the corresponding cell. Email validated against `EMAIL_PATTERN` when non-empty; NOT propagated to Results. Invalidates runners cache (and results cache when BIB cascade happens). |
+| `renameRunner` | `{ token, oldName, newName }` | Admin; cascade-renames Runners.Name + every matching Results.Name + every matching Violations.Name + the `RunnerFaces/<oldName>` Drive folder (try-catch isolated per Guardrail 2). Rejects with `conflict` if `newName` already exists in Runners. Invalidates all three caches. NOT transactional across sheets — Apps Script crash mid-cascade leaves a partially renamed state; the next rename / manual edit reconciles. |
 
 All responses are
 `{ status: "success", … }` or `{ status: "error", code, message }`.
