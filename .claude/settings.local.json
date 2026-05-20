@@ -4,7 +4,9 @@
       "Bash(git rm *)",
       "Bash(gh pr *)",
       "PowerShell(gh pr *)",
-      "Bash(git fetch *)"
+      "Bash(git fetch *)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)"
     ]
   }
 }
