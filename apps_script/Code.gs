@@ -403,18 +403,35 @@ function readSheetAsJson(sheet) {
 
 // ─── DRIVE HELPERS ──────────────────────────────────────────
 // Single URL contract (v6): every Drive image URL written by this
-// backend uses the thumbnail form. The embed form
-// (drive.google.com/uc?export=view&id=…) used to coexist for runner
-// photos but was retired because <img src> requests bounce to a Google
-// login page under strict third-party cookie defaults — the image
-// opens fine in a new tab, but the cookie-less embed request fails.
-// The thumbnail endpoint serves a public bitmap with no cookie dance,
-// so it works for both runner-photo and violation-evidence consumers.
-// extractDriveFileId still recognizes legacy embed and viewer URLs
-// (id= query and /file/d/ path), so cleanup paths and the historical
-// migration cope with rows written by older deploys.
+// Public display URL for a Drive file ID. NAME IS HISTORICAL — as of
+// 2026-05-20 this emits the googleusercontent (lh3) form, NOT the old
+// drive.google.com/thumbnail form.
+//
+// URL-form history (all retired because <img src> hotlinking broke):
+//   • uc?export=view&id=…           — embed form. Broke under strict
+//                                     third-party cookie defaults
+//                                     (cookie-less request bounces to a
+//                                     Google login page).
+//   • drive.google.com/thumbnail?id=…&sz=w800 — thumbnail form. Worked
+//                                     2026-05-09 → 2026-05-19, then
+//                                     Google made the endpoint
+//                                     unreliable for hotlinked <img>
+//                                     (every dashboard image went
+//                                     Broken Image at once).
+//   • lh3.googleusercontent.com/d/<id>=w800 — CURRENT. The direct
+//                                     googleusercontent CDN; serves a
+//                                     public bitmap for an
+//                                     ANYONE_WITH_LINK file with no
+//                                     cookie dance and no redirect.
+//
+// Sharing requirement is unchanged: the file MUST be
+// ANYONE_WITH_LINK / VIEW for any of these forms to render. If lh3
+// also shows broken, the file's sharing is the problem, not the URL.
+// extractDriveFileId recognizes the lh3 /d/ form plus all legacy
+// forms, so delete paths + the migration cope with rows written by
+// older deploys.
 const DRIVE_THUMBNAIL_URL = function (id, size) {
-  return "https://drive.google.com/thumbnail?id=" + id + "&sz=w" + (size || 800);
+  return "https://lh3.googleusercontent.com/d/" + id + "=w" + (size || 800);
 };
 
 function getOrCreateFolder(parentFolder, name) {
@@ -524,16 +541,23 @@ function trashRunnerFolder(personName) {
 
 /**
  * Pull a Drive file ID out of any URL shape this codebase may have
- * written: the embed form (uc?export=view&id=…) used by v3+, or the
- * legacy viewer form (file/d/…/view) used before the migration.
+ * written:
+ *   • thumbnail / embed query form  — ?id=… or &id=…
+ *   • legacy viewer path            — /file/d/<id>/view
+ *   • lh3 display form (2026-05-20) — lh3.googleusercontent.com/d/<id>=w800
  */
 function extractDriveFileId(url) {
   if (!url) return null;
   const s = String(url);
   const fromQuery = s.match(/[?&]id=([-\w]{25,})/);
   if (fromQuery) return fromQuery[1];
-  const fromPath = s.match(/\/file\/d\/([-\w]{25,})/);
-  return fromPath ? fromPath[1] : null;
+  const fromFilePath = s.match(/\/file\/d\/([-\w]{25,})/);
+  if (fromFilePath) return fromFilePath[1];
+  // lh3.googleusercontent.com/d/<id>=w800 — the trailing "=w800" is
+  // outside [-\w] so the capture stops at the file ID. Also matches a
+  // bare /d/<id> with no size suffix.
+  const fromLh3 = s.match(/\/d\/([-\w]{25,})/);
+  return fromLh3 ? fromLh3[1] : null;
 }
 
 /** Move a Drive file to Trash by its ID, swallowing not-found errors. */
@@ -1985,4 +2009,80 @@ function _migrateViolationsPhotoColumns() {
   }
   if (added) invalidateViolations();
   Logger.log("[_migrateViolationsPhotoColumns] added " + added + ", already present " + alreadyPresent);
+}
+
+/**
+ * One-shot image-URL migration to the lh3 googleusercontent form
+ * (2026-05-20). Rewrites every Drive image URL on the spreadsheet —
+ * Runners.Photo_Front … Photo_Right and Violations.ImageUrl — from any
+ * legacy shape (drive.google.com/thumbnail, uc?export=view embed,
+ * /file/d/ viewer) to https://lh3.googleusercontent.com/d/<id>=w800.
+ *
+ * Why: the drive.google.com/thumbnail endpoint stopped serving
+ * hotlinked <img> requests (every dashboard image went Broken Image at
+ * once). lh3.googleusercontent.com/d/<id> is the direct CDN form and
+ * renders public (ANYONE_WITH_LINK) files reliably.
+ *
+ * Run ONCE from the Apps Script editor function dropdown after deploy.
+ * Idempotent on three axes:
+ *   • Cells already in the lh3 form are skipped.
+ *   • Empty cells are skipped.
+ *   • Cells with no extractable file ID are left untouched + counted.
+ *
+ * The Drive files are never moved; only the URL string in the sheet
+ * changes. Sharing (ANYONE_WITH_LINK / VIEW) must already be correct —
+ * this migration does not touch sharing. Modeled on
+ * _migrateHistoricalImages (single batched read + write per sheet).
+ */
+function _migrateImagesToLh3() {
+  const targets = [
+    { sheet: SHEETS.VIOLATIONS, cols: ["ImageUrl"], invalidate: invalidateViolations },
+    { sheet: SHEETS.RUNNERS, cols: ["Photo_Front", "Photo_Top", "Photo_Bottom", "Photo_Left", "Photo_Right"], invalidate: invalidateRunners },
+  ];
+  const LH3_PREFIX = "https://lh3.googleusercontent.com/d/";
+  let total = 0, skipped = 0, unparsed = 0;
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  for (let t = 0; t < targets.length; t++) {
+    const target = targets[t];
+    const sheet = ss.getSheetByName(target.sheet);
+    if (!sheet) { Logger.log("[_migrateImagesToLh3] " + target.sheet + " not found, skipping"); continue; }
+    try {
+      const data = sheet.getDataRange().getValues();
+      if (data.length <= 1) continue;
+      const headers = data[0];
+      const colIdx = target.cols
+        .map(function (c) { return headers.indexOf(c); })
+        .filter(function (i) { return i >= 0; });
+      if (!colIdx.length) continue;
+
+      let changed = 0, alreadyOk = 0, noId = 0;
+      for (let r = 1; r < data.length; r++) {
+        for (let k = 0; k < colIdx.length; k++) {
+          const c = colIdx[k];
+          const url = String(data[r][c] || "");
+          if (!url) continue;
+          if (url.indexOf(LH3_PREFIX) === 0) { alreadyOk++; continue; }
+          const fileId = extractDriveFileId(url);
+          if (fileId) {
+            data[r][c] = DRIVE_THUMBNAIL_URL(fileId, 800);
+            changed++;
+          } else {
+            noId++;
+          }
+        }
+      }
+      if (changed) {
+        sheet.getRange(2, 1, data.length - 1, headers.length).setValues(data.slice(1));
+        target.invalidate();
+        total += changed;
+      }
+      skipped += alreadyOk;
+      unparsed += noId;
+      Logger.log("[_migrateImagesToLh3][" + target.sheet + "] rewrote " + changed +
+                 ", already lh3 " + alreadyOk + ", unparseable " + noId);
+    } catch (err) {
+      logErr("_migrateImagesToLh3[" + target.sheet + "]", err);
+    }
+  }
+  Logger.log("[_migrateImagesToLh3] TOTAL rewrote " + total + ", already lh3 " + skipped + ", unparseable " + unparsed);
 }

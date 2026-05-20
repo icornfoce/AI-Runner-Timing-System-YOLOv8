@@ -9,6 +9,30 @@
 > cadence, caching, or guardrails MUST update this file in the same change
 > set.
 >
+> **Last updated:** 2026-05-20 — **Drive image URL contract
+> switched from the `drive.google.com/thumbnail` form to the
+> `lh3.googleusercontent.com/d/<id>=w800` form.** Google made
+> the thumbnail endpoint unreliable for hotlinked `<img>`
+> requests and every Drive image on the dashboard went Broken
+> Image at once (runner photos, alert cards, and the Violations
+> table image column — all of which render the stored URL in an
+> `<img src>`). `DRIVE_THUMBNAIL_URL(id, size)` now emits
+> `https://lh3.googleusercontent.com/d/<id>=w<size>` — the name
+> is kept (historical) to avoid churn across call sites and the
+> changelog, but it no longer produces a thumbnail URL.
+> `extractDriveFileId` gained a third pattern (`/d/<id>`) so
+> delete paths + migrations recognize the lh3 form alongside the
+> legacy `?id=` query and `/file/d/` viewer forms. New one-shot
+> helper `_migrateImagesToLh3()` rewrites every existing
+> `Runners.Photo_*` + `Violations.ImageUrl` cell to the lh3 form
+> (idempotent; skips cells already in lh3 form; run once from the
+> Apps Script editor after deploy). The sharing requirement is
+> unchanged — files must still be ANYONE_WITH_LINK / VIEW; if an
+> lh3 URL also renders broken, the file's sharing is the problem,
+> not the URL form. Guardrail 11 updated to pin the lh3 form. The
+> scanner's canvas path is unaffected — it uses `getImageBytes`
+> (Guardrail 28), never a display URL.
+>
 > **Last updated:** 2026-05-20 — Admin Violations tab gains a
 > row-click evidence modal. Click anywhere on a violation row
 > (outside the checkbox / Verify / Delete buttons) and a modal
@@ -551,14 +575,21 @@ My Drive/
 - Folder creation is wrapped in a **`LockService` lock** to prevent
   duplicates from concurrent registrations / concurrent saves on the
   same date subfolder.
-- **Single URL contract (v6+)**: every Drive image URL written by
-  this backend uses the thumbnail form,
-  `https://drive.google.com/thumbnail?id=<id>&sz=w800`. Both
+- **Single URL contract (2026-05-20+)**: every Drive image URL
+  written by this backend uses the **lh3 googleusercontent form**,
+  `https://lh3.googleusercontent.com/d/<id>=w800`. Both
   `Runners.Photo_*` and `Violations.ImageUrl` follow this contract.
-  The embed form (`uc?export=view`) was retired because cookie-less
-  `<img src>` requests bounce to a Google login page under strict
-  third-party cookie defaults; thumbnail serves a public bitmap with
-  no cookie dance and works for every consumer.
+  History of retired forms:
+  - The **embed form** (`uc?export=view&id=…`) was retired because
+    cookie-less `<img src>` requests bounce to a Google login page
+    under strict third-party cookie defaults.
+  - The **thumbnail form** (`drive.google.com/thumbnail?id=…&sz=w800`)
+    replaced embed on 2026-05-09 but was itself retired 2026-05-20
+    when Google made that endpoint unreliable for hotlinked `<img>`
+    (every dashboard image broke at once).
+  The lh3 CDN form serves a public bitmap for an ANYONE_WITH_LINK
+  file with no cookie dance and no redirect. The helper that emits
+  it is still named `DRIVE_THUMBNAIL_URL` (historical name).
 - Legacy rows (pre-v6) carry the embed form or the older
   `/file/d/<id>/view` viewer form. Run `_migrateHistoricalImages()`
   (see §6.6) once after deploying v6 to rewrite them to thumbnail.
@@ -1210,19 +1241,25 @@ explicit, justified, and accompanied by an update to this file.
     The schema setup forces `setNumberFormat("@")` on first creation —
     do not remove this. If Sheets converts `13:01` to a Date, the
     leaderboard breaks.
-11. **`ANYONE_WITH_LINK / VIEW` sharing + thumbnail URL form are
-    both load-bearing.** The dashboard renders Drive images in
+11. **`ANYONE_WITH_LINK / VIEW` sharing + lh3 URL form are both
+    load-bearing.** The dashboard renders Drive images in
     `<img src>` from any browser. Without public sharing the URLs
     return 401 (or worse, redirect to a login page) and the alerts
     show broken images; restricting sharing requires re-architecting
-    image delivery (e.g. base64-inline or a proxy endpoint). And
-    even with sharing correct, the embed form (`uc?export=view`)
-    breaks `<img src>` under strict third-party cookie defaults —
-    the cookie-less request bounces to a Google login page. v6
-    standardized every URL on the thumbnail form
-    (`drive.google.com/thumbnail?id=…&sz=w800`) for both
-    `Runners.Photo_*` and `Violations.ImageUrl`. Don't reintroduce
-    the embed form, and don't drop the public sharing.
+    image delivery (e.g. base64-inline or a proxy endpoint). The URL
+    form has been retired twice for `<img src>` incompatibility:
+    the embed form (`uc?export=view`) bounced cookie-less requests
+    to a Google login page under strict third-party cookie defaults;
+    the thumbnail form (`drive.google.com/thumbnail?id=…&sz=w800`)
+    was made unreliable by Google on 2026-05-20 (every dashboard
+    image broke at once). The current contract (2026-05-20+) is the
+    **lh3 googleusercontent form**,
+    `https://lh3.googleusercontent.com/d/<id>=w800`, for both
+    `Runners.Photo_*` and `Violations.ImageUrl` — emitted by
+    `DRIVE_THUMBNAIL_URL` (historical name). Don't reintroduce the
+    embed or thumbnail forms, and don't drop the public sharing. The
+    scanner's canvas inference path does NOT use any of these display
+    URLs — it fetches raw bytes via `getImageBytes` (Guardrail 28).
 12. **Violation ID format is `V<unix-ms>`.** `ID_PATTERN = /^V\d{10,}$/`
     enforces it on writes. Do not change this format without writing a
     migration helper similar to `_migrateViolationTypeColumn`.
@@ -2102,6 +2139,7 @@ All are idempotent.
 | `_migrateViolationTypeColumn()` | Adds the `ViolationType` column and back-fills `WRONG_PERSON` | Once after deploying v5 |
 | `_migrateResultsSchema()` | Strips the 7 retired timing columns (`Start_Time`, `CP1-4_Time`, `Finish_Time`, `Total_Duration`) from the Results sheet and appends `IsCheating` with blank defaults. Idempotent. | Once after deploying the 2026-05-20 schema strip |
 | `_migrateViolationsPhotoColumns()` | Appends `PhotoFileId` and `DetectionBoxes` to the Violations sheet (existing rows get blank cells). Idempotent. | Once after deploying the 2026-05-20 evidence pass |
+| `_migrateImagesToLh3()` | Rewrites every `Runners.Photo_*` + `Violations.ImageUrl` cell from any legacy form (thumbnail / embed / viewer) to the lh3 form `lh3.googleusercontent.com/d/<id>=w800`. Idempotent. | Once after deploying the 2026-05-20 lh3 URL switch (fixes Broken Image on the dashboard) |
 
 ### 6.7 Endpoints reference
 
