@@ -1200,6 +1200,46 @@ is same-origin by definition and never taints the canvas. The
 thumbnail URL stays in the v6 contract for display-only consumers
 (dashboard, future preview features).
 
+**BIB OCR pipeline — the 6-layer stack (canonical reference).** Reading
+a BIB off a static event photo took six stacked layers, each fixing a
+failure the previous one exposed (the full debugging chain is in the
+2026-05-20 "Last updated" entries). This is the authoritative summary;
+the same list lives in a comment block above `runOCRForFace`. **Do not
+remove a layer without re-checking the failure it fixed** — every one
+is load-bearing:
+
+1. **Tight crop** (`getOCRCropBox`, Guardrail 24/27): chest-only window
+   `by = box.y + 1.1·faceH`, `bh = 2.2·faceH`, `bx = box.x − 0.7·faceH`,
+   `bw = box.width + 1.4·faceH`. Chops off neck/chin/wrinkles that PSM 11
+   turned into hallucinated digit noise.
+2. **Small-crop pre-upscale** (`preprocessForOCR`, Guardrail 19): crops
+   with long edge < `OCR_PRE_UPSCALE_TARGET` (360px) are bilinear-
+   upscaled BEFORE thresholding so far-away BIB strokes separate instead
+   of bleeding into blobs. Threshold still outputs pure B/W (no gray to
+   Tesseract).
+3. **Multi-PSM fallback** (`OCR_PSM_ATTEMPTS = ['6','7']`, Guardrail 20):
+   PSM 6 (uniform block) reads large faces; PSM 7 (single line) reads
+   small upscaled digit rows PSM 6 fragments. `runOCRForFace` tries 6,
+   falls back to 7 only on no-candidate; first valid BIB wins.
+4. **Word-level extraction** (`buildBibCandidates`, Guardrail 26):
+   per-WORD digits/length/confidence, not the document average (which
+   noise words tank to single digits).
+5. **Zero-conf resilience** (Guardrail 20): a per-word `conf === 0` is
+   the Tesseract.js LSTM+whitelist "perfect read scored 0" quirk —
+   treated as "unscored" and admitted on the face-match + whitelist +
+   length gates. A LOW NONZERO conf is still rejected.
+6. **Size floor** (`MIN_OCR_FACE_SIZE = 60`, `handleKnownFace`): a face
+   below the floor that reads empty is skipped silently — the BIB is
+   unreadable at that resolution, not absent, so NO false `NO_BIB`
+   fires. (A successful small-face read still identifies.)
+
+Net behavior by face size: large faces identify on PSM 6 single-pass;
+mid/small faces get the pre-upscale + PSM 7 retry; deep-background
+faces (<60px) degrade gracefully to a silent skip. The `?debug=1`
+crop-dump panel (permanent) shows raw crop / thresholded crop /
+per-word reads / PSM per face — it is the tool that diagnosed every
+layer above.
+
 **Why SSD MobileNet, not TinyFaceDetector.** Static event photos are
 usually 4K+ resolution with multiple runners across the frame; SSD
 produces tighter, higher-recall boxes than Tiny on that target. The

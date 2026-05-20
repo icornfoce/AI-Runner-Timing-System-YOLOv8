@@ -419,22 +419,12 @@ async function init(){
   if (labeled.length > 0) faceMatcher = new faceapi.FaceMatcher(labeled, FACE_MATCH_DISTANCE);
   markStep("step-runners", "done");
 
-  // 3) Init Tesseract — digits-only whitelist. PSM is no longer fixed
-  // here: `runOCRForFace` drives it PER PASS via the multi-PSM
-  // fallback (OCR_PSM_ATTEMPTS = ['6','7']) — this init value is just
-  // the starting state. The PSM odyssey (Guardrail 20), all 2026-05-20:
-  //   • PSM 7 ("single line") — empty reads on the old TALL crop.
-  //   • PSM 11 ("sparse text") — hallucinated chin/wrinkle noise; a
-  //     clean 4532 came back "14532" @ 0.
-  //   • PSM 6 ("uniform block") + the tightened crop reads large-face
-  //     BIBs ("4532"), but its confidence is the Tesseract.js LSTM +
-  //     digit-whitelist 0 quirk (handled by the conf===0 resilience in
-  //     buildBibCandidates), AND it fragments SMALL upscaled crops into
-  //     a single digit ("2@10").
-  //   • PSM 7 reads those clean small-face digit rows better.
-  // Net: no single PSM fits both layouts, so we try 6 then 7 and take
-  // the first valid BIB. Whitelist unchanged (digits only).
-  // checkpoint.html keeps a single PSM 7 (unrouted, untestable).
+  // 3) Init Tesseract — digits-only whitelist. PSM is NOT fixed here:
+  // runOCRForFace drives it per-pass via the multi-PSM fallback
+  // (OCR_PSM_ATTEMPTS). This init value is just the starting state.
+  // See the "BIB OCR PIPELINE" block above runOCRForFace + Guardrail 20
+  // for why each OCR layer exists. Don't change the whitelist or the
+  // PSM list without re-deriving the BIB length / confidence gates.
   markStep("step-ocr", "loading");
   try {
    tesseractWorker = await Tesseract.createWorker("eng");
@@ -1114,12 +1104,38 @@ async function handleKnownFace(canvas, hit, photo, detectionBoxes){
  }
 }
 
-// ── OCR ─────────────────────────────────────────────────────
-// Single-pass OCR for the chest crop below a detected face. Returns
-// { bib, conf, multipleBibsBlocks } or null on validation-gate fail.
-// Uses the SAME getOCRCropBox geometry + preprocessForOCR pipeline as
-// checkpoint.html (Guardrail 19 + 24) — diverging would mean two
-// places to keep in sync.
+// ════════════════════════════════════════════════════════════
+// BIB OCR PIPELINE (final architecture — see AI_CONTEXT Guardrail 20)
+// ════════════════════════════════════════════════════════════
+// Six layers, each solving a failure the previous one exposed. Do not
+// remove a layer without re-checking the failure it fixed:
+//
+//   1. TIGHT CROP       getOCRCropBox: chest-only window
+//                       (by = 1.1·faceH, bh = 2.2·faceH). Chops off
+//                       the neck/chin/wrinkles that produced hallucinated
+//                       digit noise. Guardrail 24/27.
+//   2. SMALL-CROP       preprocessForOCR: crops with long edge < 360px
+//      PRE-UPSCALE      are bilinear-upscaled BEFORE thresholding so a
+//                       far-away BIB's strokes separate instead of
+//                       bleeding into blobs. Guardrail 19.
+//   3. PSM 6 → 7        Multi-PSM fallback (OCR_PSM_ATTEMPTS). PSM 6
+//      FALLBACK         (uniform block) reads large faces; PSM 7
+//                       (single line) reads small upscaled digit rows
+//                       that 6 fragments. First valid BIB wins.
+//   4. WORD-LEVEL       buildBibCandidates: evaluate each WORD's own
+//      EXTRACTION       digits/length/confidence, not the document
+//                       average (which noise tanks). Guardrail 26.
+//   5. ZERO-CONF        conf === 0 is the Tesseract.js LSTM+whitelist
+//      RESILIENCE       "perfect read scored 0" quirk → treated as
+//                       "unscored" and admitted on the face-match +
+//                       whitelist + length gates. Guardrail 20.
+//   6. SIZE FLOOR       handleKnownFace: a face below MIN_OCR_FACE_SIZE
+//                       (60px) that reads empty is skipped silently —
+//                       the BIB is unreadable at that resolution, not
+//                       absent, so NO false NO_BIB fires.
+//
+// runOCRForFace owns layers 2-5; getOCRCropBox owns 1; handleKnownFace
+// owns 6. Returns { bib, conf } | { multipleBibsBlocks } | null.
 async function runOCRForFace(srcCanvas, box){
  if (!ocrReady || !tesseractWorker) return null;
  const { bx, by, bw, bh } = getOCRCropBox(box, srcCanvas);
@@ -1228,12 +1244,14 @@ function extractOcrWords(data){
 }
 
 // ── OCR DEBUG CROP DUMP (?debug=1 only) ──────────────────────
-// Appends the raw chest crop + the thresholded crop Tesseract saw
-// to a fixed bottom-right panel, with the read result. Lets the
-// operator see, per face: (a) did the crop even contain the BIB
-// (geometry), and (b) is the BIB legible after preprocessing
-// (recognition). Capped at 24 most-recent entries. No-op unless
-// DEBUG, so zero production cost.
+// PERMANENT diagnostic (kept by operator decision 2026-05-20 — this
+// panel is what cracked the whole OCR pipeline). Appends, per face +
+// per PSM pass: the raw chest crop, the thresholded crop Tesseract
+// saw, the per-word breakdown (`text@conf`), the picked BIB, and the
+// PSM used. Lets the operator distinguish geometry misses (BIB not in
+// the raw crop), preprocessing failures (blobs in the thresholded
+// crop), and recognition failures (clean crop but bad read). Capped
+// at 24 entries. No-op unless DEBUG, so zero production cost.
 function dumpOcrCrop(rawCanvas, processedCanvas, rawText, docConf, box, words, candidates, psm){
  let panel = document.getElementById("ocr-debug-panel");
  if (!panel){
