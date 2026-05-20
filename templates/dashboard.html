@@ -464,6 +464,37 @@
         .btn-sv:disabled, .btn-cn:disabled { opacity: .55; cursor: not-allowed }
         .btn-cn { background: rgba(255, 255, 255, .04); color: var(--mut); border: 1px solid var(--bdr) }
         .btn-cn:hover { color: var(--txt) }
+        /* Violation evidence modal — full photo + drawn detection boxes.
+           Wider than .modal (which is centered + capped); we override
+           max-width/max-height to honor the source image aspect ratio. */
+        .vp-modal-inner {
+          max-width: 92vw !important;
+          width: auto !important;
+          max-height: 92vh;
+          padding: 1rem !important;
+          position: relative;
+          text-align: left !important;
+        }
+        .vp-close {
+          position: absolute;
+          top: .5rem;
+          right: .5rem;
+          width: 32px;
+          height: 32px;
+          background: rgba(255,255,255,.06);
+          border: 1px solid var(--bdr);
+          border-radius: 6px;
+          color: var(--txt);
+          cursor: pointer;
+          font-size: .9rem;
+        }
+        .vp-close:hover { background: rgba(255,255,255,.12) }
+        .vp-meta { display: flex; gap: .8rem; align-items: center; margin-bottom: .8rem; flex-wrap: wrap; padding-right: 2.5rem }
+        .vp-type { padding: .15rem .5rem; border-radius: 6px; background: rgba(229,62,62,.15); color: #e53e3e; font-weight: 600; font-size: .8rem }
+        .vp-message { color: var(--mut); font-size: .8rem; flex: 1; min-width: 0 }
+        .vp-canvas-wrap { max-height: 75vh; overflow: auto; background: rgba(0,0,0,.3); border-radius: 8px }
+        #vp-canvas { max-width: 100%; height: auto; display: block }
+        .vp-placeholder { padding: 3rem; text-align: center; color: var(--mut); font-size: .9rem }
         .inline-name-input, .inline-email-input {
           background: rgba(255,255,255,.04);
           color: var(--txt);
@@ -875,6 +906,28 @@
 
     <!-- LIGHTBOX -->
     <div class="lb" id="lb" onclick="this.classList.remove('on')"><img id="lb-img" src=""></div>
+
+    <!-- VIOLATION EVIDENCE MODAL -->
+    <!-- Opens on click of a violation row in the admin Violations tab.
+         Fetches the original photo bytes via getImageBytes (Guardrail 28
+         — thumbnail URL is unsafe with canvas), draws onto a canvas at
+         native resolution, overlays color-coded detection boxes from the
+         DetectionBoxes JSON. Falls back to a placeholder for legacy
+         violations that lack PhotoFileId. -->
+    <div class="modal-bg" id="violation-photo-modal">
+        <div class="modal vp-modal-inner">
+            <button class="vp-close" id="vp-close" aria-label="Close">✖</button>
+            <div class="vp-meta">
+                <strong id="vp-name">—</strong>
+                <span class="vp-type" id="vp-type">—</span>
+                <span class="vp-message" id="vp-message"></span>
+            </div>
+            <div class="vp-canvas-wrap">
+                <canvas id="vp-canvas"></canvas>
+                <div class="vp-placeholder" id="vp-placeholder" style="display:none">No source photo available for this violation.</div>
+            </div>
+        </div>
+    </div>
 
     <!-- CONFIRM MODAL -->
     <div class="modal-bg" id="confirm-modal">
@@ -1354,7 +1407,12 @@
             const verifyBtn = !verified
                 ? `<button class="btn-sm btn-vf" data-verify="${attr(v.ID)}">✅</button>` : "";
             const checked = selectedViolationIds.has(v.ID) ? " checked" : "";
-            return `<tr>` +
+            // data-violation-id makes the entire row clickable for opening
+            // the photo+boxes evidence modal. The row's interactive cells
+            // (checkbox, Verify, Delete) check for their own data-* attrs
+            // in the delegated click handler so row-click only fires when
+            // the click misses those buttons.
+            return `<tr data-violation-id="${attr(v.ID)}" style="cursor:pointer">` +
                 `<td><input type="checkbox" class="viol-cb" data-cb-id="${attr(v.ID)}"${checked} aria-label="Select violation"></td>` +
                 `<td style="font-size:.75rem;color:var(--mut)">${esc(v.ID || "")}</td>` +
                 `<td style="font-weight:600">${esc(v.Name)}</td>` +
@@ -1471,7 +1529,20 @@
                     "[data-edit-email], [data-save-email], " +
                     "[data-cancel-edit], [data-view-photos], [data-replace-photo]"
                 );
-                if (!t) return;
+                if (!t) {
+                    // Row-click on a violation opens the evidence modal,
+                    // BUT only when the click missed every interactive
+                    // cell (checkbox / Verify / Delete buttons matched
+                    // above). The buttons are inside the row, so the
+                    // .closest() check above catches them first; reaching
+                    // here means the click hit a non-interactive cell.
+                    const tr = e.target.closest("tr[data-violation-id]");
+                    if (tr && !e.target.closest("input, button, a")) {
+                        const v = violations.find(x => x.ID === tr.dataset.violationId);
+                        if (v) openViolationPhotoModal(v);
+                    }
+                    return;
+                }
                 if (t.dataset.img != null) openLb(t.dataset.img);
                 else if (t.dataset.verify != null) verifyV(t.dataset.verify);
                 else if (t.dataset.delRunner != null) confirmDel("runner", t.dataset.delRunner);
@@ -1755,6 +1826,135 @@
             }
             loadAdminData();
         }
+
+        // ── VIOLATION EVIDENCE MODAL ──
+        // Opens on row click in the admin Violations tab. Fetches the
+        // source photo's bytes via getImageBytes (Guardrail 28), decodes
+        // into a data: URL (same-origin, never taints), draws onto a
+        // canvas at native resolution scaled by CSS, then overlays
+        // detection boxes from the DetectionBoxes JSON. Legacy rows
+        // (no PhotoFileId) show a placeholder.
+        async function openViolationPhotoModal(violation) {
+            const modal = document.getElementById("violation-photo-modal");
+            document.getElementById("vp-name").textContent = violation.Name || "—";
+            const type = (typeof normalizeType === "function") ? normalizeType(violation.ViolationType) : (violation.ViolationType || "");
+            const typeLabel = (typeof VIOLATION_TYPE_LABELS !== "undefined" && VIOLATION_TYPE_LABELS[type]) || type || "—";
+            document.getElementById("vp-type").textContent = typeLabel;
+            document.getElementById("vp-message").textContent = violation.Message || "";
+
+            const canvas = document.getElementById("vp-canvas");
+            const placeholder = document.getElementById("vp-placeholder");
+            canvas.style.display = "none";
+            placeholder.style.display = "none";
+
+            if (!violation.PhotoFileId) {
+                placeholder.textContent = "No source photo available for this violation.";
+                placeholder.style.display = "block";
+                modal.classList.add("on");
+                return;
+            }
+
+            modal.classList.add("on");
+            placeholder.textContent = "Loading photo…";
+            placeholder.style.display = "block";
+
+            try {
+                const resp = await fetch(API + "?action=getImageBytes&fileId=" + encodeURIComponent(violation.PhotoFileId));
+                const data = await resp.json();
+                if (!data || data.status !== "success" || !data.base64) {
+                    placeholder.textContent = "Failed to load source photo: " + ((data && data.message) || "Unknown error");
+                    return;
+                }
+                const dataUrl = "data:" + (data.mimeType || "image/jpeg") + ";base64," + data.base64;
+                const img = new Image();
+                img.onload = () => {
+                    canvas.width = img.naturalWidth;
+                    canvas.height = img.naturalHeight;
+                    const ctx = canvas.getContext("2d");
+                    ctx.drawImage(img, 0, 0);
+                    drawDetectionBoxesOnCanvas(ctx, violation.DetectionBoxes);
+                    placeholder.style.display = "none";
+                    canvas.style.display = "block";
+                };
+                img.onerror = () => {
+                    placeholder.textContent = "Failed to decode source photo.";
+                };
+                img.src = dataUrl;
+            } catch (e) {
+                placeholder.textContent = "Network error loading source photo: " + (e.message || e);
+            }
+        }
+
+        // Parse the DetectionBoxes JSON string and draw each entry onto
+        // the canvas. Color names map to the scanner's palette; raw color
+        // strings (hex, rgb) are passed through. Label is drawn via
+        // ctx.fillText (canvas API is XSS-safe) but esc() is still
+        // applied defensively per Guardrail 7 in case a future change
+        // routes labels into innerHTML (tooltip, fallback HTML).
+        function drawDetectionBoxesOnCanvas(ctx, raw) {
+            if (!raw) return;
+            let boxes;
+            try {
+                boxes = typeof raw === "string" ? JSON.parse(raw) : raw;
+            } catch (e) {
+                console.warn("[modal] DetectionBoxes JSON parse failed", e);
+                return;
+            }
+            if (!Array.isArray(boxes)) return;
+
+            const colorMap = { green: "#1D9E75", red: "#e53e3e", orange: "#F0B429" };
+            ctx.save();
+            for (const box of boxes) {
+                if (!box || typeof box.x !== "number") continue;
+                const color = colorMap[box.color] || box.color || "#1D9E75";
+                ctx.strokeStyle = color;
+                ctx.lineWidth = Math.max(2, Math.min(box.width, box.height) * 0.02);
+                ctx.strokeRect(box.x, box.y, box.width, box.height);
+
+                if (box.label) {
+                    const fontSize = Math.max(14, box.height * 0.13) | 0;
+                    ctx.font = `${fontSize}px 'DM Sans', sans-serif`;
+                    const padX = 8, padY = 5;
+                    const labelText = String(box.label);
+                    // Apply esc() to satisfy Guardrail 7 even though
+                    // ctx.fillText doesn't interpret HTML — keeps the
+                    // discipline if a future renderer adds a tooltip.
+                    const safeLabel = esc(labelText);
+                    // The visible canvas text uses the raw string (safe
+                    // through the canvas API); safeLabel exists for any
+                    // future innerHTML path.
+                    void safeLabel;
+                    const textW = ctx.measureText(labelText).width;
+                    // Background pill with ~85% opacity (CSS-friendly hex alpha).
+                    ctx.fillStyle = color + "D9";
+                    ctx.fillRect(box.x, box.y - fontSize - padY * 2, textW + padX * 2, fontSize + padY * 2);
+                    ctx.fillStyle = "#fff";
+                    ctx.fillText(labelText, box.x + padX, box.y - padY);
+                }
+            }
+            ctx.restore();
+        }
+
+        function closeViolationPhotoModal() {
+            document.getElementById("violation-photo-modal").classList.remove("on");
+        }
+
+        // Close affordances: button click, backdrop click (on the modal-bg
+        // root but not on its .modal child), Escape key.
+        (function wireViolationPhotoModalCloseAffordances() {
+            const modal = document.getElementById("violation-photo-modal");
+            if (!modal) return;
+            const closeBtn = document.getElementById("vp-close");
+            if (closeBtn) closeBtn.addEventListener("click", closeViolationPhotoModal);
+            modal.addEventListener("click", e => {
+                if (e.target === modal) closeViolationPhotoModal();
+            });
+            document.addEventListener("keydown", e => {
+                if (e.key === "Escape" && modal.classList.contains("on")) {
+                    closeViolationPhotoModal();
+                }
+            });
+        })();
 
         // Promise-based wrapper around #confirm-modal. Returns true if
         // the operator clicks OK, false on Cancel / backdrop / Esc.

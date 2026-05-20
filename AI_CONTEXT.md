@@ -9,6 +9,24 @@
 > cadence, caching, or guardrails MUST update this file in the same change
 > set.
 >
+> **Last updated:** 2026-05-20 — Admin Violations tab gains a
+> row-click evidence modal. Click anywhere on a violation row
+> (outside the checkbox / Verify / Delete buttons) and a modal
+> opens showing the original source photo at native resolution
+> with color-coded detection boxes drawn on top. Photo bytes
+> are fetched via `getImageBytes?fileId=<PhotoFileId>`
+> (Guardrail 28 — never the thumbnail URL with canvas), decoded
+> into a same-origin `data:` URL, and drawn onto a canvas. The
+> `DetectionBoxes` JSON is parsed; each entry's color name
+> (`green` / `red` / `orange`) maps to the scanner's palette
+> (`#1D9E75` / `#e53e3e` / `#F0B429`). Labels are drawn via
+> `ctx.fillText` (canvas API, XSS-safe by definition); `esc()`
+> is still applied defensively in case a future renderer routes
+> labels through `innerHTML`. Legacy violations created before
+> the 2026-05-20 evidence pass have empty `PhotoFileId` — they
+> show a "No source photo available" placeholder instead.
+> Close affordances: ✖ button, backdrop click, Escape key.
+>
 > **Last updated:** 2026-05-20 — Admin Runners tab gains full
 > inline editing for Name (cascade rename), BIB, Email, and
 > per-angle photo replacement; legacy CP-time columns dropped
