@@ -159,6 +159,10 @@ const OCR_UPSCALE = 2;                      // nearest-neighbor; preserves binar
 // in live mode (webcam faces are usually large), but kept in lockstep.
 const OCR_PRE_UPSCALE_TARGET = 360;        // px target long-edge before threshold
 const OCR_PRE_UPSCALE_MAX = 4;             // cap on the pre-threshold factor
+// CLAHE local contrast — mirrored from photo_scanner.html (Guardrail
+// 19 + 27, 2026-05-21). Lifts faded digit strokes before thresholding.
+const CLAHE_TILES = 8;
+const CLAHE_CLIP_LIMIT = 3.0;
 
 // FIELD-TEST: relaxed for indoor lighting + short BIBs.
 // Revert to 70 / 2 / 5 once real-world setups are validated. The
@@ -348,9 +352,69 @@ function smoothBox(name, raw){
  return prev;
 }
 
+// CLAHE local contrast — mirror of photo_scanner.html (Guardrail
+// 19 + 27, 2026-05-21). Tile-based contrast-limited histogram
+// equalization, bilinearly blended between tiles. Lifts faded digit
+// strokes before thresholding; output is grayscale (re-binarized by
+// the threshold, so no gray reaches Tesseract).
+function enhanceContrastCLAHE(gray, w, h){
+ const T = CLAHE_TILES;
+ const tw = Math.max(1, Math.floor(w / T));
+ const th = Math.max(1, Math.floor(h / T));
+ const nx = Math.ceil(w / tw), ny = Math.ceil(h / th);
+ const maps = new Array(nx * ny);
+ for (let ty = 0; ty < ny; ty++){
+  for (let tx = 0; tx < nx; tx++){
+   const x0 = tx * tw, y0 = ty * th;
+   const x1 = Math.min(w, x0 + tw), y1 = Math.min(h, y0 + th);
+   const hist = new Uint32Array(256);
+   let count = 0;
+   for (let y = y0; y < y1; y++){
+    const row = y * w;
+    for (let x = x0; x < x1; x++){ hist[gray[row + x]]++; count++; }
+   }
+   if (count === 0){ maps[ty * nx + tx] = null; continue; }
+   const clip = Math.max(1, Math.floor(CLAHE_CLIP_LIMIT * count / 256));
+   let excess = 0;
+   for (let i = 0; i < 256; i++){ if (hist[i] > clip){ excess += hist[i] - clip; hist[i] = clip; } }
+   const inc = Math.floor(excess / 256);
+   let rem = excess - inc * 256;
+   for (let i = 0; i < 256; i++){ hist[i] += inc; if (rem > 0){ hist[i]++; rem--; } }
+   const lut = new Uint8ClampedArray(256);
+   let cdf = 0;
+   for (let i = 0; i < 256; i++){ cdf += hist[i]; lut[i] = Math.round((cdf / count) * 255); }
+   maps[ty * nx + tx] = lut;
+  }
+ }
+ const out = new Uint8ClampedArray(w * h);
+ for (let y = 0; y < h; y++){
+  const fy = (y + 0.5) / th - 0.5;
+  let ty0 = Math.floor(fy); let wy = fy - ty0; let ty1 = ty0 + 1;
+  if (ty0 < 0){ ty0 = 0; ty1 = 0; wy = 0; }
+  if (ty1 > ny - 1){ ty1 = ny - 1; if (ty0 > ny - 1) ty0 = ny - 1; }
+  for (let x = 0; x < w; x++){
+   const v = gray[y * w + x];
+   const fx = (x + 0.5) / tw - 0.5;
+   let tx0 = Math.floor(fx); let wx = fx - tx0; let tx1 = tx0 + 1;
+   if (tx0 < 0){ tx0 = 0; tx1 = 0; wx = 0; }
+   if (tx1 > nx - 1){ tx1 = nx - 1; if (tx0 > nx - 1) tx0 = nx - 1; }
+   const m00 = maps[ty0 * nx + tx0], m01 = maps[ty0 * nx + tx1];
+   const m10 = maps[ty1 * nx + tx0], m11 = maps[ty1 * nx + tx1];
+   const base = m00 || m01 || m10 || m11;
+   if (!base){ out[y * w + x] = v; continue; }
+   const a = (m00 || base)[v], b = (m01 || base)[v];
+   const c = (m10 || base)[v], d = (m11 || base)[v];
+   const top = a * (1 - wx) + b * wx;
+   const bot = c * (1 - wx) + d * wx;
+   out[y * w + x] = (top * (1 - wy) + bot * wy) | 0;
+  }
+ }
+ return out;
+}
+
 // ── OCR PREPROCESSING ───────────────────────────────────────
-// Pipeline: grayscale (BT.601 luma) → integral-image-based adaptive
-// threshold (mean − C) → nearest-neighbor 2× upscale.
+// Pipeline: grayscale (BT.601 luma) → CLAHE local contrast →
+// integral-image-based adaptive threshold (mean − C) → NN 2× upscale.
 //
 // Runs on the main thread because the crop is small (~200×150 px) and
 // the integral-image formulation is <1 ms total. A Web Worker would add
@@ -381,10 +445,13 @@ function preprocessForOCR(srcCanvas){
  const src=imgData.data;
 
  // Grayscale
- const gray=new Uint8ClampedArray(w*h);
+ let gray=new Uint8ClampedArray(w*h);
  for(let i=0,j=0;i<src.length;i+=4,j++){
   gray[j]=(src[i]*0.299 + src[i+1]*0.587 + src[i+2]*0.114)|0;
  }
+
+ // CLAHE local contrast BEFORE thresholding — lifts faded digits.
+ gray=enhanceContrastCLAHE(gray, w, h);
 
  // Integral image — Uint32Array; padded by one row/col so the local-
  // window query doesn't need boundary checks.

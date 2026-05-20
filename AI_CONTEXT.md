@@ -9,6 +9,22 @@
 > cadence, caching, or guardrails MUST update this file in the same change
 > set.
 >
+> **Last updated:** 2026-05-21 — **OCR accuracy pass (step 1/6):
+> CLAHE local contrast.** First of a six-step push to improve BIB
+> reads on low-quality event photos (faded digits, wrinkled
+> jerseys, skew). `preprocessForOCR` now applies tile-based
+> contrast-limited histogram equalization (`enhanceContrastCLAHE`,
+> `CLAHE_TILES=8`, `CLAHE_CLIP_LIMIT=3.0`) on the grayscale BEFORE
+> the adaptive threshold, lifting faded/washed-out strokes. Output
+> is still grayscale → thresholded to pure B/W, so no gray reaches
+> Tesseract (Guardrail 19 amended to permit pre-threshold
+> bilinear-family ops). Mirrored in `checkpoint.html` (Guardrail
+> 27). Remaining steps (morphology, deskew, wider PSM, crop
+> variation, debug per-stage previews) land sequentially, each
+> validated by the operator on real photos via `?debug=1` before
+> the next. The `?debug=1` panel `processed` image already reflects
+> the CLAHE result.
+>
 > **Last updated:** 2026-05-21 — **Drive Scanner: face-only
 > identification for sub-floor faces.** Previously a face below
 > `MIN_OCR_FACE_SIZE` (60 px) whose BIB couldn't be OCR'd was
@@ -1232,11 +1248,13 @@ is load-bearing:
    `by = box.y + 1.1·faceH`, `bh = 2.2·faceH`, `bx = box.x − 0.7·faceH`,
    `bw = box.width + 1.4·faceH`. Chops off neck/chin/wrinkles that PSM 11
    turned into hallucinated digit noise.
-2. **Small-crop pre-upscale** (`preprocessForOCR`, Guardrail 19): crops
-   with long edge < `OCR_PRE_UPSCALE_TARGET` (360px) are bilinear-
-   upscaled BEFORE thresholding so far-away BIB strokes separate instead
-   of bleeding into blobs. Threshold still outputs pure B/W (no gray to
-   Tesseract).
+2. **Preprocessing chain** (`preprocessForOCR`, Guardrail 19):
+   `[small-crop pre-upscale] → grayscale → CLAHE local contrast →
+   adaptive threshold → 2× NN`. The pre-upscale (crops < 360px long
+   edge bilinear-upscaled) separates far-away strokes; **CLAHE**
+   (tile-based contrast-limited histogram equalization, 2026-05-21)
+   lifts faded/washed-out digits before thresholding. Both feed the
+   threshold, which outputs pure B/W (no gray to Tesseract).
 3. **Multi-PSM fallback** (`OCR_PSM_ATTEMPTS = ['6','7']`, Guardrail 20):
    PSM 6 (uniform block) reads large faces; PSM 7 (single line) reads
    small upscaled digit rows PSM 6 fragments. `runOCRForFace` tries 6,
@@ -1470,10 +1488,14 @@ explicit, justified, and accompanied by an update to this file.
     smoothBox(name, rawBox)` once per detection and uses it for both
     the overlay and the OCR crop — preserve that contract.
 19. **OCR preprocessing is `[small-crop pre-upscale] → grayscale →
-    adaptive threshold → 2× nearest-neighbor`, on the main thread.**
+    CLAHE local contrast → adaptive threshold → 2× nearest-neighbor`,
+    on the main thread.**
     The FINAL upscale must stay nearest-neighbor — bilinear there
-    introduces gray pixels Tesseract mistreats. **The 2026-05-20
-    pre-threshold upscale is the one allowed bilinear step:** for
+    introduces gray pixels Tesseract mistreats. **Bilinear-family ops
+    are allowed ONLY before the threshold (which re-binarizes to pure
+    B/W):** (a) the 2026-05-20 small-crop pre-upscale, and (b) CLAHE
+    local contrast (2026-05-21, tile histogram equalization — grayscale
+    in, grayscale out, still thresholded after). For
     crops whose long edge is below `OCR_PRE_UPSCALE_TARGET` (360 px),
     the source is bilinear-upscaled BEFORE grayscale/threshold so a
     far-away BIB's merged digit strokes separate; the threshold then
@@ -2531,6 +2553,8 @@ body for the annotation).
 | `FACE_MATCH_DISTANCE` | `0.45` | `findBestMatch` threshold — same as live page; lower = stricter |
 | `OCR_MIN_CONFIDENCE` | `50` (history: `60` → `80` 2026-05-17 audit → `65` → `50` 2026-05-19; **semantics changed to PER-WORD 2026-05-20**) | **Per-word** Tesseract confidence floor (was the single-pass document-confidence floor until 2026-05-20). Under PSM 11 the document confidence is an average that noise words tank, so the gate now applies to each candidate WORD's own confidence (see Guardrail 20 + 26): a digit-only word must be `BIB_MIN_LEN..BIB_MAX_LEN` long AND score ≥ this floor to be a BIB candidate. `50` comfortably admits a cleanly-printed BIB (word-conf typically 80–95) while rejecting chin-line / wrinkle noise (single-digit conf). **A per-word `conf === 0` is exempt from this gate** (treated as "unscored", admitted on the face-match + whitelist + length gates) because Tesseract.js's LSTM + digit-whitelist scoring is intermittently 0 on perfect reads — see Guardrail 20. Raise toward ~65 if a 2-digit noise word ever survives and trips a false `MULTIPLE_BIBS`; lower toward ~40 only if a real BIB word is being rejected (a NONZERO low score; the `0` case is already handled). |
 | `BIB_MIN_LEN` / `BIB_MAX_LEN` | `2` / `6` (was `1` / `6` pre-audit) | Accepted BIB length range. Min raised to 2 post-audit to reject single-digit fragments that pass the digit-only filter on garbage reads |
+| `CLAHE_TILES` | `8` | Tiles per axis for CLAHE local contrast (2026-05-21). Grayscale is split into an 8×8 grid, each tile histogram-equalized, bilinearly blended. Lifts faded BIB digits before thresholding. Mirror of `checkpoint.html`. |
+| `CLAHE_CLIP_LIMIT` | `3.0` | Contrast-limit factor — caps per-bin amplification (× the uniform count) so flat/noisy regions aren't blown up. Higher = more aggressive contrast. |
 | `OCR_PSM_ATTEMPTS` | `['6','7']` | Multi-PSM fallback order (2026-05-20). `runOCRForFace` tries each in turn, stopping at the first that yields a valid BIB. PSM 6 (uniform block) fits normal/large faces; PSM 7 (single line) fits small upscaled digit rows that 6 fragments. Only failures pay for the extra pass. |
 | `OCR_PRE_UPSCALE_TARGET` | `360` | Long-edge px target for the pre-threshold bilinear upscale. Crops below this are upscaled BEFORE thresholding so far-away BIB strokes separate instead of bleeding (2026-05-20). Mirror of `checkpoint.html`. |
 | `OCR_PRE_UPSCALE_MAX` | `4` | Cap on the pre-threshold upscale factor (avoids blowing up a 20 px crop to absurd size). |
