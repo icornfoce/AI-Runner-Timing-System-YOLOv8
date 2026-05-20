@@ -9,6 +9,24 @@
 > cadence, caching, or guardrails MUST update this file in the same change
 > set.
 >
+> **Last updated:** 2026-05-20 — **Drive Scanner OCR: PSM → 8 +
+> confidence-zero resilience (the read that finally works).** With
+> the tightened crop + PSM 6, the scanner read exactly `4532` but
+> Tesseract.js STILL scored it `0` (per-word panel: `4532@0`) —
+> the documented LSTM + digit-whitelist quirk that returns 0
+> confidence on perfect isolated-number reads, independent of PSM.
+> Two changes: (1) PSM `6 → 8` ("single word"), the exact-fit mode
+> for the now-isolated BIB crop; (2) `runOCRForFace` treats a
+> per-word `conf === 0` as **"unscored"** rather than "failed" and
+> admits the read on the strength of the other gates still fully in
+> force — face match (only known runners reach OCR), digit
+> whitelist, and BIB-length window. A genuinely low read returns a
+> LOW NONZERO conf and is still rejected by `OCR_MIN_CONFIDENCE`;
+> only the exact `0` sentinel is treated as unscored, so this is a
+> narrow quirk-handler, not a blanket bypass (and the scanner has
+> no consensus requirement — Guardrail 27 — so Guardrail 21 is
+> untouched). Guardrail 20 + §6.8 updated.
+>
 > **Last updated:** 2026-05-20 — **Drive Scanner OCR: crop
 > tightening + PSM 11 → 6 (final OCR fix of the day).** Word-level
 > extraction wasn't enough — the `?debug=1` per-word panel showed
@@ -1354,9 +1372,9 @@ explicit, justified, and accompanied by an update to this file.
 20. **Tesseract worker config is part of the contract.** `tessedit_char_whitelist
     = '0123456789'` is set once at init and assumed by the validation
     gate. **`tessedit_pageseg_mode` diverges by file (2026-05-20):**
-    `photo_scanner.html` uses **PSM 6 (single uniform block)**;
+    `photo_scanner.html` uses **PSM 8 (single word)**;
     `checkpoint.html` retains **PSM 7 (single line)**. The scanner's
-    PSM went 7 → 11 → 6 in one day, paired with the crop tightening:
+    PSM went 7 → 11 → 6 → 8 in one day, paired with the crop tightening:
     - **PSM 7** ("single text line") returned empty reads (`""` /
       conf 0) on the OLD tall crop (`getOCRCropBox` was 0.5 → 3.0
       faceH) — it assumes the whole image is one line and couldn't
@@ -1367,16 +1385,31 @@ explicit, justified, and accompanied by an update to this file.
       back as the word `14532` at confidence 0 — verified in the
       `?debug=1` per-word panel).
     - **PSM 6** ("single uniform block") + the **vertically-tightened
-      crop** (now `by = 1.1·faceH`, `bh = 2.2·faceH`, chopping off the
-      neck/chin so Tesseract sees only the chest BIB block) restores
-      reliable confidence scoring.
+      crop** (`by = 1.1·faceH`, `bh = 2.2·faceH`, chopping off the
+      neck/chin so Tesseract sees only the chest BIB block) dropped
+      the noise and read exactly `4532` — but confidence was STILL 0.
+    - **PSM 8** ("single word") is the exact-fit mode for the tight
+      isolated-BIB crop and the final choice.
+    **Confidence-zero resilience (the load-bearing part):** Tesseract.js
+    (LSTM engine + digit whitelist) intermittently reports word
+    confidence EXACTLY `0` on a *perfectly recognized* isolated number,
+    independent of PSM — a clean `4532` read scored `0` under PSM 6 AND
+    the per-word panel confirmed `4532@0`. So `runOCRForFace` treats
+    `conf === 0` as **"unscored"** (not "failed") and admits the read on
+    the strength of the other gates still in force: the **face match**
+    (only known runners reach OCR), the **digit whitelist**, and the
+    **BIB-length** window. A genuinely low-quality read returns a LOW
+    NONZERO confidence and is still rejected by `OCR_MIN_CONFIDENCE`.
+    This is NOT a blanket bypass — it fires only for the exact `0`
+    sentinel. The scanner has no consensus requirement (Guardrail 27),
+    so this does not touch Guardrail 21 (which governs `checkpoint.html`).
     `checkpoint.html` stays at PSM 7 (unrouted live mode, multi-frame
     voting, untestable without a camera) even though it now shares the
-    tightened crop; if live mode is re-enabled, evaluate PSM 6 there
-    too. Do not change the whitelist or PSM without re-deriving the
-    BIB length and per-word confidence thresholds. The scanner reads
-    **per-word** confidence (not the document average) — see
-    Guardrail 26.
+    tightened crop; if live mode is re-enabled, evaluate PSM 8 + the
+    conf-zero resilience there too. Do not change the whitelist or PSM
+    without re-deriving the BIB length and per-word confidence
+    thresholds. The scanner reads **per-word** confidence (not the
+    document average) — see Guardrail 26.
 21. **Violations require majority consensus, not a single read.** The
     `castVote` → consensus gate exists because single-frame OCR
     misreads were generating false-positive `WRONG_PERSON` reports.
@@ -2351,7 +2384,7 @@ body for the annotation).
 | `SSD_MIN_CONFIDENCE` | `0.7` (was `0.5` pre-2026-05-19) | `SsdMobilenetv1Options.minConfidence` — minimum face-score for a detection to count. Raised from face-api's 0.5 default to filter banner/poster hallucinations that scored 0.50–0.65 on event photos. Real foreground faces score 0.85+, so the bump is safe. Pair with `MIN_FACE_SIZE`. |
 | `MIN_FACE_SIZE` | `0` (was `60` for ~hours of 2026-05-19, then DISABLED same day per operator request) | Post-detect size gate. When > 0, detections with `box.width < MIN_FACE_SIZE OR box.height < MIN_FACE_SIZE` are dropped BEFORE face matching, OCR, and `UNREGISTERED` reporting. Currently `0` (no-op pass-through) because operator reported borderline-small faces being filtered out of OCR. Banner / poster hallucinations are now caught primarily by `SSD_MIN_CONFIDENCE = 0.7`. Re-enable to e.g. `60` if `UNREGISTERED` rows from banner art come back in volume. |
 | `FACE_MATCH_DISTANCE` | `0.45` | `findBestMatch` threshold — same as live page; lower = stricter |
-| `OCR_MIN_CONFIDENCE` | `50` (history: `60` → `80` 2026-05-17 audit → `65` → `50` 2026-05-19; **semantics changed to PER-WORD 2026-05-20**) | **Per-word** Tesseract confidence floor (was the single-pass document-confidence floor until 2026-05-20). Under PSM 11 the document confidence is an average that noise words tank, so the gate now applies to each candidate WORD's own confidence (see Guardrail 20 + 26): a digit-only word must be `BIB_MIN_LEN..BIB_MAX_LEN` long AND score ≥ this floor to be a BIB candidate. `50` comfortably admits a cleanly-printed BIB (word-conf typically 80–95) while rejecting chin-line / wrinkle noise (single-digit conf). Raise toward ~65 if a 2-digit noise word ever survives and trips a false `MULTIPLE_BIBS`; lower toward ~40 only if a real BIB word is being rejected. |
+| `OCR_MIN_CONFIDENCE` | `50` (history: `60` → `80` 2026-05-17 audit → `65` → `50` 2026-05-19; **semantics changed to PER-WORD 2026-05-20**) | **Per-word** Tesseract confidence floor (was the single-pass document-confidence floor until 2026-05-20). Under PSM 11 the document confidence is an average that noise words tank, so the gate now applies to each candidate WORD's own confidence (see Guardrail 20 + 26): a digit-only word must be `BIB_MIN_LEN..BIB_MAX_LEN` long AND score ≥ this floor to be a BIB candidate. `50` comfortably admits a cleanly-printed BIB (word-conf typically 80–95) while rejecting chin-line / wrinkle noise (single-digit conf). **A per-word `conf === 0` is exempt from this gate** (treated as "unscored", admitted on the face-match + whitelist + length gates) because Tesseract.js's LSTM + digit-whitelist scoring is intermittently 0 on perfect reads — see Guardrail 20. Raise toward ~65 if a 2-digit noise word ever survives and trips a false `MULTIPLE_BIBS`; lower toward ~40 only if a real BIB word is being rejected (a NONZERO low score; the `0` case is already handled). |
 | `BIB_MIN_LEN` / `BIB_MAX_LEN` | `2` / `6` (was `1` / `6` pre-audit) | Accepted BIB length range. Min raised to 2 post-audit to reject single-digit fragments that pass the digit-only filter on garbage reads |
 | `ADAPTIVE_THRESHOLD_BLOCK` | `15` | Local-window size for adaptive threshold (mirror of `checkpoint.html`) |
 | `ADAPTIVE_THRESHOLD_C` | `10` | Mean offset (mirror of `checkpoint.html`) |

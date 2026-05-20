@@ -396,9 +396,9 @@ async function init(){
   if (labeled.length > 0) faceMatcher = new faceapi.FaceMatcher(labeled, FACE_MATCH_DISTANCE);
   markStep("step-runners", "done");
 
-  // 3) Init Tesseract — digits-only whitelist + PSM 6 (uniform block).
+  // 3) Init Tesseract — digits-only whitelist + PSM 8 (single word).
   // PSM history (Guardrail 20): 7 (single line) → 11 (sparse text) →
-  // 6 (single uniform block), all on 2026-05-20.
+  // 6 (uniform block) → 8 (single word), all on 2026-05-20.
   //   • PSM 7 returned empty reads ("" / conf 0) on the old TALL crop
   //     — it assumes the whole image is one text line and couldn't
   //     locate a digit block inside a tall multi-content rectangle.
@@ -406,20 +406,22 @@ async function init(){
   //     noisy crop, hallucinated extra digit words from chin lines /
   //     shirt wrinkles AND broke confidence scoring (a clean 4532
   //     read came back as word "14532" at confidence 0).
-  //   • PSM 6 assumes a single uniform block of text — paired with
-  //     the 2026-05-20 vertically-tightened crop (getOCRCropBox now
-  //     starts at 1.1·faceH, chopping off the neck/chin), Tesseract
-  //     sees a clean block of BIB digits and scores confidence
-  //     reliably again.
-  // Whitelist unchanged (digits only). checkpoint.html keeps PSM 7
-  // (unrouted live mode, multi-frame voting, untestable here) even
-  // though it now shares the tightened crop — see Guardrail 20.
+  //   • PSM 6 (uniform block) + the tightened crop dropped the noise
+  //     and read exactly "4532" — but confidence was STILL 0.
+  //   • PSM 8 ("single word") is the exact-fit mode for the tight
+  //     isolated-BIB crop and the most likely to score confidence.
+  // The conf===0 case is ALSO handled defensively in runOCRForFace
+  // (treated as "unscored", admitted on the face-match + whitelist +
+  // length gates) because Tesseract.js's LSTM + digit-whitelist
+  // confidence is intermittently 0 even on perfect reads regardless
+  // of PSM. Whitelist unchanged (digits only). checkpoint.html keeps
+  // PSM 7 (unrouted live mode, multi-frame voting, untestable here).
   markStep("step-ocr", "loading");
   try {
    tesseractWorker = await Tesseract.createWorker("eng");
    await tesseractWorker.setParameters({
     tessedit_char_whitelist: '0123456789',
-    tessedit_pageseg_mode: '6'
+    tessedit_pageseg_mode: '8'
    });
    ocrReady = true;
    markStep("step-ocr", "done");
@@ -1114,15 +1116,29 @@ async function runOCRForFace(srcCanvas, box){
  const words = extractOcrWords(result.data);
 
  // Per-word digit candidates: digits-only, BIB-length, per-word conf
- // gate. This drops single-digit noise ("5", "1") on length and
- // low-conf 2-digit noise ("15") on confidence, keeping the real BIB.
+ // gate. Drops single-digit noise ("5", "1") on length and genuinely
+ // low-confidence noise on the threshold.
+ //
+ // Confidence gate with a quirk-resilient escape: Tesseract.js
+ // (LSTM engine + digit whitelist) intermittently reports
+ // confidence EXACTLY 0 on a perfectly-recognized isolated number —
+ // observed on a clean, tightly-cropped 4532 BIB that read "4532"
+ // but scored 0 (verified in the ?debug=1 per-word panel). We treat
+ // an exact 0 as "unscored" (not "failed") and admit the read on
+ // the strength of the OTHER gates that are still fully in force:
+ // the face match (only known runners reach OCR), the digit
+ // whitelist, and the BIB-length window. A genuinely low-quality
+ // read returns a LOW NONZERO confidence and is still rejected by
+ // the threshold. This is NOT a blanket bypass — it fires only for
+ // the documented conf===0 sentinel. See AI_CONTEXT Guardrail 20.
  const confByBib = {};
  const candidates = [];
  for (const w of words){
   const digits = String(w.text || "").replace(/[^0-9]/g, "");
   const wconf = Number(w.conf || 0);
   if (digits.length < BIB_MIN_LEN || digits.length > BIB_MAX_LEN) continue;
-  if (wconf < OCR_MIN_CONFIDENCE) continue;
+  const scored = wconf > 0;                       // 0 = Tesseract.js broken-confidence sentinel
+  if (scored && wconf < OCR_MIN_CONFIDENCE) continue;
   if (confByBib[digits] == null){ confByBib[digits] = wconf; candidates.push(digits); }
   else if (wconf > confByBib[digits]){ confByBib[digits] = wconf; }
  }
