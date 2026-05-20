@@ -221,6 +221,18 @@ const MIN_FACE_SIZE = 0;
 // false match writes a wrong runner's row.
 const FACE_MATCH_DISTANCE = 0.45;
 
+// Detection-only resolution cap (2026-05-21 perf pass). SSD MobileNet
+// resamples its input to ~600 px internally, so running detection on a
+// full 4K canvas wastes drawImage + tensor-upload time with zero
+// detection gain. When a photo is WIDER than this, processPhotoWithBytes
+// detects on a separate downscaled offscreen canvas and scales the boxes
+// back to native via faceapi.resizeResults — the #preview-canvas (OCR
+// source + persisted detectionBox coords) stays full-resolution, so OCR
+// accuracy and the dashboard evidence-modal overlay are unaffected.
+// Photos at/below this width detect natively (no extra work). Width-gated
+// to match the dominant landscape event-shot aspect.
+const MAX_SCAN_WIDTH = 1920;
+
 // ── OCR PIPELINE ────────────────────────────────────────────
 // Single read per face — no multi-frame majority vote (Task 3). The
 // validation gate is still applied per read, so an obviously garbage
@@ -433,6 +445,12 @@ async function init(){
   // See the "BIB OCR PIPELINE" block above runOCRForFace + Guardrail 20
   // for why each OCR layer exists. Don't change the whitelist or the
   // PSM list without re-deriving the BIB length / confidence gates.
+  //
+  // PERF (intentional — do not regress): the worker is created EXACTLY
+  // ONCE here and reused for every photo. runOCRForFace only calls the
+  // cheap setParameters() + recognize() on it — it NEVER calls
+  // createWorker. Do not move worker creation into the per-photo path:
+  // re-initializing the wasm worker costs ~800 ms PER PHOTO.
   markStep("step-ocr", "loading");
   try {
    tesseractWorker = await Tesseract.createWorker("eng");
@@ -807,24 +825,52 @@ async function processPhotoWithBytes(photo, payload){
  });
  if (!img) return;
 
- // Draw to the preview canvas at the image's native resolution. The CSS
- // max-width/max-height scales it down for display while preserving the
- // pixel data we pass to face-api (which needs full resolution for the
- // SSD MobileNet trade-off to pay off).
+ // Draw to the preview canvas at the image's NATIVE resolution. This
+ // canvas is the OCR source (runOCRForFace crops from it) AND the frame
+ // of reference for every persisted detectionBox coordinate (the
+ // dashboard evidence modal redraws those on the full-res original), so
+ // it MUST stay full-resolution — do not downscale it. CSS scales it
+ // down for display only.
  const canvas = document.getElementById("preview-canvas");
  canvas.width = img.naturalWidth;
  canvas.height = img.naturalHeight;
  const ctx = canvas.getContext("2d");
  ctx.drawImage(img, 0, 0);
 
+ // Resolution cap for DETECTION ONLY (MAX_SCAN_WIDTH). For photos wider
+ // than the cap, detect on a SEPARATE downscaled offscreen canvas; the
+ // preview canvas above stays native so OCR crops + detectionBox coords
+ // are unaffected. Photos at/below the cap detect on the native canvas
+ // directly (byte-identical to the prior behavior).
+ let detectInput = canvas;
+ if (img.naturalWidth > MAX_SCAN_WIDTH){
+  const dw = MAX_SCAN_WIDTH;
+  const dh = Math.round(img.naturalHeight * (MAX_SCAN_WIDTH / img.naturalWidth));
+  const dc = document.createElement("canvas");
+  dc.width = dw; dc.height = dh;
+  dc.getContext("2d").drawImage(img, 0, 0, dw, dh);
+  detectInput = dc;
+  if (DEBUG) console.log(`[debug] detect-downscale ${img.naturalWidth}px → ${dw}px for "${photo.name}"`);
+ }
+
  // SSD MobileNet — explicit options so the threshold is visible at the
  // call site. minConfidence is SSD_MIN_CONFIDENCE (0.7 as of 2026-05-19,
  // raised from face-api's 0.5 default — see constant comment).
  const detectorOpts = new faceapi.SsdMobilenetv1Options({ minConfidence: SSD_MIN_CONFIDENCE });
- const rawDetections = await faceapi
-  .detectAllFaces(canvas, detectorOpts)
+ let rawDetections = await faceapi
+  .detectAllFaces(detectInput, detectorOpts)
   .withFaceLandmarks()
   .withFaceDescriptors();
+
+ // Map detection geometry from the downscaled detect canvas back onto the
+ // native preview canvas (resizeResults uses each result's resolution-
+ // independent relative box, so boxes + landmarks land in native pixels;
+ // the descriptor is unchanged). Skipped on the native path. After this,
+ // every downstream consumer (size gate, getOCRCropBox on the full-res
+ // canvas, persisted detectionBoxes) operates in native coords as before.
+ if (detectInput !== canvas){
+  rawDetections = faceapi.resizeResults(rawDetections, { width: canvas.width, height: canvas.height });
+ }
 
  // Size gate — drop sub-MIN_FACE_SIZE boxes BEFORE face matching,
  // OCR, and UNREGISTERED reporting. The confidence threshold alone
@@ -842,6 +888,11 @@ async function processPhotoWithBytes(photo, payload){
 
  if (DEBUG) console.log("[debug] photo", { name: photo.name, faces: detections.length });
 
+ // PERF fast-path (intentional — do not regress): zero usable detections
+ // → return before ANY categorization or OCR. OCR (Tesseract) only runs
+ // via handleKnownFace further down, so a faceless photo already costs
+ // nothing beyond detection — there is no Tesseract call to skip here.
+ // Keep this early return; don't route faceless photos into the loops below.
  if (detections.length === 0){
   stats.skipped++;
   // Distinguish "no faces found" from "all detections were too small" —
@@ -922,6 +973,11 @@ async function processPhotoWithBytes(photo, payload){
  // crops were removed 2026-05-19; OCR is now the only canvas
  // pixel-reader in this pipeline, but Guardrail #31 still applies
  // — `drawDetectionBox` MUST stay after the OCR pass below.)
+ //
+ // PERF (intentional — do not regress): OCR is gated behind knownHits.
+ // A photo with only UNKNOWN faces runs ZERO Tesseract calls — unknowns
+ // only fire the UNREGISTERED path below, which never OCRs. Do not add an
+ // OCR call to the unknown branch.
  for (const hit of knownHits){
   await handleKnownFace(canvas, hit, photo, detectionBoxes);
  }
