@@ -9,6 +9,27 @@
 > cadence, caching, or guardrails MUST update this file in the same change
 > set.
 >
+> **Last updated:** 2026-05-20 — **Drive Scanner OCR: word-level
+> BIB extraction (follow-up to the PSM 11 switch).** PSM 11 fixed
+> the empty reads but introduced a new failure: on the tall chest
+> crop it also emits low-confidence digit noise from chin lines /
+> shirt wrinkles, and the **document-level** confidence is an
+> average that the noise tanks (a clean 4532 read at word-conf ~90
+> still showed document conf 4, failing the gate). Fix:
+> `runOCRForFace` now requests per-word data
+> (`recognize(processed, {}, { blocks: true })`), flattens it via
+> the new `extractOcrWords` helper, and builds the candidate set
+> from DISTINCT digit-only words passing the BIB-length +
+> **per-word** confidence gate (`OCR_MIN_CONFIDENCE` is now a
+> per-word floor, not a document floor). The real BIB survives;
+> single-digit and low-confidence noise is dropped. `MULTIPLE_BIBS`
+> is now keyed on 2+ distinct surviving words instead of the
+> raw-text `\d{2,}` regex (Guardrail 26 updated; the regex remains
+> the fallback when a Tesseract build returns no word data, and
+> `checkpoint.html` still uses it). The `?debug=1` OCR panel now
+> shows the per-word breakdown (`words: 4532@91 15@2 …`) and the
+> picked BIB so the filter is verifiable at a glance.
+>
 > **Last updated:** 2026-05-20 — **Drive Scanner OCR fixed: PSM
 > 7 → 11.** The scanner was returning empty BIB reads (`""`,
 > conf 0) even on clean, high-res, perfectly-thresholded crops —
@@ -1368,13 +1389,26 @@ explicit, justified, and accompanied by an update to this file.
     cooldowns without revisiting the spam-prevention budget; a runner
     whose BIB OCR fails AND whose face matches a wrong registered
     runner would otherwise fire two violations on the same frame.
-26. **The `MULTIPLE_BIBS` check runs on RAW Tesseract text BEFORE
-    digit-only normalization.** Once
-    `text=String(rawText).replace(/[^0-9]/g,"")` is applied, the
-    whitespace separating distinct BIB blocks is gone and `\d{2,}`
-    matches one giant concatenated number instead of two distinct ones.
-    Keep the regex anchored to `\d{MULTIPLE_BIBS_MIN_BLOCK_LEN,}`
-    against `result.data.text`, not the normalized form.
+26. **`MULTIPLE_BIBS` segmentation: word-level in the scanner,
+    raw-text regex in `checkpoint.html` (diverged 2026-05-20).**
+    `checkpoint.html` still runs the regex `\d{MULTIPLE_BIBS_MIN_BLOCK_LEN,}`
+    against `result.data.text` BEFORE digit-only normalization —
+    normalizing first (`text.replace(/[^0-9]/g,"")`) would erase the
+    whitespace separating distinct blocks so `\d{2,}` would match one
+    giant concatenated number. **`photo_scanner.html` no longer uses
+    that regex:** under PSM 11 it reads per-word data
+    (`result.data.words`, requested via the `{ blocks: true }` output
+    flag) and builds the candidate set from DISTINCT digit-only words
+    that pass the BIB-length + per-word-confidence gate. Two or more
+    distinct surviving words ⇒ `MULTIPLE_BIBS`; exactly one ⇒ that BIB;
+    none ⇒ `NO_BIB`. This is strictly more accurate than the regex —
+    Tesseract's own word boundaries replace whitespace-guessing, and
+    the per-word confidence gate drops the noise words PSM 11 emits
+    from chin lines / shirt wrinkles (which the document-average
+    confidence cannot distinguish from the real BIB). If a
+    Tesseract.js build returns no word data, `extractOcrWords` falls
+    back to the old raw-text `\d{2,}` block split so the pipeline
+    still functions.
 27. **The Drive scanner's CV pipeline deliberately diverges from
     `checkpoint.html`.** SSD MobileNet (not TinyFaceDetector),
     single-pass OCR (no majority vote), no bbox EMA, no Ghost-BIB
@@ -2289,7 +2323,7 @@ body for the annotation).
 | `SSD_MIN_CONFIDENCE` | `0.7` (was `0.5` pre-2026-05-19) | `SsdMobilenetv1Options.minConfidence` — minimum face-score for a detection to count. Raised from face-api's 0.5 default to filter banner/poster hallucinations that scored 0.50–0.65 on event photos. Real foreground faces score 0.85+, so the bump is safe. Pair with `MIN_FACE_SIZE`. |
 | `MIN_FACE_SIZE` | `0` (was `60` for ~hours of 2026-05-19, then DISABLED same day per operator request) | Post-detect size gate. When > 0, detections with `box.width < MIN_FACE_SIZE OR box.height < MIN_FACE_SIZE` are dropped BEFORE face matching, OCR, and `UNREGISTERED` reporting. Currently `0` (no-op pass-through) because operator reported borderline-small faces being filtered out of OCR. Banner / poster hallucinations are now caught primarily by `SSD_MIN_CONFIDENCE = 0.7`. Re-enable to e.g. `60` if `UNREGISTERED` rows from banner art come back in volume. |
 | `FACE_MATCH_DISTANCE` | `0.45` | `findBestMatch` threshold — same as live page; lower = stricter |
-| `OCR_MIN_CONFIDENCE` | `50` (history: `60` initial → `80` 2026-05-17 audit → `65` 2026-05-19 → `50` 2026-05-19 same-day) | Single-pass Tesseract confidence floor. Each step down was driven by operator-reported false `NO_BIB` on legibly-printed BIBs that browser Tesseract simply doesn't score at the prior floor. `50` is near the floor of useful Tesseract output — reads below this are usually genuinely garbage. Short-graphic false-positive defense (the original reason `80` was tried in the audit) now relies on `BIB_MIN_LEN = 2` (unchanged) and the face-match gate; `SSD_MIN_CONFIDENCE = 0.7` keeps banner art out of the detection pipeline in the first place. If sponsor-logo false `WRONG_PERSON` reads come back, raise to ~60 first; only raise above 65 if you have a real foreground-portrait sample that scores 65+. |
+| `OCR_MIN_CONFIDENCE` | `50` (history: `60` → `80` 2026-05-17 audit → `65` → `50` 2026-05-19; **semantics changed to PER-WORD 2026-05-20**) | **Per-word** Tesseract confidence floor (was the single-pass document-confidence floor until 2026-05-20). Under PSM 11 the document confidence is an average that noise words tank, so the gate now applies to each candidate WORD's own confidence (see Guardrail 20 + 26): a digit-only word must be `BIB_MIN_LEN..BIB_MAX_LEN` long AND score ≥ this floor to be a BIB candidate. `50` comfortably admits a cleanly-printed BIB (word-conf typically 80–95) while rejecting chin-line / wrinkle noise (single-digit conf). Raise toward ~65 if a 2-digit noise word ever survives and trips a false `MULTIPLE_BIBS`; lower toward ~40 only if a real BIB word is being rejected. |
 | `BIB_MIN_LEN` / `BIB_MAX_LEN` | `2` / `6` (was `1` / `6` pre-audit) | Accepted BIB length range. Min raised to 2 post-audit to reject single-digit fragments that pass the digit-only filter on garbage reads |
 | `ADAPTIVE_THRESHOLD_BLOCK` | `15` | Local-window size for adaptive threshold (mirror of `checkpoint.html`) |
 | `ADAPTIVE_THRESHOLD_C` | `10` | Mean offset (mirror of `checkpoint.html`) |

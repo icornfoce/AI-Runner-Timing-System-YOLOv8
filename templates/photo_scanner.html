@@ -1098,33 +1098,82 @@ async function runOCRForFace(srcCanvas, box){
  cropCanvas.getContext("2d").drawImage(srcCanvas, bx, by, bw, bh, 0, 0, bw, bh);
 
  const processed = preprocessForOCR(cropCanvas);
- const result = await tesseractWorker.recognize(processed);
+ // Request the block hierarchy so per-word data is populated. We
+ // evaluate each WORD's own confidence, NOT the document average:
+ // under PSM 11 (sparse text) the real BIB comes back as one
+ // high-confidence word while chin lines / shirt wrinkles produce
+ // extra low-confidence digit words. The document confidence is an
+ // average those junk words tank to single digits (a clean 4532 BIB
+ // read at word-conf ~90 still showed document conf 4), so gating on
+ // it throws away good reads. See AI_CONTEXT Guardrail 20 + 26.
+ const result = await tesseractWorker.recognize(processed, {}, { blocks: true });
  const rawText = String(result.data.text || "");
- const conf = Number(result.data.confidence || 0);
+ const docConf = Number(result.data.confidence || 0);
+ const words = extractOcrWords(result.data);
+
+ // Per-word digit candidates: digits-only, BIB-length, per-word conf
+ // gate. This drops single-digit noise ("5", "1") on length and
+ // low-conf 2-digit noise ("15") on confidence, keeping the real BIB.
+ const confByBib = {};
+ const candidates = [];
+ for (const w of words){
+  const digits = String(w.text || "").replace(/[^0-9]/g, "");
+  const wconf = Number(w.conf || 0);
+  if (digits.length < BIB_MIN_LEN || digits.length > BIB_MAX_LEN) continue;
+  if (wconf < OCR_MIN_CONFIDENCE) continue;
+  if (confByBib[digits] == null){ confByBib[digits] = wconf; candidates.push(digits); }
+  else if (wconf > confByBib[digits]){ confByBib[digits] = wconf; }
+ }
 
  if (DEBUG){
-  console.log("[debug] OCR", { rawText, conf });
+  console.log("[debug] OCR", { rawText, docConf, words: words.map(w => `${w.text}@${Math.round(w.conf)}`), candidates });
   // Dump the exact pixels Tesseract saw — raw chest crop + the
-  // thresholded version — into a fixed debug panel so we can tell
-  // a geometry miss (BIB not in the raw crop) from a recognition
-  // failure (BIB legible in the crop but Tesseract returns empty).
-  dumpOcrCrop(cropCanvas, processed, rawText, conf, box);
+  // thresholded version — plus the per-word breakdown, so we can tell
+  // a geometry miss from a recognition failure AND see which words
+  // survived the digit-length + per-word-confidence filter.
+  dumpOcrCrop(cropCanvas, processed, rawText, docConf, box, words, candidates);
  }
 
- // MULTIPLE_BIBS — runs on RAW text BEFORE digit normalization (Guardrail 26).
- const blockRe = new RegExp("\\d{" + MULTIPLE_BIBS_MIN_BLOCK_LEN + ",}", "g");
- const blocks = rawText.match(blockRe) || [];
- if (blocks.length >= MULTIPLE_BIBS_MIN_BLOCKS){
-  return { multipleBibsBlocks: blocks };
+ // MULTIPLE_BIBS — now keyed on DISTINCT high-confidence BIB-length
+ // words (Tesseract's own segmentation), not a raw-text \d{2,} regex.
+ // Two genuinely-different valid BIBs = a real multi-BIB chest; junk
+ // words were already filtered out by the confidence gate above.
+ if (candidates.length >= MULTIPLE_BIBS_MIN_BLOCKS){
+  return { multipleBibsBlocks: candidates };
  }
 
- const text = rawText.replace(/[^0-9]/g, "").trim();
- // Validation gate. Silent reject on fail — the scanner doesn't have a
- // consecutive-failure counter (no multi-frame state).
- if (!text || text.length < BIB_MIN_LEN || text.length > BIB_MAX_LEN || conf < OCR_MIN_CONFIDENCE){
+ if (candidates.length === 0){
+  // No word passed the digit-length + confidence gate.
   return null;
  }
- return { bib: text, conf };
+ return { bib: candidates[0], conf: confByBib[candidates[0]] };
+}
+
+// Flatten Tesseract's result into a [{text, conf}] word list. Prefers
+// the top-level data.words convenience array; falls back to walking
+// the block→paragraph→line→word hierarchy (populated by the
+// {blocks:true} output flag); last-resort, treats raw-text digit
+// blocks as pseudo-words carrying the document confidence so the
+// pipeline still functions if a Tesseract.js build omits word data.
+function extractOcrWords(data){
+ if (Array.isArray(data.words) && data.words.length){
+  return data.words.map(w => ({ text: w.text, conf: Number(w.confidence || 0) }));
+ }
+ const out = [];
+ const blocks = data.blocks || [];
+ for (const b of blocks){
+  for (const p of (b.paragraphs || [])){
+   for (const l of (p.lines || [])){
+    for (const w of (l.words || [])){
+     out.push({ text: w.text, conf: Number(w.confidence || 0) });
+    }
+   }
+  }
+ }
+ if (out.length) return out;
+ const docConf = Number(data.confidence || 0);
+ const blockRe = new RegExp("\\d{" + MULTIPLE_BIBS_MIN_BLOCK_LEN + ",}", "g");
+ return (String(data.text || "").match(blockRe) || []).map(t => ({ text: t, conf: docConf }));
 }
 
 // ── OCR DEBUG CROP DUMP (?debug=1 only) ──────────────────────
@@ -1134,17 +1183,17 @@ async function runOCRForFace(srcCanvas, box){
 // (geometry), and (b) is the BIB legible after preprocessing
 // (recognition). Capped at 24 most-recent entries. No-op unless
 // DEBUG, so zero production cost.
-function dumpOcrCrop(rawCanvas, processedCanvas, rawText, conf, box){
+function dumpOcrCrop(rawCanvas, processedCanvas, rawText, docConf, box, words, candidates){
  let panel = document.getElementById("ocr-debug-panel");
  if (!panel){
   panel = document.createElement("div");
   panel.id = "ocr-debug-panel";
-  panel.style.cssText = "position:fixed;right:8px;bottom:8px;width:360px;max-height:62vh;overflow:auto;z-index:99999;background:rgba(0,0,0,.88);border:1px solid #555;border-radius:8px;padding:8px;font:11px ui-monospace,monospace;color:#ddd";
-  panel.innerHTML = '<div style="font-weight:700;margin-bottom:6px">🔍 OCR DEBUG — raw | thresholded | result</div>';
+  panel.style.cssText = "position:fixed;right:8px;bottom:8px;width:380px;max-height:62vh;overflow:auto;z-index:99999;background:rgba(0,0,0,.88);border:1px solid #555;border-radius:8px;padding:8px;font:11px ui-monospace,monospace;color:#ddd";
+  panel.innerHTML = '<div style="font-weight:700;margin-bottom:6px">🔍 OCR DEBUG — raw | thresholded | per-word</div>';
   document.body.appendChild(panel);
  }
  const row = document.createElement("div");
- row.style.cssText = "display:flex;gap:6px;align-items:center;border-top:1px solid #333;padding:5px 0";
+ row.style.cssText = "display:flex;gap:6px;align-items:flex-start;border-top:1px solid #333;padding:5px 0";
  const raw = document.createElement("img");
  raw.src = rawCanvas.toDataURL();
  raw.style.cssText = "height:54px;border:1px solid #555;background:#222";
@@ -1153,19 +1202,25 @@ function dumpOcrCrop(rawCanvas, processedCanvas, rawText, conf, box){
  proc.style.cssText = "height:54px;border:1px solid #555;background:#fff";
  const txt = document.createElement("div");
  txt.style.cssText = "flex:1;min-width:0;word-break:break-all";
- const cleaned = String(rawText).replace(/\s+/g, " ").trim();
  const faceWH = box ? `${Math.round(box.width)}×${Math.round(box.height)}` : "?";
- // Build via textContent — rawText is raw Tesseract output; never
- // route it through innerHTML (Guardrail 7). esc() lives in
- // dashboard.html, not here, so textContent is the safe choice.
- const readLine = document.createElement("div");
- const readVal = document.createElement("b");
- readVal.style.color = cleaned ? "#7CFC9A" : "#ff7a7a";
- readVal.textContent = `"${cleaned}"`;
- readLine.append("read: ", readVal);
+ const picked = (candidates && candidates.length) ? candidates.join(", ") : "—";
+ // Build via textContent — Tesseract output is untrusted; never route
+ // it through innerHTML (Guardrail 7). esc() lives in dashboard.html,
+ // not here, so per-node textContent is the safe choice.
+ const pickedLine = document.createElement("div");
+ const pickedVal = document.createElement("b");
+ pickedVal.style.color = (candidates && candidates.length) ? "#7CFC9A" : "#ff7a7a";
+ pickedVal.textContent = picked;
+ pickedLine.append("BIB: ", pickedVal);
+ const wordsLine = document.createElement("div");
+ wordsLine.style.color = "#9fb3c8";
+ wordsLine.textContent = "words: " + ((words && words.length)
+   ? words.map(w => `${String(w.text).replace(/\s+/g, "")}@${Math.round(w.conf)}`).join(" ")
+   : "(none)");
  const metaLine = document.createElement("div");
- metaLine.textContent = `conf: ${Math.round(conf)} · face: ${faceWH}px`;
- txt.append(readLine, metaLine);
+ metaLine.style.color = "#888";
+ metaLine.textContent = `docConf: ${Math.round(docConf)} · face: ${faceWH}px`;
+ txt.append(pickedLine, wordsLine, metaLine);
  row.appendChild(raw); row.appendChild(proc); row.appendChild(txt);
  panel.insertBefore(row, panel.children[1] || null);
  while (panel.children.length > 25) panel.removeChild(panel.lastChild);
