@@ -1089,7 +1089,14 @@ async function runOCRForFace(srcCanvas, box){
  const rawText = String(result.data.text || "");
  const conf = Number(result.data.confidence || 0);
 
- if (DEBUG) console.log("[debug] OCR", { rawText, conf });
+ if (DEBUG){
+  console.log("[debug] OCR", { rawText, conf });
+  // Dump the exact pixels Tesseract saw — raw chest crop + the
+  // thresholded version — into a fixed debug panel so we can tell
+  // a geometry miss (BIB not in the raw crop) from a recognition
+  // failure (BIB legible in the crop but Tesseract returns empty).
+  dumpOcrCrop(cropCanvas, processed, rawText, conf, box);
+ }
 
  // MULTIPLE_BIBS — runs on RAW text BEFORE digit normalization (Guardrail 26).
  const blockRe = new RegExp("\\d{" + MULTIPLE_BIBS_MIN_BLOCK_LEN + ",}", "g");
@@ -1105,6 +1112,50 @@ async function runOCRForFace(srcCanvas, box){
   return null;
  }
  return { bib: text, conf };
+}
+
+// ── OCR DEBUG CROP DUMP (?debug=1 only) ──────────────────────
+// Appends the raw chest crop + the thresholded crop Tesseract saw
+// to a fixed bottom-right panel, with the read result. Lets the
+// operator see, per face: (a) did the crop even contain the BIB
+// (geometry), and (b) is the BIB legible after preprocessing
+// (recognition). Capped at 24 most-recent entries. No-op unless
+// DEBUG, so zero production cost.
+function dumpOcrCrop(rawCanvas, processedCanvas, rawText, conf, box){
+ let panel = document.getElementById("ocr-debug-panel");
+ if (!panel){
+  panel = document.createElement("div");
+  panel.id = "ocr-debug-panel";
+  panel.style.cssText = "position:fixed;right:8px;bottom:8px;width:360px;max-height:62vh;overflow:auto;z-index:99999;background:rgba(0,0,0,.88);border:1px solid #555;border-radius:8px;padding:8px;font:11px ui-monospace,monospace;color:#ddd";
+  panel.innerHTML = '<div style="font-weight:700;margin-bottom:6px">🔍 OCR DEBUG — raw | thresholded | result</div>';
+  document.body.appendChild(panel);
+ }
+ const row = document.createElement("div");
+ row.style.cssText = "display:flex;gap:6px;align-items:center;border-top:1px solid #333;padding:5px 0";
+ const raw = document.createElement("img");
+ raw.src = rawCanvas.toDataURL();
+ raw.style.cssText = "height:54px;border:1px solid #555;background:#222";
+ const proc = document.createElement("img");
+ proc.src = processedCanvas.toDataURL();
+ proc.style.cssText = "height:54px;border:1px solid #555;background:#fff";
+ const txt = document.createElement("div");
+ txt.style.cssText = "flex:1;min-width:0;word-break:break-all";
+ const cleaned = String(rawText).replace(/\s+/g, " ").trim();
+ const faceWH = box ? `${Math.round(box.width)}×${Math.round(box.height)}` : "?";
+ // Build via textContent — rawText is raw Tesseract output; never
+ // route it through innerHTML (Guardrail 7). esc() lives in
+ // dashboard.html, not here, so textContent is the safe choice.
+ const readLine = document.createElement("div");
+ const readVal = document.createElement("b");
+ readVal.style.color = cleaned ? "#7CFC9A" : "#ff7a7a";
+ readVal.textContent = `"${cleaned}"`;
+ readLine.append("read: ", readVal);
+ const metaLine = document.createElement("div");
+ metaLine.textContent = `conf: ${Math.round(conf)} · face: ${faceWH}px`;
+ txt.append(readLine, metaLine);
+ row.appendChild(raw); row.appendChild(proc); row.appendChild(txt);
+ panel.insertBefore(row, panel.children[1] || null);
+ while (panel.children.length > 25) panel.removeChild(panel.lastChild);
 }
 
 // ── OCR CROP GEOMETRY (mirror of checkpoint.html / Guardrail 24) ──
