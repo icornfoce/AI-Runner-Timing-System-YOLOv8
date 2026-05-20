@@ -396,32 +396,33 @@ async function init(){
   if (labeled.length > 0) faceMatcher = new faceapi.FaceMatcher(labeled, FACE_MATCH_DISTANCE);
   markStep("step-runners", "done");
 
-  // 3) Init Tesseract — digits-only whitelist + PSM 8 (single word).
-  // PSM history (Guardrail 20): 7 (single line) → 11 (sparse text) →
-  // 6 (uniform block) → 8 (single word), all on 2026-05-20.
-  //   • PSM 7 returned empty reads ("" / conf 0) on the old TALL crop
-  //     — it assumes the whole image is one text line and couldn't
-  //     locate a digit block inside a tall multi-content rectangle.
-  //   • PSM 11 (sparse text) located the digits but, on the same tall
-  //     noisy crop, hallucinated extra digit words from chin lines /
-  //     shirt wrinkles AND broke confidence scoring (a clean 4532
-  //     read came back as word "14532" at confidence 0).
-  //   • PSM 6 (uniform block) + the tightened crop dropped the noise
-  //     and read exactly "4532" — but confidence was STILL 0.
-  //   • PSM 8 ("single word") is the exact-fit mode for the tight
-  //     isolated-BIB crop and the most likely to score confidence.
-  // The conf===0 case is ALSO handled defensively in runOCRForFace
-  // (treated as "unscored", admitted on the face-match + whitelist +
-  // length gates) because Tesseract.js's LSTM + digit-whitelist
-  // confidence is intermittently 0 even on perfect reads regardless
-  // of PSM. Whitelist unchanged (digits only). checkpoint.html keeps
-  // PSM 7 (unrouted live mode, multi-frame voting, untestable here).
+  // 3) Init Tesseract — digits-only whitelist + PSM 6 (uniform block).
+  // PSM history (Guardrail 20), all 2026-05-20: 7 → 11 → 6 → 8 → 6.
+  //   • PSM 7 ("single line") returned empty reads ("" / conf 0) on
+  //     the old TALL crop — couldn't isolate the BIB in a tall
+  //     multi-content rectangle.
+  //   • PSM 11 ("sparse text") located the digits but hallucinated
+  //     noise from chin lines / wrinkles AND scored a clean 4532 read
+  //     as "14532" @ 0.
+  //   • PSM 8 ("single word") read NOTHING (words: none) — it expects
+  //     the image to be a single frame-filling word, but the crop is a
+  //     BIB block with surrounding fabric/padding. Reverted.
+  //   • PSM 6 ("uniform block") + the tightened crop is the winner:
+  //     it reads exactly "4532". Confidence still comes back 0 (the
+  //     Tesseract.js LSTM + digit-whitelist quirk), so the REAL fix is
+  //     the conf===0 resilience in runOCRForFace (a 0 is treated as
+  //     "unscored" and admitted on the face-match + whitelist + length
+  //     gates; a genuinely low read returns LOW NONZERO conf and is
+  //     still rejected). PSM 6 just has to RECOGNIZE the digits —
+  //     scoring them is no longer required.
+  // Whitelist unchanged (digits only). checkpoint.html keeps PSM 7
+  // (unrouted live mode, multi-frame voting, untestable here).
   markStep("step-ocr", "loading");
   try {
    tesseractWorker = await Tesseract.createWorker("eng");
    await tesseractWorker.setParameters({
     tessedit_char_whitelist: '0123456789',
-    tessedit_pageseg_mode: '8'
+    tessedit_pageseg_mode: '6'
    });
    ocrReady = true;
    markStep("step-ocr", "done");

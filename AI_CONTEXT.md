@@ -9,23 +9,26 @@
 > cadence, caching, or guardrails MUST update this file in the same change
 > set.
 >
-> **Last updated:** 2026-05-20 — **Drive Scanner OCR: PSM → 8 +
+> **Last updated:** 2026-05-20 — **Drive Scanner OCR: PSM 6 +
 > confidence-zero resilience (the read that finally works).** With
 > the tightened crop + PSM 6, the scanner read exactly `4532` but
 > Tesseract.js STILL scored it `0` (per-word panel: `4532@0`) —
 > the documented LSTM + digit-whitelist quirk that returns 0
 > confidence on perfect isolated-number reads, independent of PSM.
-> Two changes: (1) PSM `6 → 8` ("single word"), the exact-fit mode
-> for the now-isolated BIB crop; (2) `runOCRForFace` treats a
-> per-word `conf === 0` as **"unscored"** rather than "failed" and
-> admits the read on the strength of the other gates still fully in
-> force — face match (only known runners reach OCR), digit
-> whitelist, and BIB-length window. A genuinely low read returns a
-> LOW NONZERO conf and is still rejected by `OCR_MIN_CONFIDENCE`;
-> only the exact `0` sentinel is treated as unscored, so this is a
-> narrow quirk-handler, not a blanket bypass (and the scanner has
-> no consensus requirement — Guardrail 27 — so Guardrail 21 is
-> untouched). Guardrail 20 + §6.8 updated.
+> The actual fix is therefore NOT a PSM change: `runOCRForFace` now
+> treats a per-word `conf === 0` as **"unscored"** rather than
+> "failed" and admits the read on the strength of the other gates
+> still fully in force — face match (only known runners reach OCR),
+> digit whitelist, and BIB-length window. A genuinely low read
+> returns a LOW NONZERO conf and is still rejected by
+> `OCR_MIN_CONFIDENCE`; only the exact `0` sentinel is treated as
+> unscored, so this is a narrow quirk-handler, not a blanket bypass
+> (and the scanner has no consensus requirement — Guardrail 27 — so
+> Guardrail 21 is untouched). NOTE: PSM 8 ("single word") was tried
+> as the "exact-fit" mode but read NOTHING (`words: (none)`) — the
+> crop is a BIB block surrounded by fabric, not a frame-filling
+> word — so PSM stays at **6** (which recognizes the digits fine;
+> only the scoring was ever broken). Guardrail 20 + §6.8 updated.
 >
 > **Last updated:** 2026-05-20 — **Drive Scanner OCR: crop
 > tightening + PSM 11 → 6 (final OCR fix of the day).** Word-level
@@ -1372,9 +1375,9 @@ explicit, justified, and accompanied by an update to this file.
 20. **Tesseract worker config is part of the contract.** `tessedit_char_whitelist
     = '0123456789'` is set once at init and assumed by the validation
     gate. **`tessedit_pageseg_mode` diverges by file (2026-05-20):**
-    `photo_scanner.html` uses **PSM 8 (single word)**;
+    `photo_scanner.html` uses **PSM 6 (single uniform block)**;
     `checkpoint.html` retains **PSM 7 (single line)**. The scanner's
-    PSM went 7 → 11 → 6 → 8 in one day, paired with the crop tightening:
+    PSM went 7 → 11 → 6 → 8 → 6 in one day, paired with the crop tightening:
     - **PSM 7** ("single text line") returned empty reads (`""` /
       conf 0) on the OLD tall crop (`getOCRCropBox` was 0.5 → 3.0
       faceH) — it assumes the whole image is one line and couldn't
@@ -1388,8 +1391,11 @@ explicit, justified, and accompanied by an update to this file.
       crop** (`by = 1.1·faceH`, `bh = 2.2·faceH`, chopping off the
       neck/chin so Tesseract sees only the chest BIB block) dropped
       the noise and read exactly `4532` — but confidence was STILL 0.
-    - **PSM 8** ("single word") is the exact-fit mode for the tight
-      isolated-BIB crop and the final choice.
+    - **PSM 8** ("single word") read NOTHING (`words: (none)`) — it
+      expects the image to be a single frame-filling word, but the
+      crop is a BIB block surrounded by fabric/padding. Reverted.
+    - **PSM 6 is the final choice** (recognition works; scoring is no
+      longer required — see resilience below).
     **Confidence-zero resilience (the load-bearing part):** Tesseract.js
     (LSTM engine + digit whitelist) intermittently reports word
     confidence EXACTLY `0` on a *perfectly recognized* isolated number,
@@ -1405,7 +1411,7 @@ explicit, justified, and accompanied by an update to this file.
     so this does not touch Guardrail 21 (which governs `checkpoint.html`).
     `checkpoint.html` stays at PSM 7 (unrouted live mode, multi-frame
     voting, untestable without a camera) even though it now shares the
-    tightened crop; if live mode is re-enabled, evaluate PSM 8 + the
+    tightened crop; if live mode is re-enabled, evaluate PSM 6 + the
     conf-zero resilience there too. Do not change the whitelist or PSM
     without re-deriving the BIB length and per-word confidence
     thresholds. The scanner reads **per-word** confidence (not the
