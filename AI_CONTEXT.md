@@ -9,6 +9,23 @@
 > cadence, caching, or guardrails MUST update this file in the same change
 > set.
 >
+> **Last updated:** 2026-05-20 — **Drive Scanner OCR: crop
+> tightening + PSM 11 → 6 (final OCR fix of the day).** Word-level
+> extraction wasn't enough — the `?debug=1` per-word panel showed
+> the real BIB coming back as `14532@0` (a safety-pin/fold read as
+> a leading "1", AND zero confidence): PSM 11 on the tall noisy
+> crop was breaking Tesseract's confidence engine outright. Two
+> coordinated changes: (1) `getOCRCropBox` (both files, lockstep
+> per Guardrail 24/27) pushed the top edge down `0.5 → 1.1·faceH`
+> and trimmed height `3.0 → 2.2·faceH`, physically chopping off
+> the neck/chin/wrinkle region so only the chest BIB block remains;
+> (2) scanner Tesseract `tessedit_pageseg_mode` `11 → 6` (single
+> uniform block), which scores confidence reliably on a tight text
+> block. Word-level extraction + per-word confidence gate (from the
+> prior change) are kept — they compose cleanly with PSM 6.
+> `checkpoint.html` shares the tightened crop but stays on PSM 7
+> (unrouted, untestable). Guardrail 20 + 26 + §6.8 updated.
+>
 > **Last updated:** 2026-05-20 — **Drive Scanner OCR: word-level
 > BIB extraction (follow-up to the PSM 11 switch).** PSM 11 fixed
 > the empty reads but introduced a new failure: on the tall chest
@@ -1337,24 +1354,29 @@ explicit, justified, and accompanied by an update to this file.
 20. **Tesseract worker config is part of the contract.** `tessedit_char_whitelist
     = '0123456789'` is set once at init and assumed by the validation
     gate. **`tessedit_pageseg_mode` diverges by file (2026-05-20):**
-    `photo_scanner.html` uses **PSM 11 (sparse text)**;
-    `checkpoint.html` retains **PSM 7 (single line)**. Reason: both
-    files crop the SAME tall chest region (`getOCRCropBox`, 3·faceH),
-    but PSM 7 ("treat the whole image as one text line") returns
-    empty reads on that tall multi-content rectangle — confirmed via
-    `?debug=1` on a clean, high-res, perfectly-thresholded 4532 BIB
-    (185×226 px face) that still read `""` at conf 0. PSM 11 locates
-    the digit block anywhere in the crop and fixes the empty reads.
-    `checkpoint.html` stays at PSM 7 only because it's unrouted live
-    mode (untestable without a camera) and has multi-frame voting that
-    partially masked the issue; if live mode is ever re-enabled with
-    this crop geometry, mirror PSM 11 there too. Do not change the
-    whitelist or PSM without re-deriving the BIB length and confidence
-    thresholds. **Watch-item:** PSM 11 finds ALL digit blocks in the
-    crop, so a chest with the BIB plus a sponsor number could trip the
-    `MULTIPLE_BIBS` check (`\d{2,}` ≥ 2 blocks); if false
-    `MULTIPLE_BIBS` appear, raise `MULTIPLE_BIBS_MIN_BLOCKS` or filter
-    blocks by length rather than reverting PSM.
+    `photo_scanner.html` uses **PSM 6 (single uniform block)**;
+    `checkpoint.html` retains **PSM 7 (single line)**. The scanner's
+    PSM went 7 → 11 → 6 in one day, paired with the crop tightening:
+    - **PSM 7** ("single text line") returned empty reads (`""` /
+      conf 0) on the OLD tall crop (`getOCRCropBox` was 0.5 → 3.0
+      faceH) — it assumes the whole image is one line and couldn't
+      isolate the BIB inside a tall multi-content rectangle.
+    - **PSM 11** ("sparse text") located the digits but, on that same
+      tall noisy crop, hallucinated extra digit words from chin lines
+      / wrinkles AND broke confidence scoring (a clean 4532 read came
+      back as the word `14532` at confidence 0 — verified in the
+      `?debug=1` per-word panel).
+    - **PSM 6** ("single uniform block") + the **vertically-tightened
+      crop** (now `by = 1.1·faceH`, `bh = 2.2·faceH`, chopping off the
+      neck/chin so Tesseract sees only the chest BIB block) restores
+      reliable confidence scoring.
+    `checkpoint.html` stays at PSM 7 (unrouted live mode, multi-frame
+    voting, untestable without a camera) even though it now shares the
+    tightened crop; if live mode is re-enabled, evaluate PSM 6 there
+    too. Do not change the whitelist or PSM without re-deriving the
+    BIB length and per-word confidence thresholds. The scanner reads
+    **per-word** confidence (not the document average) — see
+    Guardrail 26.
 21. **Violations require majority consensus, not a single read.** The
     `castVote` → consensus gate exists because single-frame OCR
     misreads were generating false-positive `WRONG_PERSON` reports.
@@ -2306,12 +2328,18 @@ All responses are
 #### `photo_scanner.html` — Drive scanner
 
 **`getOCRCropBox` geometry (mirrored in `checkpoint.html` per Guardrail 27):**
-widened 2026-05-19 to `bx = box.x − 0.7·faceH`, `by = box.y + 0.5·faceH`,
-`bw = box.width + 1.4·faceH`, `bh = 3.0·faceH` (was `0.5 / 0.6 / 1.0 / 3.0`).
-The slightly higher top edge captures tight-portrait BIBs that hug the chin;
-the wider horizontal padding captures off-center BIBs on shoulder-strap race
-vests. `preprocessForOCR`'s adaptive threshold rejects the extra skin pixels
-uniformly, so widening adds no OCR noise. A DEBUG-only (`?debug=1`)
+**vertically tightened 2026-05-20** to `bx = box.x − 0.7·faceH`,
+`by = box.y + 1.1·faceH`, `bw = box.width + 1.4·faceH`, `bh = 2.2·faceH`
+(history: `0.5 / 0.6 / 1.0 / 3.0` → `0.7 / 0.5 / 1.4 / 3.0` on 2026-05-19 →
+current). The 2026-05-19 widening pulled the top edge UP (0.5·faceH) to
+catch chin-level BIBs, but that fed Tesseract the neck/chin/shirt-wrinkle
+region above the BIB, which under PSM 11 hallucinated digit noise and
+zeroed confidence. The 2026-05-20 change pushes the top edge back DOWN to
+1.1·faceH (just below the chin, squarely on the upper chest) and trims the
+height to 2.2·faceH so it doesn't scan the belly — giving PSM 6 a clean
+uniform block of BIB digits. Horizontal padding stays wide (0.7 each side)
+for off-center BIBs on shoulder-strap vests. `preprocessForOCR`'s adaptive
+threshold rejects skin pixels uniformly. A DEBUG-only (`?debug=1`)
 dashed-blue rectangle in the final UI pass of `processPhotoWithBytes`
 visualises this exact region per known face — painted AFTER every
 `runOCRForFace` read completes (Guardrail #31 OCR clause; the
