@@ -229,7 +229,22 @@ const FACE_MATCH_DISTANCE = 0.45;
 // live checkpoint loop maintains).
 const ADAPTIVE_THRESHOLD_BLOCK = 15;        // odd; 11–19 typical
 const ADAPTIVE_THRESHOLD_C = 10;
-const OCR_UPSCALE = 2;                      // nearest-neighbor
+const OCR_UPSCALE = 2;                      // nearest-neighbor (final, post-threshold)
+// Pre-threshold smooth upscale for SMALL crops (far-away runners). At
+// ~40px-wide BIBs the adaptive threshold merges adjacent digit strokes
+// into blobs (Tesseract reads nothing). Bilinear-upscaling the
+// grayscale to ~OCR_PRE_UPSCALE_TARGET on the long edge BEFORE
+// thresholding interpolates pixels between strokes so the threshold
+// can separate them. Only fires when the crop is below the target —
+// normal/large crops keep the proven threshold-then-NN path untouched.
+const OCR_PRE_UPSCALE_TARGET = 360;        // px target long-edge before threshold
+const OCR_PRE_UPSCALE_MAX = 4;             // cap on the pre-threshold factor
+// Below this face height, an EMPTY OCR read does NOT fire NO_BIB: the
+// BIB is unreadable at this resolution, not absent, so firing would be
+// a false violation. The face is still detected, face-matched, and
+// drawn — only the NO_BIB violation is suppressed. A SUCCESSFUL read
+// on a small face (pre-upscale got lucky) still identifies normally.
+const MIN_OCR_FACE_SIZE = 60;              // px faceH floor for firing NO_BIB
 // Scanner-specific OCR validation gate. History: 60 (initial) →
 // 80 (2026-05-17 audit, suppress sponsor-logo false positives like
 // "S2 3X" → "23" at conf=75) → 65 (2026-05-19, false NO_BIB on
@@ -1005,15 +1020,24 @@ async function handleKnownFace(canvas, hit, photo, detectionBoxes){
  //    fall back to the registered BIB to manufacture a success.
  //    Dedup key "name:NO_BIB" — one violation per runner per session
  //    (no OCR payload to vary on, unlike WRONG_PERSON / MULTIPLE_BIBS).
+ //    EXCEPTION: faces below MIN_OCR_FACE_SIZE are too low-res to read
+ //    a BIB even after the pre-threshold upscale — an empty read there
+ //    is "unreadable", not "absent", so we skip silently rather than
+ //    fire a false NO_BIB. The runner was still detected + face-matched
+ //    and will likely appear larger in another shot.
  if (!readBib){
-  await fireViolation({
-   name,
-   bib: "",
-   message: `No BIB detected on ${name} in "${photo.name}"`,
-   violationType: "NO_BIB",
-   photoFileId: photo.id,
-   detectionBoxes: detectionBoxes.slice(),
-  }, name + ":NO_BIB");
+  if (box.height >= MIN_OCR_FACE_SIZE){
+   await fireViolation({
+    name,
+    bib: "",
+    message: `No BIB detected on ${name} in "${photo.name}"`,
+    violationType: "NO_BIB",
+    photoFileId: photo.id,
+    detectionBoxes: detectionBoxes.slice(),
+   }, name + ":NO_BIB");
+  } else {
+   logSkip(name, `Face too small to read BIB (${Math.round(box.width)}×${Math.round(box.height)}px) · "${photo.name}"`);
+  }
   return;
  }
 
@@ -1273,13 +1297,32 @@ function getOCRCropBox(box, srcCanvas){
 }
 
 // ── OCR PREPROCESSING (mirror of checkpoint.html / Guardrail 19) ──
-// Grayscale (BT.601) → integral-image adaptive threshold → 2× NN.
-// Identical to checkpoint.html's implementation. Don't swap any step
-// or stage — the validation gate (Tesseract confidence + digit length)
-// was tuned against this exact pipeline.
+// [small-crop pre-upscale] → Grayscale (BT.601) → integral-image
+// adaptive threshold → 2× NN. Don't swap the threshold/NN steps — the
+// validation gate was tuned against this pipeline. The pre-upscale
+// (2026-05-20) fires ONLY for small crops: it bilinear-upscales the
+// source so digit strokes separate before the threshold, which still
+// outputs pure B/W — no gray pixels reach Tesseract (Guardrail 19's
+// real concern). Mirrored in checkpoint.html per Guardrail 19 + 27.
 function preprocessForOCR(srcCanvas){
- const w = srcCanvas.width, h = srcCanvas.height;
- const ctx = srcCanvas.getContext("2d");
+ // Small-crop pre-threshold bilinear upscale (far-away BIBs whose
+ // strokes otherwise merge into blobs). Runs before grayscale; the
+ // rest of the pipeline then operates at the larger size.
+ let workCanvas = srcCanvas;
+ const srcMax = Math.max(srcCanvas.width, srcCanvas.height);
+ if (srcMax > 0 && srcMax < OCR_PRE_UPSCALE_TARGET){
+  const f = Math.min(OCR_PRE_UPSCALE_MAX, Math.max(2, Math.round(OCR_PRE_UPSCALE_TARGET / srcMax)));
+  const up = document.createElement("canvas");
+  up.width = srcCanvas.width * f;
+  up.height = srcCanvas.height * f;
+  const uctx = up.getContext("2d");
+  uctx.imageSmoothingEnabled = true;        // bilinear — separates merged strokes; the threshold below re-binarizes to pure B/W
+  uctx.imageSmoothingQuality = "high";
+  uctx.drawImage(srcCanvas, 0, 0, up.width, up.height);
+  workCanvas = up;
+ }
+ const w = workCanvas.width, h = workCanvas.height;
+ const ctx = workCanvas.getContext("2d");
  const imgData = ctx.getImageData(0, 0, w, h);
  const src = imgData.data;
 

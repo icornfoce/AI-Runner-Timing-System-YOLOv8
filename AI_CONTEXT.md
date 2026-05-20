@@ -9,6 +9,24 @@
 > cadence, caching, or guardrails MUST update this file in the same change
 > set.
 >
+> **Last updated:** 2026-05-20 — **Drive Scanner OCR: small-face
+> handling (pre-threshold upscale + NO_BIB floor).** A far-away
+> runner (36×46 px face) read nothing — at that size the BIB crop
+> is ~40 px wide and the adaptive threshold merges adjacent digit
+> strokes into blobs. Two changes: (1) `preprocessForOCR` now
+> bilinear-upscales the source to ~`OCR_PRE_UPSCALE_TARGET` (360 px
+> long edge) BEFORE thresholding when the crop is small, so strokes
+> separate; the threshold still outputs pure B/W (no gray to
+> Tesseract, so Guardrail 19's intent holds — guardrail amended to
+> permit this one pre-threshold bilinear step). Large crops are
+> untouched. Mirrored in `checkpoint.html` (Guardrail 27). (2) New
+> `MIN_OCR_FACE_SIZE` (60 px) floor: an EMPTY read on a face below
+> it does NOT fire `NO_BIB` (the BIB is unreadable at that
+> resolution, not absent — firing would be a false violation); the
+> face is still detected, matched, and drawn, and a SUCCESSFUL
+> small-face read still identifies normally. `logSkip` records the
+> skip. Guardrail 19 + §6.8 updated.
+>
 > **Last updated:** 2026-05-20 — **Drive Scanner OCR: PSM 6 +
 > confidence-zero resilience (the read that finally works).** With
 > the tightened crop + PSM 6, the scanner read exactly `4532` but
@@ -1366,12 +1384,22 @@ explicit, justified, and accompanied by an update to this file.
     Tesseract confidence collapses. `processLoop` builds `box =
     smoothBox(name, rawBox)` once per detection and uses it for both
     the overlay and the OCR crop — preserve that contract.
-19. **OCR preprocessing is `grayscale → adaptive threshold → 2×
-    nearest-neighbor`, in that order, on the main thread.** Don't swap
-    in bilinear upscale (introduces gray pixels Tesseract mistreats).
-    Don't move it to a Web Worker (the postMessage round-trip is
-    larger than the work). Don't drop the threshold step (gray text on
-    gray jersey is the dominant failure mode without it).
+19. **OCR preprocessing is `[small-crop pre-upscale] → grayscale →
+    adaptive threshold → 2× nearest-neighbor`, on the main thread.**
+    The FINAL upscale must stay nearest-neighbor — bilinear there
+    introduces gray pixels Tesseract mistreats. **The 2026-05-20
+    pre-threshold upscale is the one allowed bilinear step:** for
+    crops whose long edge is below `OCR_PRE_UPSCALE_TARGET` (360 px),
+    the source is bilinear-upscaled BEFORE grayscale/threshold so a
+    far-away BIB's merged digit strokes separate; the threshold then
+    re-binarizes to pure B/W, so no gray ever reaches Tesseract
+    (which is what Guardrail 19 actually protects). Normal/large
+    crops skip the pre-upscale entirely and keep the exact prior
+    path. Don't move preprocessing to a Web Worker (postMessage
+    round-trip exceeds the work). Don't drop the threshold step
+    (gray text on gray jersey is the dominant failure mode without
+    it). Mirrored in `checkpoint.html` per Guardrail 27 (rarely
+    fires there — webcam faces are usually large).
 20. **Tesseract worker config is part of the contract.** `tessedit_char_whitelist
     = '0123456789'` is set once at init and assumed by the validation
     gate. **`tessedit_pageseg_mode` diverges by file (2026-05-20):**
@@ -2392,6 +2420,9 @@ body for the annotation).
 | `FACE_MATCH_DISTANCE` | `0.45` | `findBestMatch` threshold — same as live page; lower = stricter |
 | `OCR_MIN_CONFIDENCE` | `50` (history: `60` → `80` 2026-05-17 audit → `65` → `50` 2026-05-19; **semantics changed to PER-WORD 2026-05-20**) | **Per-word** Tesseract confidence floor (was the single-pass document-confidence floor until 2026-05-20). Under PSM 11 the document confidence is an average that noise words tank, so the gate now applies to each candidate WORD's own confidence (see Guardrail 20 + 26): a digit-only word must be `BIB_MIN_LEN..BIB_MAX_LEN` long AND score ≥ this floor to be a BIB candidate. `50` comfortably admits a cleanly-printed BIB (word-conf typically 80–95) while rejecting chin-line / wrinkle noise (single-digit conf). **A per-word `conf === 0` is exempt from this gate** (treated as "unscored", admitted on the face-match + whitelist + length gates) because Tesseract.js's LSTM + digit-whitelist scoring is intermittently 0 on perfect reads — see Guardrail 20. Raise toward ~65 if a 2-digit noise word ever survives and trips a false `MULTIPLE_BIBS`; lower toward ~40 only if a real BIB word is being rejected (a NONZERO low score; the `0` case is already handled). |
 | `BIB_MIN_LEN` / `BIB_MAX_LEN` | `2` / `6` (was `1` / `6` pre-audit) | Accepted BIB length range. Min raised to 2 post-audit to reject single-digit fragments that pass the digit-only filter on garbage reads |
+| `OCR_PRE_UPSCALE_TARGET` | `360` | Long-edge px target for the pre-threshold bilinear upscale. Crops below this are upscaled BEFORE thresholding so far-away BIB strokes separate instead of bleeding (2026-05-20). Mirror of `checkpoint.html`. |
+| `OCR_PRE_UPSCALE_MAX` | `4` | Cap on the pre-threshold upscale factor (avoids blowing up a 20 px crop to absurd size). |
+| `MIN_OCR_FACE_SIZE` | `60` | Face-height floor (px) for firing `NO_BIB`. Below it, an empty OCR read is treated as "unreadable, not absent" and skipped silently (no false violation); a successful read still identifies. Distinct from `MIN_FACE_SIZE` (detection-time gate, currently 0) — this one only gates the NO_BIB violation, never drops the face. |
 | `ADAPTIVE_THRESHOLD_BLOCK` | `15` | Local-window size for adaptive threshold (mirror of `checkpoint.html`) |
 | `ADAPTIVE_THRESHOLD_C` | `10` | Mean offset (mirror of `checkpoint.html`) |
 | `OCR_UPSCALE` | `2` | Nearest-neighbor scale factor before OCR (mirror of `checkpoint.html`) |

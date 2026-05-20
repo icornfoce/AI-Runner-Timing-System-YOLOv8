@@ -154,6 +154,11 @@ const OCR_CACHE_TTL_MS = 15000;             // stale read purge AND vote-buffer 
 const ADAPTIVE_THRESHOLD_BLOCK = 15;        // odd; 11–19 typical
 const ADAPTIVE_THRESHOLD_C = 10;
 const OCR_UPSCALE = 2;                      // nearest-neighbor; preserves binary edges
+// Pre-threshold smooth upscale for small crops — mirrored from
+// photo_scanner.html per Guardrail 19 + 27 (2026-05-20). Rarely fires
+// in live mode (webcam faces are usually large), but kept in lockstep.
+const OCR_PRE_UPSCALE_TARGET = 360;        // px target long-edge before threshold
+const OCR_PRE_UPSCALE_MAX = 4;             // cap on the pre-threshold factor
 
 // FIELD-TEST: relaxed for indoor lighting + short BIBs.
 // Revert to 70 / 2 / 5 once real-world setups are validated. The
@@ -355,8 +360,23 @@ function smoothBox(name, raw){
 // is binary, and bilinear would introduce gray pixels that Tesseract
 // occasionally mistreats as noise.
 function preprocessForOCR(srcCanvas){
- const w=srcCanvas.width, h=srcCanvas.height;
- const ctx=srcCanvas.getContext("2d");
+ // Small-crop pre-threshold bilinear upscale (mirror of
+ // photo_scanner.html, Guardrail 19 + 27). Separates merged digit
+ // strokes on tiny crops before the threshold; threshold below still
+ // outputs pure B/W so no gray reaches Tesseract.
+ let workCanvas=srcCanvas;
+ const srcMax=Math.max(srcCanvas.width, srcCanvas.height);
+ if(srcMax>0 && srcMax<OCR_PRE_UPSCALE_TARGET){
+  const f=Math.min(OCR_PRE_UPSCALE_MAX, Math.max(2, Math.round(OCR_PRE_UPSCALE_TARGET/srcMax)));
+  const up=document.createElement("canvas");
+  up.width=srcCanvas.width*f; up.height=srcCanvas.height*f;
+  const uctx=up.getContext("2d");
+  uctx.imageSmoothingEnabled=true; uctx.imageSmoothingQuality="high";
+  uctx.drawImage(srcCanvas,0,0,up.width,up.height);
+  workCanvas=up;
+ }
+ const w=workCanvas.width, h=workCanvas.height;
+ const ctx=workCanvas.getContext("2d");
  const imgData=ctx.getImageData(0,0,w,h);
  const src=imgData.data;
 
