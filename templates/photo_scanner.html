@@ -261,6 +261,14 @@ const MIN_OCR_FACE_SIZE = 60;              // px faceH floor for firing NO_BIB
 const OCR_MIN_CONFIDENCE = 50;              // 60 → 80 (audit) → 65 → 50 (2026-05-19, BIB still failing at 65)
 const BIB_MIN_LEN = 2;                      // was 1
 const BIB_MAX_LEN = 6;
+// Multi-PSM fallback (2026-05-20). No single PSM fits both layouts:
+// PSM 6 ("uniform block") reads normal/large-face BIBs but fragments
+// the digit row on small upscaled crops (grabs a single digit); PSM 7
+// ("single line") reads a clean horizontal number better. runOCRForFace
+// tries these in order and stops at the first that yields a valid BIB
+// candidate — so normal reads stay single-pass; only failures pay for
+// the second recognize. See Guardrail 20.
+const OCR_PSM_ATTEMPTS = ['6', '7'];
 
 // ── MULTIPLE_BIBS DETECTION (carried over from checkpoint.html) ──
 // RAW Tesseract text is checked BEFORE digit-only normalization, per
@@ -411,33 +419,28 @@ async function init(){
   if (labeled.length > 0) faceMatcher = new faceapi.FaceMatcher(labeled, FACE_MATCH_DISTANCE);
   markStep("step-runners", "done");
 
-  // 3) Init Tesseract — digits-only whitelist + PSM 6 (uniform block).
-  // PSM history (Guardrail 20), all 2026-05-20: 7 → 11 → 6 → 8 → 6.
-  //   • PSM 7 ("single line") returned empty reads ("" / conf 0) on
-  //     the old TALL crop — couldn't isolate the BIB in a tall
-  //     multi-content rectangle.
-  //   • PSM 11 ("sparse text") located the digits but hallucinated
-  //     noise from chin lines / wrinkles AND scored a clean 4532 read
-  //     as "14532" @ 0.
-  //   • PSM 8 ("single word") read NOTHING (words: none) — it expects
-  //     the image to be a single frame-filling word, but the crop is a
-  //     BIB block with surrounding fabric/padding. Reverted.
-  //   • PSM 6 ("uniform block") + the tightened crop is the winner:
-  //     it reads exactly "4532". Confidence still comes back 0 (the
-  //     Tesseract.js LSTM + digit-whitelist quirk), so the REAL fix is
-  //     the conf===0 resilience in runOCRForFace (a 0 is treated as
-  //     "unscored" and admitted on the face-match + whitelist + length
-  //     gates; a genuinely low read returns LOW NONZERO conf and is
-  //     still rejected). PSM 6 just has to RECOGNIZE the digits —
-  //     scoring them is no longer required.
-  // Whitelist unchanged (digits only). checkpoint.html keeps PSM 7
-  // (unrouted live mode, multi-frame voting, untestable here).
+  // 3) Init Tesseract — digits-only whitelist. PSM is no longer fixed
+  // here: `runOCRForFace` drives it PER PASS via the multi-PSM
+  // fallback (OCR_PSM_ATTEMPTS = ['6','7']) — this init value is just
+  // the starting state. The PSM odyssey (Guardrail 20), all 2026-05-20:
+  //   • PSM 7 ("single line") — empty reads on the old TALL crop.
+  //   • PSM 11 ("sparse text") — hallucinated chin/wrinkle noise; a
+  //     clean 4532 came back "14532" @ 0.
+  //   • PSM 6 ("uniform block") + the tightened crop reads large-face
+  //     BIBs ("4532"), but its confidence is the Tesseract.js LSTM +
+  //     digit-whitelist 0 quirk (handled by the conf===0 resilience in
+  //     buildBibCandidates), AND it fragments SMALL upscaled crops into
+  //     a single digit ("2@10").
+  //   • PSM 7 reads those clean small-face digit rows better.
+  // Net: no single PSM fits both layouts, so we try 6 then 7 and take
+  // the first valid BIB. Whitelist unchanged (digits only).
+  // checkpoint.html keeps a single PSM 7 (unrouted, untestable).
   markStep("step-ocr", "loading");
   try {
    tesseractWorker = await Tesseract.createWorker("eng");
    await tesseractWorker.setParameters({
     tessedit_char_whitelist: '0123456789',
-    tessedit_pageseg_mode: '6'
+    tessedit_pageseg_mode: OCR_PSM_ATTEMPTS[0]
    });
    ocrReady = true;
    markStep("step-ocr", "done");
@@ -1127,35 +1130,62 @@ async function runOCRForFace(srcCanvas, box){
  cropCanvas.getContext("2d").drawImage(srcCanvas, bx, by, bw, bh, 0, 0, bw, bh);
 
  const processed = preprocessForOCR(cropCanvas);
- // Request the block hierarchy so per-word data is populated. We
- // evaluate each WORD's own confidence, NOT the document average:
- // under PSM 11 (sparse text) the real BIB comes back as one
- // high-confidence word while chin lines / shirt wrinkles produce
- // extra low-confidence digit words. The document confidence is an
- // average those junk words tank to single digits (a clean 4532 BIB
- // read at word-conf ~90 still showed document conf 4), so gating on
- // it throws away good reads. See AI_CONTEXT Guardrail 20 + 26.
- const result = await tesseractWorker.recognize(processed, {}, { blocks: true });
- const rawText = String(result.data.text || "");
- const docConf = Number(result.data.confidence || 0);
- const words = extractOcrWords(result.data);
 
- // Per-word digit candidates: digits-only, BIB-length, per-word conf
- // gate. Drops single-digit noise ("5", "1") on length and genuinely
- // low-confidence noise on the threshold.
- //
- // Confidence gate with a quirk-resilient escape: Tesseract.js
- // (LSTM engine + digit whitelist) intermittently reports
- // confidence EXACTLY 0 on a perfectly-recognized isolated number —
- // observed on a clean, tightly-cropped 4532 BIB that read "4532"
- // but scored 0 (verified in the ?debug=1 per-word panel). We treat
- // an exact 0 as "unscored" (not "failed") and admit the read on
- // the strength of the OTHER gates that are still fully in force:
- // the face match (only known runners reach OCR), the digit
- // whitelist, and the BIB-length window. A genuinely low-quality
- // read returns a LOW NONZERO confidence and is still rejected by
- // the threshold. This is NOT a blanket bypass — it fires only for
- // the documented conf===0 sentinel. See AI_CONTEXT Guardrail 20.
+ // Multi-PSM fallback (see OCR_PSM_ATTEMPTS). Request the block
+ // hierarchy each pass so per-word data is populated — we evaluate
+ // each WORD's own confidence, not the document average (which noise
+ // words tank; see Guardrail 20 + 26). Stop at the first PSM that
+ // produces a valid BIB candidate so normal reads stay single-pass.
+ let candidates = [];
+ let confByBib = {};
+ for (const psm of OCR_PSM_ATTEMPTS){
+  await tesseractWorker.setParameters({ tessedit_pageseg_mode: psm });
+  const result = await tesseractWorker.recognize(processed, {}, { blocks: true });
+  const rawText = String(result.data.text || "");
+  const docConf = Number(result.data.confidence || 0);
+  const words = extractOcrWords(result.data);
+  const built = buildBibCandidates(words);
+  candidates = built.candidates;
+  confByBib = built.confByBib;
+
+  if (DEBUG){
+   console.log("[debug] OCR", { psm, rawText, docConf, words: words.map(w => `${w.text}@${Math.round(w.conf)}`), candidates });
+   // Dump the raw chest crop + thresholded crop + per-word breakdown
+   // (labelled with the PSM that produced it) so we can see exactly
+   // which mode read what.
+   dumpOcrCrop(cropCanvas, processed, rawText, docConf, box, words, candidates, psm);
+  }
+
+  if (candidates.length) break;   // got a valid BIB — don't pay for the next PSM
+ }
+
+ // MULTIPLE_BIBS — keyed on DISTINCT BIB-length words (Tesseract's own
+ // segmentation), not a raw-text \d{2,} regex. Two genuinely-different
+ // valid BIBs = a real multi-BIB chest; noise was filtered above.
+ if (candidates.length >= MULTIPLE_BIBS_MIN_BLOCKS){
+  return { multipleBibsBlocks: candidates };
+ }
+ if (candidates.length === 0){
+  // No word passed the digit-length + confidence gate under any PSM.
+  return null;
+ }
+ return { bib: candidates[0], conf: confByBib[candidates[0]] };
+}
+
+// Build the BIB candidate set from a [{text, conf}] word list: digits-
+// only, BIB-length, per-word confidence gate. Drops single-digit noise
+// on length and genuinely low-confidence noise on the threshold.
+//
+// Confidence gate with a quirk-resilient escape: Tesseract.js (LSTM +
+// digit whitelist) intermittently reports confidence EXACTLY 0 on a
+// perfectly-recognized isolated number (observed on a clean 4532 BIB
+// that read "4532" @ 0). We treat an exact 0 as "unscored" (not
+// "failed") and admit the read on the OTHER gates still in force: face
+// match (only known runners reach OCR), digit whitelist, BIB-length.
+// A genuinely low read returns a LOW NONZERO conf and is still
+// rejected. NOT a blanket bypass — only the conf===0 sentinel.
+// See AI_CONTEXT Guardrail 20.
+function buildBibCandidates(words){
  const confByBib = {};
  const candidates = [];
  for (const w of words){
@@ -1167,29 +1197,7 @@ async function runOCRForFace(srcCanvas, box){
   if (confByBib[digits] == null){ confByBib[digits] = wconf; candidates.push(digits); }
   else if (wconf > confByBib[digits]){ confByBib[digits] = wconf; }
  }
-
- if (DEBUG){
-  console.log("[debug] OCR", { rawText, docConf, words: words.map(w => `${w.text}@${Math.round(w.conf)}`), candidates });
-  // Dump the exact pixels Tesseract saw — raw chest crop + the
-  // thresholded version — plus the per-word breakdown, so we can tell
-  // a geometry miss from a recognition failure AND see which words
-  // survived the digit-length + per-word-confidence filter.
-  dumpOcrCrop(cropCanvas, processed, rawText, docConf, box, words, candidates);
- }
-
- // MULTIPLE_BIBS — now keyed on DISTINCT high-confidence BIB-length
- // words (Tesseract's own segmentation), not a raw-text \d{2,} regex.
- // Two genuinely-different valid BIBs = a real multi-BIB chest; junk
- // words were already filtered out by the confidence gate above.
- if (candidates.length >= MULTIPLE_BIBS_MIN_BLOCKS){
-  return { multipleBibsBlocks: candidates };
- }
-
- if (candidates.length === 0){
-  // No word passed the digit-length + confidence gate.
-  return null;
- }
- return { bib: candidates[0], conf: confByBib[candidates[0]] };
+ return { candidates, confByBib };
 }
 
 // Flatten Tesseract's result into a [{text, conf}] word list. Prefers
@@ -1226,7 +1234,7 @@ function extractOcrWords(data){
 // (geometry), and (b) is the BIB legible after preprocessing
 // (recognition). Capped at 24 most-recent entries. No-op unless
 // DEBUG, so zero production cost.
-function dumpOcrCrop(rawCanvas, processedCanvas, rawText, docConf, box, words, candidates){
+function dumpOcrCrop(rawCanvas, processedCanvas, rawText, docConf, box, words, candidates, psm){
  let panel = document.getElementById("ocr-debug-panel");
  if (!panel){
   panel = document.createElement("div");
@@ -1262,7 +1270,7 @@ function dumpOcrCrop(rawCanvas, processedCanvas, rawText, docConf, box, words, c
    : "(none)");
  const metaLine = document.createElement("div");
  metaLine.style.color = "#888";
- metaLine.textContent = `docConf: ${Math.round(docConf)} · face: ${faceWH}px`;
+ metaLine.textContent = `psm: ${psm != null ? psm : "?"} · docConf: ${Math.round(docConf)} · face: ${faceWH}px`;
  txt.append(pickedLine, wordsLine, metaLine);
  row.appendChild(raw); row.appendChild(proc); row.appendChild(txt);
  panel.insertBefore(row, panel.children[1] || null);

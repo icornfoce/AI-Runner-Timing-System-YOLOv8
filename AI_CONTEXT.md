@@ -9,6 +9,20 @@
 > cadence, caching, or guardrails MUST update this file in the same change
 > set.
 >
+> **Last updated:** 2026-05-20 — **Drive Scanner OCR: multi-PSM
+> fallback `[6, 7]`.** After the small-crop pre-upscale, a tiny
+> face's thresholded crop was clean (separated digits) but PSM 6
+> fragmented the digit row and read a single `2@10`. PSM 6 is still
+> needed for normal/large faces (it reads `4532`), so no single PSM
+> fits both the block (large) and line (small) layouts.
+> `runOCRForFace` now tries `OCR_PSM_ATTEMPTS = ['6','7']` in order
+> (setting PSM per pass) and stops at the first that yields a valid
+> BIB — normal reads stay single-pass; only failures pay for the
+> second recognize. Candidate filtering was extracted into
+> `buildBibCandidates` (shared across passes). The `?debug=1` panel
+> now labels each row with the PSM that produced it. Guardrail 20 +
+> §6.8 updated.
+>
 > **Last updated:** 2026-05-20 — **Drive Scanner OCR: small-face
 > handling (pre-threshold upscale + NO_BIB floor).** A far-away
 > runner (36×46 px face) read nothing — at that size the BIB crop
@@ -1403,9 +1417,12 @@ explicit, justified, and accompanied by an update to this file.
 20. **Tesseract worker config is part of the contract.** `tessedit_char_whitelist
     = '0123456789'` is set once at init and assumed by the validation
     gate. **`tessedit_pageseg_mode` diverges by file (2026-05-20):**
-    `photo_scanner.html` uses **PSM 6 (single uniform block)**;
-    `checkpoint.html` retains **PSM 7 (single line)**. The scanner's
-    PSM went 7 → 11 → 6 → 8 → 6 in one day, paired with the crop tightening:
+    `photo_scanner.html` uses a **multi-PSM fallback**
+    (`OCR_PSM_ATTEMPTS = ['6','7']` — try PSM 6, fall back to PSM 7
+    only when 6 yields no valid BIB; `runOCRForFace` sets PSM per pass);
+    `checkpoint.html` retains a single **PSM 7 (single line)**. The
+    scanner's PSM went 7 → 11 → 6 → 8 → 6 → [6,7] in one day, paired
+    with the crop tightening:
     - **PSM 7** ("single text line") returned empty reads (`""` /
       conf 0) on the OLD tall crop (`getOCRCropBox` was 0.5 → 3.0
       faceH) — it assumes the whole image is one line and couldn't
@@ -1422,8 +1439,13 @@ explicit, justified, and accompanied by an update to this file.
     - **PSM 8** ("single word") read NOTHING (`words: (none)`) — it
       expects the image to be a single frame-filling word, but the
       crop is a BIB block surrounded by fabric/padding. Reverted.
-    - **PSM 6 is the final choice** (recognition works; scoring is no
-      longer required — see resilience below).
+    - **PSM 6** works for normal/large faces but, on a small face's
+      pre-upscaled crop, FRAGMENTS the digit row and grabs a single
+      digit (`2@10`). **PSM 7** reads that clean horizontal row better.
+    - **Final: multi-PSM fallback `[6, 7]`** — no single PSM fits both
+      the large-face (block) and small-face (line) layouts, so try 6
+      then 7 and take the first that yields a valid BIB. Only failures
+      pay for the second pass.
     **Confidence-zero resilience (the load-bearing part):** Tesseract.js
     (LSTM engine + digit whitelist) intermittently reports word
     confidence EXACTLY `0` on a *perfectly recognized* isolated number,
@@ -2420,6 +2442,7 @@ body for the annotation).
 | `FACE_MATCH_DISTANCE` | `0.45` | `findBestMatch` threshold — same as live page; lower = stricter |
 | `OCR_MIN_CONFIDENCE` | `50` (history: `60` → `80` 2026-05-17 audit → `65` → `50` 2026-05-19; **semantics changed to PER-WORD 2026-05-20**) | **Per-word** Tesseract confidence floor (was the single-pass document-confidence floor until 2026-05-20). Under PSM 11 the document confidence is an average that noise words tank, so the gate now applies to each candidate WORD's own confidence (see Guardrail 20 + 26): a digit-only word must be `BIB_MIN_LEN..BIB_MAX_LEN` long AND score ≥ this floor to be a BIB candidate. `50` comfortably admits a cleanly-printed BIB (word-conf typically 80–95) while rejecting chin-line / wrinkle noise (single-digit conf). **A per-word `conf === 0` is exempt from this gate** (treated as "unscored", admitted on the face-match + whitelist + length gates) because Tesseract.js's LSTM + digit-whitelist scoring is intermittently 0 on perfect reads — see Guardrail 20. Raise toward ~65 if a 2-digit noise word ever survives and trips a false `MULTIPLE_BIBS`; lower toward ~40 only if a real BIB word is being rejected (a NONZERO low score; the `0` case is already handled). |
 | `BIB_MIN_LEN` / `BIB_MAX_LEN` | `2` / `6` (was `1` / `6` pre-audit) | Accepted BIB length range. Min raised to 2 post-audit to reject single-digit fragments that pass the digit-only filter on garbage reads |
+| `OCR_PSM_ATTEMPTS` | `['6','7']` | Multi-PSM fallback order (2026-05-20). `runOCRForFace` tries each in turn, stopping at the first that yields a valid BIB. PSM 6 (uniform block) fits normal/large faces; PSM 7 (single line) fits small upscaled digit rows that 6 fragments. Only failures pay for the extra pass. |
 | `OCR_PRE_UPSCALE_TARGET` | `360` | Long-edge px target for the pre-threshold bilinear upscale. Crops below this are upscaled BEFORE thresholding so far-away BIB strokes separate instead of bleeding (2026-05-20). Mirror of `checkpoint.html`. |
 | `OCR_PRE_UPSCALE_MAX` | `4` | Cap on the pre-threshold upscale factor (avoids blowing up a 20 px crop to absurd size). |
 | `MIN_OCR_FACE_SIZE` | `60` | Face-height floor (px) for firing `NO_BIB`. Below it, an empty OCR read is treated as "unreadable, not absent" and skipped silently (no false violation); a successful read still identifies. Distinct from `MIN_FACE_SIZE` (detection-time gate, currently 0) — this one only gates the NO_BIB violation, never drops the face. |
