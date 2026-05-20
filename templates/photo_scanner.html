@@ -396,15 +396,28 @@ async function init(){
   if (labeled.length > 0) faceMatcher = new faceapi.FaceMatcher(labeled, FACE_MATCH_DISTANCE);
   markStep("step-runners", "done");
 
-  // 3) Init Tesseract — identical worker config to checkpoint.html
-  // (digits-only whitelist + PSM 7) per Guardrail 20. Don't change
-  // these without re-deriving the validation thresholds.
+  // 3) Init Tesseract — digits-only whitelist + PSM 11 (sparse text).
+  // PSM CHANGED 7 → 11 on 2026-05-20 (Guardrail 20). PSM 7 ("single
+  // text line") was returning empty reads ("" / conf 0) on the
+  // scanner's chest crop even when the crop was a clean, high-res,
+  // perfectly-thresholded BIB — confirmed via ?debug=1 on a 4532 BIB
+  // (185×226px face, flawless thresholded crop, still read ""). Root
+  // cause: getOCRCropBox produces a TALL region (3·faceH ≈ 2× face
+  // heights below the chin), and PSM 7 assumes the whole image is ONE
+  // line of text — it can't locate a digit block sitting inside a
+  // tall multi-content rectangle. PSM 11 ("sparse text — find as much
+  // text as possible, no particular order") locates the BIB block
+  // anywhere in the crop. Whitelist unchanged (digits only).
+  // checkpoint.html still uses PSM 7 (it's unrouted live mode with
+  // multi-frame voting and is untestable here) — if live mode is
+  // re-enabled with this same tall crop geometry, mirror PSM 11 there
+  // too (see Guardrail 20 note).
   markStep("step-ocr", "loading");
   try {
    tesseractWorker = await Tesseract.createWorker("eng");
    await tesseractWorker.setParameters({
     tessedit_char_whitelist: '0123456789',
-    tessedit_pageseg_mode: '7'
+    tessedit_pageseg_mode: '11'
    });
    ocrReady = true;
    markStep("step-ocr", "done");

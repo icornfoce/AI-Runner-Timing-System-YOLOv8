@@ -9,6 +9,27 @@
 > cadence, caching, or guardrails MUST update this file in the same change
 > set.
 >
+> **Last updated:** 2026-05-20 — **Drive Scanner OCR fixed: PSM
+> 7 → 11.** The scanner was returning empty BIB reads (`""`,
+> conf 0) even on clean, high-res, perfectly-thresholded crops —
+> diagnosed via the new `?debug=1` OCR crop-dump panel on a 4532
+> BIB (185×226 px face, flawless thresholded crop, still read
+> `""`). Root cause: `getOCRCropBox` crops a TALL region
+> (3·faceH), but Tesseract was in PSM 7 ("single text line"),
+> which assumes the whole image is one line and can't find a
+> digit block inside a tall multi-content rectangle.
+> `tessedit_pageseg_mode` is now **11 (sparse text)** in
+> `photo_scanner.html` — finds the BIB block anywhere in the
+> crop. Whitelist (digits-only) unchanged. `checkpoint.html`
+> keeps PSM 7 (unrouted live mode, untestable, multi-frame
+> voting). Guardrail 20 updated to record the per-file PSM
+> divergence + a watch-item: PSM 11 finds ALL digit blocks, so
+> if a sponsor number trips false `MULTIPLE_BIBS`, raise
+> `MULTIPLE_BIBS_MIN_BLOCKS` rather than reverting PSM. Also
+> added (debug-only): a bottom-right OCR crop-dump panel under
+> `?debug=1` showing raw crop + thresholded crop + read result
+> per face.
+>
 > **Last updated:** 2026-05-20 — **Drive image URL contract
 > switched from the `drive.google.com/thumbnail` form to the
 > `lh3.googleusercontent.com/d/<id>=w800` form.** Google made
@@ -1293,9 +1314,26 @@ explicit, justified, and accompanied by an update to this file.
     larger than the work). Don't drop the threshold step (gray text on
     gray jersey is the dominant failure mode without it).
 20. **Tesseract worker config is part of the contract.** `tessedit_char_whitelist
-    = '0123456789'` and `tessedit_pageseg_mode = '7'` are set once at
-    init and assumed by the validation gate. Do not change these
-    without re-deriving the BIB length and confidence thresholds.
+    = '0123456789'` is set once at init and assumed by the validation
+    gate. **`tessedit_pageseg_mode` diverges by file (2026-05-20):**
+    `photo_scanner.html` uses **PSM 11 (sparse text)**;
+    `checkpoint.html` retains **PSM 7 (single line)**. Reason: both
+    files crop the SAME tall chest region (`getOCRCropBox`, 3·faceH),
+    but PSM 7 ("treat the whole image as one text line") returns
+    empty reads on that tall multi-content rectangle — confirmed via
+    `?debug=1` on a clean, high-res, perfectly-thresholded 4532 BIB
+    (185×226 px face) that still read `""` at conf 0. PSM 11 locates
+    the digit block anywhere in the crop and fixes the empty reads.
+    `checkpoint.html` stays at PSM 7 only because it's unrouted live
+    mode (untestable without a camera) and has multi-frame voting that
+    partially masked the issue; if live mode is ever re-enabled with
+    this crop geometry, mirror PSM 11 there too. Do not change the
+    whitelist or PSM without re-deriving the BIB length and confidence
+    thresholds. **Watch-item:** PSM 11 finds ALL digit blocks in the
+    crop, so a chest with the BIB plus a sponsor number could trip the
+    `MULTIPLE_BIBS` check (`\d{2,}` ≥ 2 blocks); if false
+    `MULTIPLE_BIBS` appear, raise `MULTIPLE_BIBS_MIN_BLOCKS` or filter
+    blocks by length rather than reverting PSM.
 21. **Violations require majority consensus, not a single read.** The
     `castVote` → consensus gate exists because single-frame OCR
     misreads were generating false-positive `WRONG_PERSON` reports.
