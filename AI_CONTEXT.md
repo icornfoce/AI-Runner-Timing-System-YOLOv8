@@ -9,6 +9,26 @@
 > cadence, caching, or guardrails MUST update this file in the same change
 > set.
 >
+> **Last updated:** 2026-05-21 — **Drive Scanner: face-only
+> identification for sub-floor faces.** Previously a face below
+> `MIN_OCR_FACE_SIZE` (60 px) whose BIB couldn't be OCR'd was
+> skipped entirely (counted as nothing). Operator decision: those
+> distant runners ARE wearing correct BIBs, just unreadable at
+> that resolution — so `handleKnownFace` now **face-only
+> identifies** them: trust the face match, record the registered
+> BIB via `sendIdentification(..., faceOnly=true)`, flagged
+> `face-only · unverified` in the scanner log. No `WRONG_PERSON`
+> check is possible (no OCR'd BIB), so wrong-BIB cheating can't be
+> detected for these — the accepted trade for counting distant
+> runners. Scoped STRICTLY to sub-floor faces (new Guardrail 32):
+> readable faces (≥ 60 px) keep strict BIB verification so
+> `WRONG_PERSON`/`NO_BIB` still fire, and the registration-photo
+> false-✅ risk stays contained (those are large faces). Dedup uses
+> a dedicated `"name:faceonly"` key so a later readable shot still
+> fires a real verified ID (which can correct the record via
+> `WRONG_PERSON` + `markCheating`). §4.7 layer 6 + §6.8
+> `MIN_OCR_FACE_SIZE` updated.
+>
 > **Last updated:** 2026-05-20 — **Drive Scanner OCR: multi-PSM
 > fallback `[6, 7]`.** After the small-crop pre-upscale, a tiny
 > face's thresholded crop was clean (separated digits) but PSM 6
@@ -1228,17 +1248,28 @@ is load-bearing:
    the Tesseract.js LSTM+whitelist "perfect read scored 0" quirk —
    treated as "unscored" and admitted on the face-match + whitelist +
    length gates. A LOW NONZERO conf is still rejected.
-6. **Size floor** (`MIN_OCR_FACE_SIZE = 60`, `handleKnownFace`): a face
-   below the floor that reads empty is skipped silently — the BIB is
-   unreadable at that resolution, not absent, so NO false `NO_BIB`
-   fires. (A successful small-face read still identifies.)
+6. **Size floor + face-only ID** (`MIN_OCR_FACE_SIZE = 60`,
+   `handleKnownFace`, Guardrail 32): a face below the floor that reads
+   empty is NOT a `NO_BIB` (the BIB is unreadable at that resolution,
+   not absent). Instead the runner is **face-only identified** — we
+   trust the face match and record the registered BIB, flagged
+   `face-only · unverified` in the scanner log. No `WRONG_PERSON`
+   check is possible (no OCR'd BIB to compare), so this path cannot
+   detect wrong-BIB cheating — the accepted trade for counting distant
+   runners (operator decision 2026-05-21). Dedup uses a dedicated
+   `"name:faceonly"` key so a later READABLE shot of the same runner
+   still fires a real, verified identification (which can surface
+   `WRONG_PERSON` + `markCheating`, correcting the record). A
+   successful small-face read (pre-upscale got lucky) also still
+   identifies normally.
 
-Net behavior by face size: large faces identify on PSM 6 single-pass;
-mid/small faces get the pre-upscale + PSM 7 retry; deep-background
-faces (<60px) degrade gracefully to a silent skip. The `?debug=1`
-crop-dump panel (permanent) shows raw crop / thresholded crop /
-per-word reads / PSM per face — it is the tool that diagnosed every
-layer above.
+Net behavior by face size: large faces identify on PSM 6 single-pass
+(strict BIB verification, `WRONG_PERSON`/`NO_BIB` active); mid/small
+faces get the pre-upscale + PSM 7 retry; deep-background faces (<60px)
+that can't be read fall back to face-only identification (counted, but
+BIB unverified). The `?debug=1` crop-dump panel (permanent) shows raw
+crop / thresholded crop / per-word reads / PSM per face — it is the
+tool that diagnosed every layer above.
 
 **Why SSD MobileNet, not TinyFaceDetector.** Static event photos are
 usually 4K+ resolution with multiple runners across the frame; SSD
@@ -1657,6 +1688,24 @@ explicit, justified, and accompanied by an update to this file.
     `cropToDataUrl` call, or `faceapi.toDataURL` over the preview),
     the full guardrail snaps back into effect — read the original
     body, not just the OCR sentence.
+32. **Face-only identification is scoped to SUB-FLOOR faces only.**
+    When OCR can't read a known runner's BIB, the scanner normally
+    refuses to fall back to the registered BIB (the strict no-fallback
+    rule from 2026-05-18 that killed false ✅ on registration photos).
+    The ONE exception (operator decision 2026-05-21): a face below
+    `MIN_OCR_FACE_SIZE` (60 px) is face-only identified — registered
+    BIB recorded, flagged `face-only · unverified`, no `WRONG_PERSON`
+    possible. **Do NOT widen this to readable faces (≥ floor) or to
+    "all OCR failures."** Readable faces MUST keep strict BIB
+    verification — otherwise `WRONG_PERSON` / `NO_BIB` stop firing and
+    the scanner silently degrades from BIB-verification to mere
+    face-identification, defeating the cheating-detection purpose. The
+    sub-floor scope is also what keeps the registration-photo false-✅
+    risk contained: registration close-ups are large faces (> floor),
+    so they still hit the strict path. Dedup key is `"name:faceonly"`
+    (distinct from `"name:<readBib>"`) so a later readable shot still
+    fires a real verified ID. If you raise `MIN_OCR_FACE_SIZE`, you are
+    widening the unverified-ID band — do it deliberately.
 
 ---
 
@@ -2485,7 +2534,7 @@ body for the annotation).
 | `OCR_PSM_ATTEMPTS` | `['6','7']` | Multi-PSM fallback order (2026-05-20). `runOCRForFace` tries each in turn, stopping at the first that yields a valid BIB. PSM 6 (uniform block) fits normal/large faces; PSM 7 (single line) fits small upscaled digit rows that 6 fragments. Only failures pay for the extra pass. |
 | `OCR_PRE_UPSCALE_TARGET` | `360` | Long-edge px target for the pre-threshold bilinear upscale. Crops below this are upscaled BEFORE thresholding so far-away BIB strokes separate instead of bleeding (2026-05-20). Mirror of `checkpoint.html`. |
 | `OCR_PRE_UPSCALE_MAX` | `4` | Cap on the pre-threshold upscale factor (avoids blowing up a 20 px crop to absurd size). |
-| `MIN_OCR_FACE_SIZE` | `60` | Face-height floor (px) for firing `NO_BIB`. Below it, an empty OCR read is treated as "unreadable, not absent" and skipped silently (no false violation); a successful read still identifies. Distinct from `MIN_FACE_SIZE` (detection-time gate, currently 0) — this one only gates the NO_BIB violation, never drops the face. |
+| `MIN_OCR_FACE_SIZE` | `60` | Face-height floor (px) separating strict-verify from face-only ID. **≥ floor:** empty OCR read fires `NO_BIB` (strict). **< floor:** empty read is "unreadable, not absent" → **face-only identification** (registered BIB recorded, flagged unverified, no `WRONG_PERSON` possible — Guardrail 32), deduped on `"name:faceonly"`. A successful read at any size still identifies normally. Distinct from `MIN_FACE_SIZE` (detection-time gate, currently 0) — this never drops the face. Raising it widens the unverified-ID band. |
 | `ADAPTIVE_THRESHOLD_BLOCK` | `15` | Local-window size for adaptive threshold (mirror of `checkpoint.html`) |
 | `ADAPTIVE_THRESHOLD_C` | `10` | Mean offset (mirror of `checkpoint.html`) |
 | `OCR_UPSCALE` | `2` | Nearest-neighbor scale factor before OCR (mirror of `checkpoint.html`) |

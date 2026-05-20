@@ -1020,6 +1020,7 @@ async function handleKnownFace(canvas, hit, photo, detectionBoxes){
  //    and will likely appear larger in another shot.
  if (!readBib){
   if (box.height >= MIN_OCR_FACE_SIZE){
+   // Readable-size face with no BIB → real NO_BIB violation.
    await fireViolation({
     name,
     bib: "",
@@ -1029,7 +1030,26 @@ async function handleKnownFace(canvas, hit, photo, detectionBoxes){
     detectionBoxes: detectionBoxes.slice(),
    }, name + ":NO_BIB");
   } else {
-   logSkip(name, `Face too small to read BIB (${Math.round(box.width)}×${Math.round(box.height)}px) · "${photo.name}"`);
+   // FACE-ONLY IDENTIFICATION (sub-floor faces, operator decision
+   // 2026-05-21). The face matched a known runner but the BIB is
+   // below OCR-readable resolution — "unreadable", not "absent". We
+   // trust the face match and record the registered BIB, flagged
+   // unverified. NO WRONG_PERSON check is possible (no OCR'd BIB to
+   // compare), so this path CANNOT detect wrong-BIB cheating — that's
+   // the accepted trade for counting distant runners. Dedup on a
+   // DEDICATED "name:faceonly" key so a later READABLE shot of the
+   // same runner still fires a real, verified identification (which
+   // can surface WRONG_PERSON + markCheating, correcting the record).
+   // Scoped to sub-floor faces only; readable faces keep strict
+   // OCR verification — see AI_CONTEXT §4.7 + Guardrail 32.
+   const faceOnlyKey = name + ":faceonly";
+   if (seenRecords.has(faceOnlyKey)){
+    addLog("dup", name, `Already face-only identified this session · "${photo.name}"`);
+   } else {
+    seenRecords.add(faceOnlyKey);
+    scheduleScanStateSave();
+    await sendIdentification(name, expectedBib, photo, true);
+   }
   }
   return;
  }
@@ -1129,10 +1149,14 @@ async function handleKnownFace(canvas, hit, photo, detectionBoxes){
 //      RESILIENCE       "perfect read scored 0" quirk → treated as
 //                       "unscored" and admitted on the face-match +
 //                       whitelist + length gates. Guardrail 20.
-//   6. SIZE FLOOR       handleKnownFace: a face below MIN_OCR_FACE_SIZE
-//                       (60px) that reads empty is skipped silently —
-//                       the BIB is unreadable at that resolution, not
-//                       absent, so NO false NO_BIB fires.
+//   6. SIZE FLOOR +     handleKnownFace: a face below MIN_OCR_FACE_SIZE
+//      FACE-ONLY ID     (60px) that reads empty is NOT a NO_BIB — the
+//                       BIB is unreadable at that resolution, not
+//                       absent. Instead we FACE-ONLY identify: trust
+//                       the face match, record the registered BIB
+//                       (flagged unverified), no WRONG_PERSON possible.
+//                       Scoped to sub-floor faces only (Guardrail 32);
+//                       readable faces keep strict BIB verification.
 //
 // runOCRForFace owns layers 2-5; getOCRCropBox owns 1; handleKnownFace
 // owns 6. Returns { bib, conf } | { multipleBibsBlocks } | null.
@@ -1431,12 +1455,18 @@ function enqueueThrottledPost(workFn){
  return result;
 }
 
-async function sendIdentification(name, bib, photo){
+async function sendIdentification(name, bib, photo, faceOnly){
  const timeStr = new Date().toTimeString().split(" ")[0];
  // Prominent display: "✅ Kawin (BIB 1234)" with the BIB inline next
  // to the name so the operator can scan-read identifications quickly.
  // BIB falls back to "—" when a runner has no registered BIB (rare).
- const nameWithBib = `${name} (BIB ${bib || "—"})`;
+ // faceOnly tags sub-floor identifications where the BIB was too small
+ // to OCR and we trusted the face match (registered BIB unverified) —
+ // the POST is identical (recordCheckpoint always writes the
+ // registered BIB), only the operator-facing log differs.
+ const nameWithBib = faceOnly
+   ? `${name} (BIB ${bib || "—"} · face-only, unverified)`
+   : `${name} (BIB ${bib || "—"})`;
  addLog("ok", nameWithBib, `${timeStr} · ${photo.name}`);
  return enqueueThrottledPost(async () => {
   try {
