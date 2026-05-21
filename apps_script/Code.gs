@@ -148,7 +148,15 @@ const DEFAULT_VIOLATION_TYPE = "WRONG_PERSON";
 const BATCH_DELETE_MAX = 200;
 
 // ─── INPUT VALIDATION PATTERNS ──────────────────────────────
-const NAME_PATTERN = /^[a-zA-Z0-9_\-.]{1,50}$/;
+// Name is the primary key AND the Drive folder name AND the FaceMatcher
+// label AND the foreign key in Results/Violations. It is used purely as
+// an opaque string everywhere, so the charset can be wide: ASCII
+// letters/digits/_-., the Thai Unicode block (U+0E00–U+0E7F), and
+// spaces — so full Thai/English first+last names work ("สมชาย ใจดี",
+// "John Smith"). Widened 2026-05-22 (was ASCII-only); see §3.1 + §4.8.
+// Keep ≤ 50. The class spans the literal Thai range U+0E00–U+0E7F
+// (the file is UTF-8; equivalent to ฀-๿).
+const NAME_PATTERN = /^[a-zA-Z0-9฀-๿ ._-]{1,50}$/;
 const BIB_PATTERN = /^[a-zA-Z0-9]{1,10}$/;
 const TIME_PATTERN = /^\d{1,2}:\d{2}(?::\d{2})?$/;
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;

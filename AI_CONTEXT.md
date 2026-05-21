@@ -9,6 +9,61 @@
 > cadence, caching, or guardrails MUST update this file in the same change
 > set.
 >
+> **Last updated:** 2026-05-22 — **Thai names supported (NAME_PATTERN
+> widened).** Supersedes the ASCII-slugify half of the same-day entry
+> below: names are NO LONGER stripped to ASCII. `Runners.Name` — the
+> primary key, Drive folder name, FaceMatcher label, and FK in
+> Results/Violations — is used purely as an opaque string everywhere, so
+> the backend `NAME_PATTERN` (Code.gs) was widened from ASCII-only to
+> `/^[a-zA-Z0-9` + Thai block U+0E00–U+0E7F + space + `._-]{1,50}$/`. Full
+> Thai/English first+last names now work: `"สมชาย ใจดี"`, `"John Smith"`.
+> The change is centralized (one constant ⇒ every `reqStr(name,…)` call
+> site across all handlers), which is also REQUIRED — otherwise the
+> scanner's `recordCheckpoint`/`updateEmbeddings`/`markCheating` would
+> reject a Thai-named runner. `FormIntake.gs`'s old `slugifyName` (lower
+> + ASCII strip + `_` join) is replaced by `normalizeName` (collapse
+> whitespace, trim, cap 50, **case + script preserved**). Junk guard
+> kept: raw name > 50 chars (pasted paragraph) → skipped; emoji / other
+> scripts fail `NAME_PATTERN` → skipped. The name is BOTH key and
+> dashboard display, so Thai now displays natively (no separate display
+> column needed). Caveats: English keys are now case-sensitive (form
+> keeps case; `register.html` still lowercases — keep one entry path per
+> runner); names with spaces aren't whitespace-collapsed on the
+> `register.html`/direct-API paths (the form path collapses). Updates
+> §3.1, §4.8, Guardrail 33. Files: `apps_script/Code.gs`,
+> `apps_script/FormIntake.gs`.
+>
+> **Last updated:** 2026-05-22 — **Form intake: name+surname handling +
+> missed-row backfill.** ⚠️ The slugify part of this entry was
+> SUPERSEDED hours later by the Thai-names entry above — `slugifyName`
+> no longer exists (replaced by `normalizeName`, which preserves Thai +
+> case + spaces); read the top entry for the current behavior. The
+> backfill part (2) below is still current. Original entry: Two fixes to
+> `FormIntake.gs` after first live
+> use. (1) **Names now slugify** instead of the old "lowercase + reject
+> any space" rule that silently dropped every "First Last" submission.
+> `processFormSubmission` builds the `Runners.Name` key from a first-name
+> field PLUS an optional **surname** field (`FORM_FIELD_MAP.surname`,
+> new) via `slugifyName`: join → lowercase → spaces `→ _` → strip
+> non-`[a-z0-9_-.]` → cap 50. `"John Smith"` → `john_smith`; `"Egg"` →
+> `egg`. A name whose raw length > 50 (a pasted paragraph) or that slugs
+> to `""` (Thai-only — the key is ASCII) is skipped with a logged
+> reason. (2) **`_backfillExistingResponses([sheetName])`** — one-shot
+> that processes responses the trigger never saw (rows submitted BEFORE
+> the trigger was installed/authorized; the trigger only fires on NEW
+> submissions, never retroactively). It reads the responses tab (default
+> `"Form Responses 1"`), rebuilds a `namedValues` map per row from the
+> header titles, runs the shared `processFormSubmission`, and skips
+> runners already in `Runners` (idempotent — never re-moves filed
+> photos). `handleFormSubmit` is now a thin wrapper over
+> `processFormSubmission(nv)` so both the live trigger and the backfill
+> share one code path. Operational note added: the trigger only fires
+> on new submissions, and a half-authorized first `_setupFormTrigger()`
+> run is the usual cause of "nothing appeared until I ran it again."
+> Updates §4.8, §6.6, Guardrail 33 (key is now the slug). Note: the
+> slug (e.g. `john_smith`) is also the dashboard DISPLAY name — pretty
+> spaced display would need a separate schema column (not done).
+>
 > **Last updated:** 2026-05-21 — **Drive Scanner pre-scan auto-enroll
 > (closes the form-intake embeddings gap).** Form-registered runners
 > (§4.8) have photos but NO `Embeddings`, so the scanner used to tag
@@ -696,7 +751,13 @@ Name | BibNumber | Email | RegisteredAt
 | Photo_Front | Photo_Top | Photo_Bottom | Photo_Left | Photo_Right
 | FolderUrl | Embeddings
 ```
-- `Name` is the **primary key** (case-sensitive, A-Z 0-9 _ - ., max 50 chars).
+- `Name` is the **primary key** (case-sensitive). Charset (widened
+  2026-05-22, `NAME_PATTERN`): ASCII letters/digits, the Thai block
+  (U+0E00–U+0E7F), spaces, and `_ - .` — so full Thai/English first+last
+  names work (`"สมชาย ใจดี"`, `"John Smith"`). Max 50 chars. It doubles
+  as the Drive folder name, the scanner's FaceMatcher label, and the FK
+  in Results/Violations, so it is treated as an opaque string everywhere
+  — which is why widening the charset is safe.
 - `Photo_*` cells store Drive thumbnail URLs (v6+):
   `https://drive.google.com/thumbnail?id=<FILE_ID>&sz=w800`. Pre-v6
   rows may still carry the embed form (`uc?export=view&id=…`); run
@@ -1518,9 +1579,11 @@ handleFormSubmit(e):            ← installable trigger, e = spreadsheet form-su
   nv = e.namedValues            ← { "Question title": ["answer", …] }
 
   ── 1) identity ──
-  name  = formFirstValue(nv, FORM_FIELD_MAP.name)   ← exact-then-substring title match
-  name  = name.trim().toLowerCase()                 ← same key rule as register.html
-  abort (log only) if !NAME_PATTERN.test(name)      ← a-z0-9_-. , no spaces, ≤50
+  first = formFirstValue(nv, FORM_FIELD_MAP.name)    ← exact-then-substring title match
+  last  = formFirstValue(nv, FORM_FIELD_MAP.surname) ← optional surname field
+  abort (log only) if (first+last) is empty, or raw length > 50 (junk paste)
+  name  = normalizeName([first, last])              ← collapse spaces+trim+cap50, case/Thai kept
+  abort (log only) if !NAME_PATTERN.test(name)      ← emoji/other scripts → skip
   bib   = validate vs BIB_PATTERN  (blank if bad)
   email = validate vs EMAIL_PATTERN (blank if bad)
 
@@ -1548,20 +1611,55 @@ handleFormSubmit(e):            ← installable trigger, e = spreadsheet form-su
 ```
 
 **Field mapping is configurable.** `FORM_FIELD_MAP` maps each logical
-field (`name`, `bib`, `email`, `photo_front…right`) to a list of
-candidate question titles; `formFirstValue` matches case-insensitively
+field (`name`, `surname`, `bib`, `email`, `photo_front…right`) to a list
+of candidate question titles; `formFirstValue` matches case-insensitively
 (exact first, then substring) so "Your Name" or "BIB number (1-9999)"
 still resolve. Edit the map to your form's exact wording — the EN/TH
 defaults are a starting point, not a contract.
+
+**Name = first + optional surname, normalized (Thai-capable).** The
+`Runners.Name` key is built by `normalizeName([first, last])`: join the
+name field and the optional `surname` field, collapse runs of whitespace
+to one space, trim, cap at 50 — **case and script are preserved**. So
+`"John" + "Smith"` (or a single `"John Smith"` field) → `John Smith`;
+`"สมชาย" + "ใจดี"` → `สมชาย ใจดี`; `"Egg"` → `Egg`. The backend
+`NAME_PATTERN` (widened 2026-05-22) accepts ASCII + the Thai block +
+spaces + `_-.`, so Thai/English full names pass. Two guards reject junk
+before a folder/row is created: a raw name longer than 50 chars (a
+pasted paragraph), and a name that fails `NAME_PATTERN` (emoji or other
+scripts). The key is BOTH the primary key and the dashboard display
+string — Thai now displays natively. (History: this replaced an earlier
+same-day `slugifyName` that lowercased + stripped to ASCII + joined with
+`_`, which dropped Thai entirely and forced `john_smith`-style keys.)
+
+**Backfilling missed submissions.** The installable trigger only fires
+on **new** submissions — it never reaches back over rows submitted
+before it was installed/authorized (the common "I submitted but nothing
+appeared until I re-ran `_setupFormTrigger`" symptom: the early rows
+predate the live trigger). `_backfillExistingResponses([sheetName])`
+reprocesses history: it **auto-detects** the responses tab (prefers
+`"Form Responses 1"`, else sniffs each non-app sheet's header row for a
+name + photo column, so a localized tab name like
+`"การตอบกลับของแบบฟอร์ม 1"` resolves with no argument — pass `sheetName`
+to override; on failure the thrown error lists every tab name), rebuilds
+a `namedValues` map per row from the header titles, runs the shared
+`processFormSubmission`, and skips runners already present in `Runners`
+(idempotent — never re-moves filed photos).
+`handleFormSubmit` is a thin wrapper over `processFormSubmission(nv)` so
+the live and backfill paths are byte-identical.
 
 **Embeddings are intentionally empty — and must NOT be faked.** Apps
 Script cannot run face-api.js (Guardrail 16: no server-side AI), so the
 form path produces an intake-only row. The runner is stored, foldered,
 and listed, but is **NOT recognizable by the Drive Scanner** (which
 builds its `FaceMatcher` from `Runners.Embeddings`) until embeddings
-are added. To finish enrollment, re-register the **same lowercase
-name** via `register.html` — `handleRegisterRunner` upserts the row in
-place and writes the averaged 128-float vector. The trigger preserves
+are added (now usually automatic — see the scanner's pre-scan
+auto-enroll in §4.7). To finish enrollment manually, re-register the
+**same name** via `register.html` — `handleRegisterRunner` upserts the
+row in place and writes the averaged 128-float vector. (Note:
+`register.html` lowercases ASCII names; for an English runner created
+via the form with capitals, match the casing or the keys diverge. Thai
+names are unaffected — no case.) The trigger preserves
 an existing Embeddings cell on update, so the order (form first, browser
 later — or vice versa) doesn't wipe data. See Guardrail 33.
 
@@ -1575,7 +1673,12 @@ because the **simple** trigger (a function literally named
 Drive files and set sharing. The handler never throws — every failure
 is logged via `logErr` and swallowed, because a thrown error inside a
 trigger is invisible to the form submitter and would otherwise leave a
-half-done intake.
+half-done intake. Verify the install stuck: editor → Triggers (clock
+icon) → exactly one `handleFormSubmit` "On form submit" row, and check
+Executions for per-fire errors. If the first `_setupFormTrigger()` run
+didn't fully authorize, the trigger can exist but fail silently on fire
+— re-running + completing the OAuth prompt fixes it (then use
+`_backfillExistingResponses()` for anything submitted in the gap).
 
 **Relationship to the live registration path.** `register.html` →
 `registerRunner` (atomic POST, §4.1) remains the **complete**
@@ -1937,8 +2040,10 @@ explicit, justified, and accompanied by an update to this file.
     single face is skipped and the runner is flagged for webcam
     enrollment. `handleFormSubmit` likewise PRESERVES an existing
     Embeddings cell on update (a form re-submit after enrollment doesn't
-    wipe it), and the upsert key is the lowercase `name` shared across
-    `register.html`, `handleFormSubmit`, and `updateEmbeddings`.
+    wipe it), and the upsert key is the normalized `name`
+    (`normalizeName`, Thai/English first+last, e.g. `สมชาย ใจดี` /
+    `John Smith`) shared across `register.html`, `handleFormSubmit`, and
+    `updateEmbeddings`.
     Also: install the trigger via `_setupFormTrigger()` (INSTALLABLE) —
     a simple trigger named `onFormSubmit` lacks the Drive scope to move
     files / set sharing and will fail silently.
@@ -2674,6 +2779,7 @@ All are idempotent.
 | `_migrateViolationsPhotoColumns()` | Appends `PhotoFileId` and `DetectionBoxes` to the Violations sheet (existing rows get blank cells). Idempotent. | Once after deploying the 2026-05-20 evidence pass |
 | `_migrateImagesToLh3()` | Rewrites every `Runners.Photo_*` + `Violations.ImageUrl` cell from any legacy form (thumbnail / embed / viewer) to the lh3 form `lh3.googleusercontent.com/d/<id>=w800`. Idempotent. | Once after deploying the 2026-05-20 lh3 URL switch (fixes Broken Image on the dashboard) |
 | `_setupFormTrigger()` (in `FormIntake.gs`) | Installs the INSTALLABLE `onFormSubmit` trigger that runs `handleFormSubmit` on the bound spreadsheet. Idempotent (removes any prior `handleFormSubmit` trigger first). | Once after adding `FormIntake.gs` and linking the registration Google Form to the spreadsheet (§4.8) |
+| `_backfillExistingResponses([sheetName])` (in `FormIntake.gs`) | Reprocesses Form Responses rows the trigger never saw (rows submitted before it was installed/authorized). Auto-detects the responses tab (works with localized names like `"การตอบกลับของแบบฟอร์ม 1"` — sniffs header row for a name + photo column; pass `sheetName` to override). Runs the shared `processFormSubmission` per row, skips runners already in `Runners`. Idempotent. On failure, the error lists every tab name. | After fixing/installing the trigger, to catch submissions made in the gap (§4.8) |
 
 ### 6.7 Endpoints reference
 
