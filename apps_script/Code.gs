@@ -646,6 +646,7 @@ function doPost(e) {
       case "editRunnerProfile": return handleEditRunnerProfile(body);
       case "renameRunner":     return handleRenameRunner(body);
       case "markCheating":     return handleMarkCheating(body);
+      case "updateEmbeddings": return handleUpdateEmbeddings(body);
       case "updateRunnerPhoto": return handleUpdateRunnerPhoto(body);
       default:
         return jsonErr("Unknown action: " + action, "bad_request");
@@ -1617,6 +1618,64 @@ function handleMarkCheating(body) {
     isCheating: isCheatingStr,
     inserted: inserted,
   });
+}
+
+/**
+ * Write a face descriptor into an existing runner's Runners.Embeddings
+ * cell. Called by the Drive Scanner's pre-scan auto-enroll phase, which
+ * computes embeddings IN THE BROWSER (face-api — Guardrail 16) from a
+ * runner's stored angle photos when the runner was created via the
+ * Google Form intake (FormIntake.gs) and therefore has no embeddings.
+ *
+ * UNAUTHENTICATED — same trust model as the scanner's other write paths
+ * (recordCheckpoint / reportViolation / markCheating). The handler does
+ * NOT trust the *content* (it can't verify a descriptor is a real face),
+ * but it strictly validates the SHAPE — exactly 128 finite numbers — so
+ * a malformed / garbage payload can never land in the sheet (Guardrail
+ * 33: never store a non-128-float "embedding").
+ *
+ * WRITE-ONCE BY DEFAULT: if the cell is already non-empty the write is
+ * skipped (returns updated:false) so a browser-enrolled descriptor is
+ * never silently clobbered. Pass `force:true` to overwrite deliberately.
+ */
+function handleUpdateEmbeddings(body) {
+  const name = reqStr(body.name, "name", NAME_PATTERN, 50);
+
+  let emb = body.embeddings;
+  if (typeof emb === "string") {
+    try { emb = JSON.parse(emb); }
+    catch (e) { throw httpError("embeddings is not valid JSON", "bad_request"); }
+  }
+  // Tolerate the legacy nested-array shape ([[...128...]]) per Guardrail 6.
+  if (Array.isArray(emb) && emb.length === 1 && Array.isArray(emb[0])) emb = emb[0];
+  if (!Array.isArray(emb) || emb.length !== 128) {
+    throw httpError("embeddings must be an array of exactly 128 floats", "bad_request");
+  }
+  for (let i = 0; i < 128; i++) {
+    const n = Number(emb[i]);
+    if (!isFinite(n)) throw httpError("embeddings contains a non-finite value at index " + i, "bad_request");
+    emb[i] = n;
+  }
+  const embStr = JSON.stringify(emb);
+
+  const sheet = getSheet(SHEETS.RUNNERS);
+  const snap = readWholeSheet(sheet);
+  const rowIdx = snap.findRowByName(name);
+  if (rowIdx < 0) throw httpError("Runner not found: " + name, "not_found");
+  const embCol = snap.headerIndex("Embeddings");
+  if (embCol < 0) throw httpError("Runners sheet missing Embeddings column", "schema_error");
+
+  const existing = snap.values[rowIdx - 2][embCol];
+  const force = body.force === true || String(body.force).toLowerCase() === "true";
+  if (existing && String(existing).trim() && !force) {
+    logInfo("updateEmbeddings (skip — already present)", { name: name });
+    return jsonOk({ name: name, updated: false, message: "Embeddings already present" });
+  }
+
+  sheet.getRange(rowIdx, embCol + 1).setValue(embStr);
+  invalidateRunners();
+  logInfo("updateEmbeddings", { name: name, overwrote: !!(existing && String(existing).trim()) });
+  return jsonOk({ name: name, updated: true });
 }
 
 /**

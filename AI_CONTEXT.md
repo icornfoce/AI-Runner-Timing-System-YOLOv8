@@ -9,6 +9,58 @@
 > cadence, caching, or guardrails MUST update this file in the same change
 > set.
 >
+> **Last updated:** 2026-05-21 — **Drive Scanner pre-scan auto-enroll
+> (closes the form-intake embeddings gap).** Form-registered runners
+> (§4.8) have photos but NO `Embeddings`, so the scanner used to tag
+> them `Unknown` and fire false `UNREGISTERED`. Now `startScan()` runs a
+> **pre-scan auto-enroll phase** (`backfillMissingEmbeddings`) BEFORE
+> listing the folder: it fetches `getRunners`, finds runners with photos
+> but empty `Embeddings`, and for each computes the descriptor IN THE
+> BROWSER (face-api — Guardrail 16) from their stored angle photos —
+> exactly the same averaging `register.html` does. Quality-guarded: a
+> photo contributes only when EXACTLY ONE face ≥ `MIN_OCR_FACE_SIZE` is
+> detected (0 or 2+ → skipped); a runner with no usable photo is flagged
+> `enroll via webcam` in the log and stays unmatched (never a fabricated
+> descriptor — Guardrail 33). Each computed vector is persisted via a
+> new **unauthenticated POST `updateEmbeddings`** (write-once unless
+> `force:true`; backend strictly validates 128 finite floats), then the
+> FaceMatcher is rebuilt. The `faceMatcher`-null start guard moved to
+> AFTER this phase (so a roster registered ENTIRELY via the form can now
+> scan). Cost is paid once — later scans fast-return since everyone has
+> embeddings. Large phone uploads are downscaled to `MAX_SCAN_WIDTH` for
+> the enroll detection. POSTs go through `enqueueThrottledPost`
+> (Guardrail 30). Updates §4.7 (new pre-scan phase), §6.7
+> (`updateEmbeddings`), §6.5 (form runners now auto-enrolled), Guardrail
+> 33 (sanctioned browser path). Files: `photo_scanner.html`,
+> `apps_script/Code.gs`.
+>
+> **Last updated:** 2026-05-21 — **Google Form registration intake
+> (`onFormSubmit`).** New companion script `apps_script/FormIntake.gs`
+> (same Apps Script project as `Code.gs`, reuses its globals) adds a
+> per-person Drive folder + sheet-row pipeline for a Google Form
+> linked to the `AI_Runner_Database` spreadsheet. A plain Form dumps
+> every upload into one shared "(File responses)" folder; the
+> `handleFormSubmit(e)` trigger instead, per submission: reads
+> Name/BIB/Email + the **five angle photo uploads** from
+> `e.namedValues`, creates/reuses `RunnerFaces/<name>/` via the
+> existing `getOrCreateFolder` (LockService-protected, shared
+> ANYONE_WITH_LINK), **moves** each uploaded photo into that folder
+> (`File.moveTo`) + shares + renames it `<name>_<angle>_<ts>.jpg`,
+> then upserts the `Runners` row with the `Photo_*` lh3 URLs +
+> `FolderUrl`. Name is lowercased + `NAME_PATTERN`-validated (same key
+> rule as `register.html`); field titles map through a configurable
+> `FORM_FIELD_MAP` (exact-then-substring match, EN/TH defaults).
+> **`Embeddings` is left BLANK** — Apps Script can't run face-api
+> (Guardrail 16), so form-registered runners are intake-only and are
+> NOT scanner-recognizable until embeddings are added via a browser
+> enrollment (`register.html` upserts the same row and fills them; the
+> trigger preserves an existing Embeddings cell on update). Setup:
+> run `_setupFormTrigger()` once (installs the INSTALLABLE trigger —
+> the simple `onFormSubmit` lacks Drive scope). New §4.8, §6.6 helper,
+> §6.5 behavior, and **Guardrail 33** (don't fake embeddings
+> server-side). Errors are logged + swallowed so one bad submission
+> can't poison the trigger.
+>
 > **Last updated:** 2026-05-21 — **OCR accuracy pass (step 1/6):
 > CLAHE local contrast.** First of a six-step push to improve BIB
 > reads on low-quality event photos (faded digits, wrinkled
@@ -602,7 +654,9 @@ AI-Runner-Timing-System-YOLOv8/
 │   └── dashboard.html      ← Public leaderboard + Admin portal (login-gated)
 │
 ├── apps_script/
-│   └── Code.gs            ← Google Apps Script REST API (v7)
+│   ├── Code.gs            ← Google Apps Script REST API (v7)
+│   └── FormIntake.gs      ← onFormSubmit trigger: Google Form → per-person
+│                            RunnerFaces folder + Runners row (see §4.8)
 │
 ├── legacy_v1/             ← Python/OpenCV/YOLOv8 fallback (offline mode)
 │   ├── main.py            ← standalone capture loop
@@ -624,9 +678,10 @@ AI-Runner-Timing-System-YOLOv8/
 | `web_app.py` | Tiny Flask wrapper, 4 active routes (`/`, `/register`, `/scan`, `/admin`-alias) plus a commented-out `/checkpoint`. **Does no AI work.** | Adding/renaming a frontend page |
 | `templates/register.html` | Capture 5 face angles, compute averaged 128-d descriptor, single atomic upload | Changing capture UX, embedding format, registration payload |
 | `templates/checkpoint.html` | Live detection loop (face-api + Tesseract), per-CP cooldowns, smart OCR, violation reporting. **Retained on disk but no longer routed**; see §6.2. Still the canonical reference for the multi-frame pipeline described in §4.2. | Restoring live mode, or referencing the multi-frame pipeline for new work |
-| `templates/photo_scanner.html` | Drive Photo Scanner — post-race batch processing of photographer-uploaded Drive folder. SSD MobileNet, single-pass per face, session-level dedup. | Drive scanner tuning, batch UX, dedup strategy |
+| `templates/photo_scanner.html` | Drive Photo Scanner — post-race batch processing of photographer-uploaded Drive folder. SSD MobileNet, single-pass per face, session-level dedup. Pre-scan auto-enroll computes embeddings for form-registered runners (§4.7). | Drive scanner tuning, batch UX, dedup strategy, auto-enroll |
 | `templates/dashboard.html` | Public leaderboard, alerts, admin portal (auth, CRUD, bulk delete, type filter) | UI/UX, admin actions, polling, type taxonomy |
 | `apps_script/Code.gs` | Backend REST + Sheets/Drive I/O + cache + migrations | Schema, endpoints, validation, cleanup logic |
+| `apps_script/FormIntake.gs` | `onFormSubmit` trigger — Google Form registration → per-person `RunnerFaces/<name>/` folder + `Runners` row (Embeddings blank). Same Apps Script project as `Code.gs`; reuses its globals. | Form intake field mapping, folder/photo organization, trigger setup |
 | `legacy_v1/*` | Offline fallback. **Independent codebase.** | Only when explicitly fixing legacy mode |
 
 ---
@@ -1111,6 +1166,22 @@ init():
   })
 
 startScan():
+  // 0) Pre-scan auto-enroll — fill embeddings for form-registered
+  //    runners (photos but no face data) so they're recognized, not
+  //    flagged UNREGISTERED. No-op fast-return once everyone is enrolled.
+  backfillMissingEmbeddings():
+    runners = GET getRunners
+    pending = runners with empty Embeddings AND ≥1 Photo_* Drive ID
+    for each pending runner:
+      for each angle photo: getImageBytes → decode →
+        detectAllFaces (downscale > MAX_SCAN_WIDTH) → keep descriptor
+        ONLY if exactly ONE face ≥ MIN_OCR_FACE_SIZE
+      if ≥1 descriptor: POST updateEmbeddings(name, average(descriptors))
+      else:             log "enroll via webcam" (never fabricate — Guardrail 33)
+    rebuild FaceMatcher from fresh getRunners
+  if abortScan: cleanup + return
+  if !faceMatcher: "no runner with a usable face photo" + return   ← guard AFTER enroll
+
   // 1) Paginated listing — loop on hasMore so a 5000-photo folder
   //    doesn't time out a single Apps Script request.
   offset = 0; allPhotos = []
@@ -1222,6 +1293,34 @@ startScan():
       fireViolation UNREGISTERED with face crop
                     (dedup key "unknown:fileId:i" — per-face-index)
 ```
+
+**Pre-scan auto-enroll (closes the form-intake embeddings gap).**
+Runners created through the Google Form intake (§4.8) have a folder +
+photos but an EMPTY `Embeddings` cell, because Apps Script can't run
+face-api (Guardrail 16). Left alone, the scanner's `FaceMatcher` skips
+them (`if (!r.Embeddings) continue;`), so every photo of such a runner
+is tagged `Unknown` and fires a false `UNREGISTERED`. To close that
+gap, `startScan()` runs `backfillMissingEmbeddings()` BEFORE listing the
+folder: it re-fetches `getRunners`, selects runners with empty
+`Embeddings` that DO have at least one `Photo_*` Drive ID, and for each
+computes the 128-float descriptor **in the browser** from their stored
+angle photos (fetched via `getImageBytes` → `data:` URL → face-api, the
+same canvas-safe path the scan uses per Guardrail 28), averaging across
+angles exactly as `register.html` does. **Quality gate:** a photo
+contributes a descriptor only when *exactly one* face ≥
+`MIN_OCR_FACE_SIZE` is detected — zero faces (bad upload) or two-plus
+(group shot) are skipped, and a runner with no usable photo is logged
+`enroll via webcam (register.html)` and left unmatched. A descriptor is
+**never fabricated** (Guardrail 33). Each computed vector is persisted
+via the new `updateEmbeddings` POST (write-once unless `force`), and the
+`FaceMatcher` is rebuilt from fresh `getRunners` afterward. The cost is
+paid once: on the next scan everyone already has embeddings, so the
+phase fast-returns. Because the matcher may be built entirely from
+freshly-computed embeddings, the `!faceMatcher` start guard moved to
+AFTER this phase — a roster registered 100 % via the form can now scan.
+The phase is abortable (Stop) and its POSTs go through
+`enqueueThrottledPost` (Guardrail 30). Reused constants only — no new
+knobs (`MIN_OCR_FACE_SIZE`, `SSD_MIN_CONFIDENCE`, `MAX_SCAN_WIDTH`).
 
 **Why two endpoints instead of one inline base64 payload.** The Drive
 thumbnail URL (`drive.google.com/thumbnail?id=…&sz=w800`)
@@ -1397,6 +1496,94 @@ is not implemented; if/when it is, write the scanner to fall back to
 scan-time when EXIF is missing (some screenshots and edited images
 strip it). For most workflows, relative ordering is what matters and
 scan-time is sufficient.
+
+### 4.8 Google Form registration intake (`FormIntake.gs` → `onFormSubmit`)
+
+A **second registration path** alongside `register.html`. A Google
+Form (runner self-registration) is linked to the `AI_Runner_Database`
+spreadsheet (Form editor → Responses → "Link to Sheets" → the existing
+spreadsheet). `apps_script/FormIntake.gs` lives in the **same Apps
+Script project** as `Code.gs` (Apps Script files share one global
+scope), so it reuses every Drive/Sheet helper instead of duplicating
+them.
+
+**Why a trigger is required.** A plain Form's file-upload questions
+write all uploads into a single shared `"<FormTitle> (File responses)"`
+folder — there is no built-in way to fan out per person. The
+`FolderUrl` + `Photo_*` columns in the `Runners` schema imply
+per-person organization, so an `onFormSubmit` trigger does it.
+
+```
+handleFormSubmit(e):            ← installable trigger, e = spreadsheet form-submit event
+  nv = e.namedValues            ← { "Question title": ["answer", …] }
+
+  ── 1) identity ──
+  name  = formFirstValue(nv, FORM_FIELD_MAP.name)   ← exact-then-substring title match
+  name  = name.trim().toLowerCase()                 ← same key rule as register.html
+  abort (log only) if !NAME_PATTERN.test(name)      ← a-z0-9_-. , no spaces, ≤50
+  bib   = validate vs BIB_PATTERN  (blank if bad)
+  email = validate vs EMAIL_PATTERN (blank if bad)
+
+  ── 2) per-person folder ──
+  root         = getRootFolder(RUNNER_FACES_FOLDER)
+  personFolder = getOrCreateFolder(root, name)      ← LockService-protected, shared on create
+
+  ── 3) move + share + rename the 5 angle photos ──
+  for angle in [front, top, bottom, left, right]:
+    fileId = extractDriveFileId( formFirstValue(nv, FORM_FIELD_MAP["photo_"+angle]) )
+             ← Form upload answers are drive.google.com/open?id=<ID> URLs
+    file.moveTo(personFolder)                        ← out of "(File responses)"
+    file.setName(name+"_"+angle+"_"+ts+".jpg")
+    file.setSharing(ANYONE_WITH_LINK, VIEW)          ← so the lh3 Photo_* URL renders (Guardrail 11)
+    photoUrls[angle] = DRIVE_THUMBNAIL_URL(fileId, 800)
+    (each photo isolated in try-catch — one bad file never blocks the rest)
+
+  ── 4) upsert the Runners row ──
+  rowData = [name, bib, email, ISO-now,
+             Photo_Front…Right, personFolder.getUrl(), ""]   ← Embeddings BLANK
+  if row exists: preserve its existing Embeddings cell, then overwrite the row
+  else:          appendRow
+
+  invalidateRunners()
+```
+
+**Field mapping is configurable.** `FORM_FIELD_MAP` maps each logical
+field (`name`, `bib`, `email`, `photo_front…right`) to a list of
+candidate question titles; `formFirstValue` matches case-insensitively
+(exact first, then substring) so "Your Name" or "BIB number (1-9999)"
+still resolve. Edit the map to your form's exact wording — the EN/TH
+defaults are a starting point, not a contract.
+
+**Embeddings are intentionally empty — and must NOT be faked.** Apps
+Script cannot run face-api.js (Guardrail 16: no server-side AI), so the
+form path produces an intake-only row. The runner is stored, foldered,
+and listed, but is **NOT recognizable by the Drive Scanner** (which
+builds its `FaceMatcher` from `Runners.Embeddings`) until embeddings
+are added. To finish enrollment, re-register the **same lowercase
+name** via `register.html` — `handleRegisterRunner` upserts the row in
+place and writes the averaged 128-float vector. The trigger preserves
+an existing Embeddings cell on update, so the order (form first, browser
+later — or vice versa) doesn't wipe data. See Guardrail 33.
+
+**Setup is one function call.** `_setupFormTrigger()` (run once from
+the Apps Script editor) installs the **installable** `onFormSubmit`
+trigger via `ScriptApp.newTrigger("handleFormSubmit").forSpreadsheet(ss)
+.onFormSubmit().create()`. It is idempotent (deletes any prior
+`handleFormSubmit` trigger first). An installable trigger is required
+because the **simple** trigger (a function literally named
+`onFormSubmit`) runs without the authorization scope needed to move
+Drive files and set sharing. The handler never throws — every failure
+is logged via `logErr` and swallowed, because a thrown error inside a
+trigger is invisible to the form submitter and would otherwise leave a
+half-done intake.
+
+**Relationship to the live registration path.** `register.html` →
+`registerRunner` (atomic POST, §4.1) remains the **complete**
+enrollment path (photos + embeddings in one shot). The form path is a
+lighter intake for self-service sign-up where on-the-spot face capture
+isn't practical; both write the same `Runners` schema and both go
+through `getOrCreateFolder` / `DRIVE_THUMBNAIL_URL`, so a runner can be
+created by one and completed by the other.
 
 ---
 
@@ -1728,6 +1915,33 @@ explicit, justified, and accompanied by an update to this file.
     (distinct from `"name:<readBib>"`) so a later readable shot still
     fires a real verified ID. If you raise `MIN_OCR_FACE_SIZE`, you are
     widening the unverified-ID band — do it deliberately.
+33. **The Google Form intake (`FormIntake.gs`) writes runners with an
+    EMPTY `Embeddings` cell — never fake embeddings server-side.** Apps
+    Script cannot run face-api.js (Guardrail 16), so `handleFormSubmit`
+    cannot compute the 128-float descriptor. A form-registered runner is
+    intake-only: stored, foldered, listed — but NOT recognizable by the
+    Drive Scanner until a browser enrollment (`register.html`) fills the
+    Embeddings cell. Do NOT "fix" the empty cell with random / zero /
+    placeholder vectors — a garbage descriptor would silently match (or
+    refuse to match) real faces and corrupt the FaceMatcher for the
+    whole event. There are exactly TWO sanctioned ways to populate
+    `Embeddings`, both compute the descriptor **in a browser** with
+    face-api: (a) the `register.html` → `registerRunner` capture path,
+    and (b) the Drive Scanner's **pre-scan auto-enroll** (§4.7), which
+    reads the stored photos in the browser, runs face-api, and saves the
+    result via the `updateEmbeddings` POST. `updateEmbeddings` strictly
+    SHAPE-validates the payload (exactly 128 finite floats) so even a
+    buggy client can't write a malformed descriptor, and it is
+    write-once (won't clobber an existing cell unless `force:true`). The
+    auto-enroll NEVER fabricates a descriptor — a photo with no clear
+    single face is skipped and the runner is flagged for webcam
+    enrollment. `handleFormSubmit` likewise PRESERVES an existing
+    Embeddings cell on update (a form re-submit after enrollment doesn't
+    wipe it), and the upsert key is the lowercase `name` shared across
+    `register.html`, `handleFormSubmit`, and `updateEmbeddings`.
+    Also: install the trigger via `_setupFormTrigger()` (INSTALLABLE) —
+    a simple trigger named `onFormSubmit` lacks the Drive scope to move
+    files / set sharing and will fail silently.
 
 ---
 
@@ -2419,6 +2633,31 @@ world accuracy and FPS without blocking the main thread.
   followed by a 150 ms `POST_THROTTLE_MS` sleep, capping the
   outgoing request rate to ~6/sec for quota safety on per-user
   URL-fetch caps.
+- **Google Form-registered runners are auto-enrolled at scan time**:
+  the `onFormSubmit` path (`FormIntake.gs`, §4.8) creates the
+  `RunnerFaces/<name>/` folder, moves the 5 angle photos into it, and
+  writes the `Runners` row with `Embeddings` BLANK (Apps Script can't
+  run face-api — Guardrail 16/33). The gap is closed by the Drive
+  Scanner's **pre-scan auto-enroll** (§4.7): the first `startScan()`
+  after a batch of form sign-ups computes each missing descriptor in
+  the browser from the stored photos and saves it via
+  `updateEmbeddings`, so the runner is recognized normally from then
+  on. Caveat: a form runner whose uploaded photos contain **no usable
+  face** (no detectable face, or a group shot with 2+ faces) is NOT
+  auto-enrolled — they're logged `enroll via webcam` and remain
+  `Unknown` (firing `UNREGISTERED`) until re-registered through
+  `register.html`. So a form runner is recognizable IFF at least one of
+  their angle photos has exactly one clear face. Embedding QUALITY also
+  tracks photo quality — uncontrolled form uploads give weaker
+  descriptors than `register.html`'s controlled 5-angle capture.
+- **Form intake upserts by lowercase name and preserves embeddings**:
+  `handleFormSubmit` lowercases the form's Name (same rule as
+  `register.html`) and upserts the `Runners` row on that key. If a row
+  already exists (e.g. enrolled via the browser first), its
+  `Embeddings` cell is kept; only the other fields + photos are
+  rewritten. Name fields that fail `NAME_PATTERN` (spaces, Thai
+  characters, > 50 chars) are logged and the submission is skipped — no
+  partial folder/row is created.
 
 ### 6.6 One-off setup helpers (Apps Script editor)
 
@@ -2434,6 +2673,7 @@ All are idempotent.
 | `_migrateResultsSchema()` | Strips the 7 retired timing columns (`Start_Time`, `CP1-4_Time`, `Finish_Time`, `Total_Duration`) from the Results sheet and appends `IsCheating` with blank defaults. Idempotent. | Once after deploying the 2026-05-20 schema strip |
 | `_migrateViolationsPhotoColumns()` | Appends `PhotoFileId` and `DetectionBoxes` to the Violations sheet (existing rows get blank cells). Idempotent. | Once after deploying the 2026-05-20 evidence pass |
 | `_migrateImagesToLh3()` | Rewrites every `Runners.Photo_*` + `Violations.ImageUrl` cell from any legacy form (thumbnail / embed / viewer) to the lh3 form `lh3.googleusercontent.com/d/<id>=w800`. Idempotent. | Once after deploying the 2026-05-20 lh3 URL switch (fixes Broken Image on the dashboard) |
+| `_setupFormTrigger()` (in `FormIntake.gs`) | Installs the INSTALLABLE `onFormSubmit` trigger that runs `handleFormSubmit` on the bound spreadsheet. Idempotent (removes any prior `handleFormSubmit` trigger first). | Once after adding `FormIntake.gs` and linking the registration Google Form to the spreadsheet (§4.8) |
 
 ### 6.7 Endpoints reference
 
@@ -2462,6 +2702,7 @@ All are idempotent.
 | `editRunnerProfile` | `{ token, name, bib?, email? }` | Admin; edits BIB and/or Email on the **Runners** sheet for the runner with the given Name. Both fields are independently optional (frontend posts whichever changed); supplying neither is a `bad_request`. BIB cascades to `Results.BibNumber` if a Results row exists. Empty string clears the corresponding cell. Email validated against `EMAIL_PATTERN` when non-empty; NOT propagated to Results. Invalidates runners cache (and results cache when BIB cascade happens). |
 | `renameRunner` | `{ token, oldName, newName }` | Admin; cascade-renames Runners.Name + every matching Results.Name + every matching Violations.Name + the `RunnerFaces/<oldName>` Drive folder (try-catch isolated per Guardrail 2). Rejects with `conflict` if `newName` already exists in Runners. Invalidates all three caches. NOT transactional across sheets — Apps Script crash mid-cascade leaves a partially renamed state; the next rename / manual edit reconciles. |
 | `markCheating` | `{ name, isCheating }` | **No admin token** — called by the automated Drive Scanner after WRONG_PERSON fires (Guardrail 29 sibling — distinct write path from `photo_verified`). Writes `"true"` / `"false"` to `Results.IsCheating` for the named runner. Inserts a minimal row if the runner has no Results row yet. Invalidates the results cache. |
+| `updateEmbeddings` | `{ name, embeddings, force? }` | **No admin token** — called by the Drive Scanner's pre-scan auto-enroll (§4.7) to fill `Runners.Embeddings` for a form-registered runner whose descriptor was computed in the browser. `embeddings` is an array (or JSON string) of **exactly 128 finite floats** — strictly shape-validated, so a malformed/garbage payload is rejected (`bad_request`); the legacy `[[…]]` nested shape is tolerated (Guardrail 6). **Write-once**: if the cell is already non-empty the write is skipped (returns `updated:false`) unless `force:true`, so a browser-enrolled descriptor is never silently clobbered (Guardrail 33). `not_found` if the named runner has no Runners row. Invalidates the runners cache. |
 | `updateRunnerPhoto` | `{ token, name, angle, photoBase64, mimeType? }` | Admin; trashes the old Drive file for the angle (try-catch isolated, Guardrail 2), uploads the new base64 image via `saveBase64Image`, rewrites the `Photo_<Angle>` cell with the new thumbnail URL. `angle` must be one of `front` / `top` / `bottom` / `left` / `right`. Invalidates the runners cache. |
 
 All responses are

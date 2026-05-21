@@ -421,22 +421,7 @@ async function init(){
   const runners = d.data || [];
   document.getElementById("runner-count").textContent = runners.length;
 
-  const labeled = [];
-  for (const r of runners){
-   if (!r.Embeddings) continue;
-   try {
-    let emb = JSON.parse(r.Embeddings);
-    if (Array.isArray(emb) && emb.length > 0 && Array.isArray(emb[0])) emb = emb[0];
-    if (!Array.isArray(emb) || emb.length !== 128){
-     console.warn('Bad embedding size for', r.Name, emb.length);
-     continue;
-    }
-    const desc = new Float32Array(emb);
-    labeled.push(new faceapi.LabeledFaceDescriptors(r.Name, [desc]));
-    runnerRegistry[r.Name] = String(r.BibNumber || "");
-   } catch (e){ console.warn("Bad embedding for", r.Name, e); }
-  }
-  if (labeled.length > 0) faceMatcher = new faceapi.FaceMatcher(labeled, FACE_MATCH_DISTANCE);
+  buildMatcherFromRunners(runners);
   markStep("step-runners", "done");
 
   // 3) Init Tesseract — digits-only whitelist. PSM is NOT fixed here:
@@ -568,6 +553,182 @@ function promptResume(savedState){
  });
 }
 
+// ── FACE MATCHER BUILD ──────────────────────────────────────
+// Build (or rebuild) the FaceMatcher + runnerRegistry from a getRunners
+// array. Embedding shape contract is identical to checkpoint.html:
+// 128 floats, JSON-stringified, with the legacy nested-array fallback
+// ([[...]]) per Guardrail 6. Runners with no Embeddings are skipped —
+// after the pre-scan auto-enroll phase below, the only ones still
+// skipped are those whose stored photos yielded no usable face.
+// Returns the number of usable (labeled) runners.
+function buildMatcherFromRunners(runners){
+ const labeled = [];
+ runnerRegistry = {};
+ for (const r of (runners || [])){
+  if (!r.Embeddings) continue;
+  try {
+   let emb = JSON.parse(r.Embeddings);
+   if (Array.isArray(emb) && emb.length > 0 && Array.isArray(emb[0])) emb = emb[0];
+   if (!Array.isArray(emb) || emb.length !== 128){
+    console.warn('Bad embedding size for', r.Name, emb.length);
+    continue;
+   }
+   labeled.push(new faceapi.LabeledFaceDescriptors(r.Name, [new Float32Array(emb)]));
+   runnerRegistry[r.Name] = String(r.BibNumber || "");
+  } catch (e){ console.warn("Bad embedding for", r.Name, e); }
+ }
+ faceMatcher = labeled.length > 0 ? new faceapi.FaceMatcher(labeled, FACE_MATCH_DISTANCE) : null;
+ return labeled.length;
+}
+
+// ── PRE-SCAN AUTO-ENROLL ────────────────────────────────────
+// Runners created via the Google Form intake (FormIntake.gs) have
+// photos + a folder but NO Embeddings — Apps Script can't run face-api
+// (Guardrail 16). Without face data the scanner would tag them Unknown
+// every time and fire false UNREGISTERED. So before each scan we compute
+// the missing embeddings IN THE BROWSER from their stored angle photos
+// (same averaging as register.html) and persist them via updateEmbeddings.
+//
+// Quality-guarded: a photo contributes a descriptor only when EXACTLY
+// ONE face is detected at >= MIN_OCR_FACE_SIZE. Runners whose stored
+// photos yield no usable face are flagged for manual webcam enrollment
+// (register.html) — we never fabricate a descriptor (Guardrail 33).
+// First scan after a batch of form sign-ups pays this cost once; on
+// later scans every runner already has embeddings, so this is a no-op
+// fast-return.
+const ENROLL_PHOTO_FIELDS = ["Photo_Front","Photo_Top","Photo_Bottom","Photo_Left","Photo_Right"];
+
+// Pull a Drive file ID out of a stored Photo_* URL — current lh3 form
+// (lh3.googleusercontent.com/d/<id>=w800) plus the legacy ?id= form.
+function driveIdFromUrl(url){
+ if (!url) return null;
+ const s = String(url);
+ let m = s.match(/\/d\/([-\w]{25,})/);
+ if (m) return m[1];
+ m = s.match(/[?&]id=([-\w]{25,})/);
+ return m ? m[1] : null;
+}
+
+function averageDescriptors(list){
+ const out = new Float32Array(128);
+ for (const d of list){ for (let i=0;i<128;i++) out[i] += d[i]; }
+ for (let i=0;i<128;i++) out[i] /= list.length;
+ return out;
+}
+
+// Detect faces for enrollment. Large phone uploads (form intake) can be
+// 12MP; downscale to MAX_SCAN_WIDTH for detection so memory/time stay
+// bounded — the descriptor is resolution-independent and FACE_MATCH_
+// DISTANCE absorbs the downscale (same rationale as the scan path).
+async function detectFacesForEnroll(img, detectorOpts){
+ let input = img;
+ if (img.naturalWidth > MAX_SCAN_WIDTH){
+  const dw = MAX_SCAN_WIDTH;
+  const dh = Math.round(img.naturalHeight * (MAX_SCAN_WIDTH / img.naturalWidth));
+  const c = document.createElement("canvas");
+  c.width = dw; c.height = dh;
+  c.getContext("2d").drawImage(img, 0, 0, dw, dh);
+  input = c;
+ }
+ return faceapi.detectAllFaces(input, detectorOpts).withFaceLandmarks().withFaceDescriptors();
+}
+
+// POST a computed descriptor to the backend (write-once unless forced).
+// Goes through the same serial throttle queue as every other POST so
+// the Apps Script URL-fetch quota guard holds (Guardrail 30).
+async function saveEmbeddings(name, descriptor){
+ const arr = Array.prototype.slice.call(descriptor);   // Float32Array → number[]
+ try {
+  return await enqueueThrottledPost(async () => {
+   const resp = await fetch(API, {
+    method: "POST",
+    headers: { "Content-Type": "text/plain" },
+    body: JSON.stringify({ action: "updateEmbeddings", name, embeddings: arr }),
+   });
+   const result = await resp.json();
+   return !!(result && result.status === "success");
+  });
+ } catch (e){
+  return false;
+ }
+}
+
+// Compute + persist embeddings for every runner that has photos but no
+// embeddings. Rebuilds the FaceMatcher afterward. Abortable via Stop.
+async function backfillMissingEmbeddings(){
+ let runners;
+ try {
+  const res = await fetch(API + "?action=getRunners");
+  const d = await res.json();
+  runners = d.data || [];
+ } catch (e){
+  addLog("err", "(auto-enroll)", "Could not load runners: " + (e.message || e));
+  return;
+ }
+ const pending = runners.filter(r =>
+  !r.Embeddings && ENROLL_PHOTO_FIELDS.some(f => driveIdFromUrl(r[f])));
+ if (pending.length === 0) return;   // fast path — everyone already enrolled
+
+ setStatus("ok", `🧬 Preparing face data… 0/${pending.length}`);
+ addLog("info", "Auto-enroll",
+  `${pending.length} runner(s) registered via form have no face data — computing from their photos`);
+
+ const detectorOpts = new faceapi.SsdMobilenetv1Options({ minConfidence: SSD_MIN_CONFIDENCE });
+ let done = 0, enrolled = 0, failed = 0;
+
+ for (const r of pending){
+  if (abortScan) break;
+  const descriptors = [];
+  for (const f of ENROLL_PHOTO_FIELDS){
+   const fileId = driveIdFromUrl(r[f]);
+   if (!fileId) continue;
+   try {
+    const payload = await fetchImageBytes({ id: fileId });
+    if (!payload || payload.error) continue;
+    const dataUrl = `data:${payload.mimeType || 'image/jpeg'};base64,${payload.base64}`;
+    const img = await loadImage(dataUrl).catch(() => null);
+    if (!img) continue;
+    const dets = await detectFacesForEnroll(img, detectorOpts);
+    // Quality guard: exactly one face of usable size. Zero = no face;
+    // 2+ = group/ambiguous photo — both unsafe to enroll from.
+    const usable = dets.filter(d =>
+     d.detection.box.height >= MIN_OCR_FACE_SIZE && d.detection.box.width >= MIN_OCR_FACE_SIZE);
+    if (usable.length === 1){
+     descriptors.push(usable[0].descriptor);
+    } else if (DEBUG){
+     console.log(`[enroll] ${r.Name} ${f}: ${dets.length} face(s), ${usable.length} usable — skipped`);
+    }
+   } catch (e){
+    if (DEBUG) console.warn(`[enroll] ${r.Name} ${f} failed`, e);
+   }
+  }
+  done++;
+  if (descriptors.length === 0){
+   failed++;
+   addLog("skip", r.Name, "No usable face in stored photos — enroll via webcam (register.html)");
+  } else {
+   const ok = await saveEmbeddings(r.Name, averageDescriptors(descriptors));
+   if (ok){ enrolled++; addLog("ok", r.Name, `Face data computed from ${descriptors.length} photo(s)`); }
+   else   { failed++;   addLog("err", r.Name, "Computed face data but save failed"); }
+  }
+  setStatus("ok", `🧬 Preparing face data… ${done}/${pending.length}`);
+ }
+
+ addLog("info", "Auto-enroll done", `${enrolled} enrolled · ${failed} need attention`);
+
+ // Rebuild the matcher from the canonical saved data. The updateEmbeddings
+ // POSTs invalidated the runners cache, so this getRunners is fresh.
+ if (enrolled > 0){
+  try {
+   const res = await fetch(API + "?action=getRunners");
+   const d = await res.json();
+   buildMatcherFromRunners(d.data || []);
+  } catch (e){
+   if (DEBUG) console.warn("[enroll] matcher rebuild failed", e);
+  }
+ }
+}
+
 // ── SCAN ORCHESTRATION ──────────────────────────────────────
 async function startScan(){
  if (scanning) return;
@@ -575,10 +736,6 @@ async function startScan(){
  const folderId = folderIdInput.value.trim();
  if (!folderId){
   setStatus("err", "❌ Please enter a Drive folder ID");
-  return;
- }
- if (!faceMatcher){
-  setStatus("err", "❌ No registered runners — register at least one first");
   return;
  }
  if (!ocrReady){
@@ -589,6 +746,25 @@ async function startScan(){
  abortScan = false;
  currentFolderId = folderId;
  setScanUI(true);
+
+ // Pre-scan auto-enroll — compute embeddings for form-registered runners
+ // (photos but no face data) so they're recognized instead of firing
+ // false UNREGISTERED. No-op fast-return once everyone is enrolled;
+ // abortable via Stop. Runs BEFORE the faceMatcher guard because it may
+ // build the matcher from scratch when ALL runners came in via the form.
+ setStatus("ok", "🧬 Preparing face data…");
+ await backfillMissingEmbeddings();
+ if (abortScan){
+  setStatus("warn", "⚠️ Stopped");
+  scanning = false; abortScan = false; setScanUI(false); currentFolderId = "";
+  return;
+ }
+ if (!faceMatcher){
+  setStatus("err", "❌ No registered runners with a usable face photo — enroll via register.html");
+  scanning = false; setScanUI(false); currentFolderId = "";
+  return;
+ }
+
  setStatus("ok", "🟢 Listing folder…");
 
  // Reset stats / dedup for a fresh batch. Records/violations from the

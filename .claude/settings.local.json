@@ -6,7 +6,11 @@
       "PowerShell(gh pr *)",
       "Bash(git fetch *)",
       "Bash(git add *)",
-      "Bash(git commit -m ' *)"
+      "Bash(git commit -m ' *)",
+      "Bash(node *)",
+      "Bash(git -C \"D:/GitHub/AI-Runner-Timing-System-YOLOv8\" add templates/photo_scanner.html AI_CONTEXT.md)",
+      "Bash(git -C \"D:/GitHub/AI-Runner-Timing-System-YOLOv8\" status --short)",
+      "Bash(git *)"
     ]
   }
 }
