@@ -177,7 +177,8 @@
       top: 0;
       left: 0;
       width: 100%;
-      height: 100%
+      height: 100%;
+      object-fit: cover
     }
 
     /* SIDEBAR */
@@ -426,14 +427,14 @@
     // detector only lowers FPS, never queues. To revert to Tiny (faster, less
     // accurate): load `tinyFaceDetector` and pass
     // `new faceapi.TinyFaceDetectorOptions({inputSize, scoreThreshold})`.
-    const SSD_MIN_CONFIDENCE = 0.7;             // detection floor (raised from the 0.5 default → fewer false faces)
+    const SSD_MIN_CONFIDENCE = 0.3;             // detection floor (lowered to 0.3 so no faces are skipped)
     // Legacy Tiny knobs — only used if you revert the detector above.
     const FACE_DETECTOR_INPUT_SIZE = 320;
     const FACE_DETECTOR_SCORE_THRESHOLD = 0.5;
     // Tighter than the v5 default (0.5). Trades more "Unknown" labels for
     // fewer false matches — appropriate at a checkpoint where misidentifying
     // a runner is more costly than missing them on one frame.
-    const FACE_MATCH_DISTANCE = 0.40;
+    const FACE_MATCH_DISTANCE = 0.45;
 
     // ── AUTO-ENROLL (form-registered runners) ──────────────────────
     // Form intake (FormIntake.gs) creates runners with photos but BLANK
@@ -458,12 +459,12 @@
     const BBOX_EMA_RESET_FRAMES = 10;           // drop EMA after N missing frames
 
     // ── RECORDING / COOLDOWNS ──────────────────────────────────────
-    const RECORD_AFTER_FRAMES = 5;              // consecutive recognitions before logging
+    const RECORD_AFTER_FRAMES = 1;              // consecutive recognitions before logging (1 for immediate check)
     const COOLDOWN_SEC = 30;                    // per-CP per-runner record cooldown
     const VIOLATION_COOLDOWN_SEC = 60;          // per-CP per-runner violation cooldown
 
     // ── OCR PIPELINE ───────────────────────────────────────────────
-    const OCR_AFTER_FRAMES = 10;                // consecutive recognitions before triggering OCR
+    const OCR_AFTER_FRAMES = 1;                // consecutive recognitions before triggering OCR (1 for immediate check)
     const OCR_CACHE_TTL_MS = 15000;             // stale read purge AND vote-buffer expiry
 
     // Adaptive threshold: each pixel compared to the mean of an
@@ -1095,8 +1096,6 @@
           fpsCounter = 0; lastFpsTime = now;
         }
 
-        ctx.clearRect(0, 0, overlay.width, overlay.height);
-
         // NOTE: faceMatcher may legitimately be null (e.g. ALL runners came via
         // the form and auto-enroll found no usable photo). Don't bail — still
         // detect + draw faces (everyone as Unknown) so the operator sees the
@@ -1109,6 +1108,15 @@
           const detections = await faceapi.detectAllFaces(detIn.canvas, detectorOptions)
             .withFaceLandmarks()
             .withFaceDescriptors();
+
+          // Sync canvas dimensions if video changed or was not ready at init
+          if (video.videoWidth && (overlay.width !== video.videoWidth || overlay.height !== video.videoHeight)) {
+            overlay.width = video.videoWidth;
+            overlay.height = video.videoHeight;
+          }
+
+          // Clear previous frame ONLY AFTER detection completes, so it doesn't flicker/disappear
+          ctx.clearRect(0, 0, overlay.width, overlay.height);
 
           const currentNames = new Set();
           // Per-frame holder for the largest unknown face. Largest by area is the
@@ -1148,11 +1156,16 @@
               if (consecutiveFrames[name] >= OCR_AFTER_FRAMES && !ocrBusy) {
                 // Pass the SMOOTHED box — the chest crop must not jitter or
                 // Tesseract's confidence collapses.
-                runSmartOCR(video, box, name);
+                runSmartOCR(video, box, name, det.descriptor);
               }
             } else {
+              // Also track consecutive frames for unknowns to run OCR on them so they are not skipped!
+              consecutiveFrames["unknown"] = (consecutiveFrames["unknown"] || 0) + 1;
+              if (consecutiveFrames["unknown"] >= OCR_AFTER_FRAMES && !ocrBusy) {
+                runSmartOCR(video, box, "unknown", det.descriptor);
+              }
+
               // Track the largest unknown face for the post-loop UNREGISTERED
-              // trigger. We never OCR unknowns (they have no registered BIB
               // anyway), so the only signal is "stayed visible long enough."
               const area = rawBox.width * rawBox.height;
               if (area > largestUnknownArea) {
@@ -1331,7 +1344,7 @@
       return { candidates, confByBib, hadDigits };
     }
 
-    async function runSmartOCR(video, box, name) {
+    async function runSmartOCR(video, box, name, descriptor = null) {
       if (ocrBusy || !ocrReady || !tesseractWorker) return;
       ocrBusy = true;
       try {
@@ -1342,26 +1355,55 @@
           return;
         }
 
-        // ── Valid read — clear failure state, then vote ──
-        ocrFailureCount[name] = 0;
-        ocrLastFailureKind[name] = null;
         const readBib = candidates[0];
-        const consensus = castVote(name, readBib, confByBib[readBib] || 0);
-        if (DEBUG) console.log("[debug] vote", { name, readBib, buffer: (ocrVotes[name] || []).length, consensus });
+        let targetName = name;
+
+        if (name === "unknown") {
+          // Look up owner by BIB
+          const owner = bibToOwner[readBib];
+          if (owner) {
+            targetName = owner;
+            // Dynamically register face descriptor on the fly so subsequent frames recognize them!
+            if (descriptor && faceMatcher) {
+              try {
+                faceMatcher.labeledDescriptors.push(
+                  new faceapi.LabeledFaceDescriptors(targetName, [new Float32Array(descriptor)])
+                );
+                if (DEBUG) console.log(`[debug] Dynamically registered face for ${targetName} via BIB ${readBib}`);
+              } catch (e) { console.warn("Dynamic registration failed:", e); }
+            }
+          } else {
+            return; // skip unregistered BIB
+          }
+        }
+
+        // ── Valid read — clear failure state, then vote ──
+        ocrFailureCount[targetName] = 0;
+        ocrLastFailureKind[targetName] = null;
+        const consensus = castVote(targetName, readBib, confByBib[readBib] || 0);
+        if (DEBUG) console.log("[debug] vote", { name: targetName, readBib, buffer: (ocrVotes[targetName] || []).length, consensus });
         if (!consensus) return;
 
-        const expectedBib = runnerRegistry[name];
+        // Record CP if consensus is reached (even for dynamically matched unknown faces)
+        const cdKey = targetName + ":" + CP_KEY;
+        const nowSec = Date.now() / 1000;
+        if (!cooldowns[cdKey] || (nowSec - cooldowns[cdKey]) > COOLDOWN_SEC) {
+          cooldowns[cdKey] = nowSec;
+          recordCP(targetName);
+        }
+
+        const expectedBib = runnerRegistry[targetName];
         if (expectedBib && consensus !== expectedBib) {
           // Registered face A wearing a BIB that isn't A's → cheating. Shares the
           // single name cooldown bucket with NO_BIB / OBSCURED_BIB / MULTIPLE_BIBS
           // (Guardrail 25). On a fresh fire, flag A in Results.IsCheating (🚨).
-          const fired = tryFireViolation(name + ":" + CP_KEY, {
-            name, bib: consensus,
+          const fired = tryFireViolation(targetName + ":" + CP_KEY, {
+            name: targetName, bib: consensus,
             message: `Expected BIB ${expectedBib}, Found ${consensus}`,
             violationType: "WRONG_PERSON",
             image: captureFullFrame(video),
           });
-          if (fired) markCheating(name);
+          if (fired) markCheating(targetName);
         }
       } catch (e) { console.warn("OCR error:", e) }
       finally { ocrBusy = false }
