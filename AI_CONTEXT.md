@@ -9,6 +9,36 @@
 > cadence, caching, or guardrails MUST update this file in the same change
 > set.
 >
+> **Last updated:** 2026-05-22 — **Live Checkpoint FPS lever (detection
+> downscale) — accuracy held the same.** SSD is accurate but its cost scales
+> with input pixels, so the accuracy pass cost FPS. Fix that PRESERVES
+> accuracy: run SSD on a DOWNSCALED copy of each frame
+> (`DETECT_MAX_WIDTH=960` via `scaleForDetect`, reusing one canvas), then map
+> the boxes BACK to full-res (`scaleBox`) before drawing / OCR. So OCR still
+> crops the full-resolution video (BIB accuracy untouched) and a
+> checkpoint-distance face stays well above the recognition net's ~110px
+> need, so `FACE_MATCH_DISTANCE=0.45` matching is unchanged — SAME SSD
+> detector, SAME OCR consensus (7/4), just fewer pixels for the CNN
+> (~1.5–1.8× detection FPS at 960). Tunable: raise `DETECT_MAX_WIDTH` toward
+> `VIDEO_WIDTH` (1280) to disable the downscale, lower (720/640) for more
+> FPS. Updates §4.2. Files: `templates/checkpoint.html`.
+>
+> **Last updated:** 2026-05-22 — **Live Checkpoint accuracy pass (face +
+> BIB).** Operator asked for higher accuracy ("ยอมช้าได้ ขอแม่น"). FACE: the
+> live detector is switched from TinyFaceDetector to **SSD MobileNet** (the
+> scanner's detector — finds small / angled / partially-occluded faces far
+> more reliably), with the WebGL/GPU backend pinned FIRST so it stays usable
+> on live video (CPU fallback), and `SSD_MIN_CONFIDENCE=0.7` to cut false
+> detections. The await-based loop self-throttles, so SSD only lowers FPS,
+> never queues. Auto-enroll (`detectFacesForEnroll`) uses SSD too, so
+> form-runner embeddings come from better face crops. BIB: the multi-frame
+> OCR consensus is tightened — `OCR_VOTE_BUFFER_SIZE 5→7`,
+> `OCR_VOTE_MIN_CONSENSUS 3→4` — so a BIB (and any WRONG_PERSON keyed off it)
+> is trusted only after 4 agreeing reads, cutting single-frame misreads.
+> `FACE_MATCH_DISTANCE` left at 0.45 (already strict); legacy Tiny constants
+> kept for an easy revert. Updates §4.2, Guardrail 27. Files:
+> `templates/checkpoint.html`.
+>
 > **Last updated:** 2026-05-22 — **Live Checkpoint now auto-enrolls
 > form-registered runners (fixes "camera on but no face boxes").** With
 > every runner imported via the Google Form (BLANK Embeddings),
@@ -2095,9 +2125,12 @@ explicit, justified, and accompanied by an update to this file.
     is now mirrored too — `extractOcrWords` + `buildBibCandidates` + the
     multi-PSM `['6','7']` recognize + the `conf===0` "unscored" escape are
     duplicated in lockstep (alongside `getOCRCropBox`/`preprocessForOCR`),
-    so a fix to either file must be applied to both. The remaining
-    INTENTIONAL divergence is the detector (Tiny vs SSD) and checkpoint's
-    multi-frame majority vote (the scanner is single-shot per photo).
+    so a fix to either file must be applied to both. **(2026-05-22b)**
+    checkpoint also switched its detector to **SSD MobileNet** (was Tiny) for
+    accuracy, so the detector no longer diverges — the ONLY remaining
+    intentional divergence is checkpoint's multi-frame majority vote (live
+    video) vs the scanner's single-shot read per photo. The first clause of
+    Guardrail 27's body ("SSD … not TinyFaceDetector") now describes BOTH.
 28. **The Drive scanner MUST fetch image bytes via `getImageBytes`,
     not via `<img crossOrigin=anonymous>` against the thumbnail URL.**
     `drive.google.com/thumbnail?id=…&sz=w800` 302-redirects to

@@ -1,1311 +1,1578 @@
 <!DOCTYPE html>
 <html lang="th">
+
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Checkpoint | RunnerTrack AI</title>
-<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
-<style>
-:root{--pri:#1D9E75;--pri-g:rgba(29,158,117,.35);--bg:#0b0f14;--sf:#141a22;--card:rgba(22,30,40,.85);--bdr:rgba(255,255,255,.08);--txt:#f0f2f5;--mut:#7a8594;--red:#e53e3e;--grn:#38c172}
-*{margin:0;padding:0;box-sizing:border-box}
-body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--txt);min-height:100vh;overflow:hidden}
-.bar{background:rgba(11,15,20,.95);backdrop-filter:blur(18px);border-bottom:1px solid var(--bdr);padding:.7rem 1.5rem;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:50}
-.bar-l{display:flex;align-items:center;gap:1rem}
-.bar h1{font-family:'Bebas Neue',sans-serif;font-size:1.4rem;letter-spacing:2px;background:linear-gradient(135deg,var(--pri),#2dd4a8);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
-/* Live violation counters (per type) — replaces the old CP selector */
-.vcounts{display:flex;gap:.35rem;flex-wrap:wrap}
-.vchip{display:flex;align-items:center;gap:.3rem;padding:.3rem .55rem;border-radius:8px;border:1px solid var(--bdr);background:rgba(255,255,255,.03);font-family:'JetBrains Mono',monospace;font-size:.72rem;color:var(--mut);letter-spacing:.5px}
-.vchip b{color:var(--txt);font-size:.85rem}
-.vchip.vc-wrong{border-color:rgba(229,62,62,.5);color:#ff8585}
-.vchip.vc-wrong b{color:var(--red)}
-.bar-r{display:flex;align-items:center;gap:1rem}
-.status{display:flex;align-items:center;gap:.4rem;font-size:.8rem}
-.status.ok{color:#4ade80}.status.err{color:var(--red)}
-.dot{width:7px;height:7px;border-radius:50%;animation:pulse 2s infinite}
-.dot.ok{background:#22c55e}.dot.err{background:var(--red)}
-.fps{font-family:'JetBrains Mono',monospace;font-size:.8rem;color:var(--mut)}
-.nav-link{color:var(--mut);text-decoration:none;font-size:.8rem}.nav-link:hover{color:var(--pri)}
-/* MAIN */
-.main{display:flex;height:calc(100vh - 52px)}
-.cam-area{flex:1;position:relative;background:#000;display:flex;align-items:center;justify-content:center}
-#video{width:100%;height:100%;object-fit:cover}
-#overlay{position:absolute;top:0;left:0;width:100%;height:100%}
-/* SIDEBAR */
-.sidebar{width:280px;background:var(--sf);border-left:1px solid var(--bdr);display:flex;flex-direction:column;overflow:hidden}
-.sb-h{padding:1rem;font-family:'Bebas Neue',sans-serif;font-size:1.1rem;letter-spacing:1px;border-bottom:1px solid var(--bdr);color:var(--pri)}
-.sb-list{flex:1;overflow-y:auto;padding:.5rem}
-.sb-item{padding:.7rem .8rem;border-radius:10px;margin-bottom:.4rem;background:rgba(255,255,255,.03);border:1px solid var(--bdr);animation:slideIn .3s ease}
-.sb-item.violation{border-color:var(--red);background:rgba(229,62,62,.06)}
-.sb-name{font-weight:600;font-size:.9rem}
-.sb-name.viol{color:var(--red)}
-.sb-info{font-family:'JetBrains Mono',monospace;font-size:.75rem;color:var(--mut);margin-top:.2rem}
-.sb-status{padding:1rem;border-top:1px solid var(--bdr);font-size:.8rem;color:var(--mut)}
-.sb-status strong{color:var(--txt)}
-/* INIT SCREEN */
-.init-screen{position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:200;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:1rem}
-.init-screen.hidden{display:none}
-.spinner{width:48px;height:48px;border:4px solid rgba(255,255,255,.1);border-top-color:var(--pri);border-radius:50%;animation:spin 1s linear infinite}
-.init-text{color:var(--mut);font-size:.9rem}
-.init-steps{list-style:none;text-align:left;margin-top:.5rem}
-.init-steps li{padding:.3rem 0;font-size:.82rem;color:var(--mut)}
-.init-steps li.done{color:var(--grn)}
-.init-steps li.loading{color:var(--pri)}
-@keyframes spin{to{transform:rotate(360deg)}}
-@keyframes pulse{0%,100%{transform:scale(.95);opacity:.7}70%{transform:scale(1.1);opacity:1}}
-@keyframes slideIn{from{opacity:0;transform:translateX(10px)}to{opacity:1;transform:translateX(0)}}
-@media(max-width:768px){.sidebar{display:none}.bar{flex-wrap:wrap;gap:.5rem}}
-</style>
-</head>
-<body>
-<div class="bar">
- <div class="bar-l">
-  <h1>📷 CHECKPOINT</h1>
-  <div class="vcounts" id="vcounts" title="Live violation counts this session">
-   <span class="vchip vc-wrong" title="Wrong person / BIB mismatch (incl. bib-swap)">WRONG <b id="vc-WRONG_PERSON">0</b></span>
-   <span class="vchip" title="BIB not visible">NO BIB <b id="vc-NO_BIB">0</b></span>
-   <span class="vchip" title="BIB unreadable">OBSCURED <b id="vc-OBSCURED_BIB">0</b></span>
-   <span class="vchip" title="Multiple BIBs on one runner">MULTI <b id="vc-MULTIPLE_BIBS">0</b></span>
-   <span class="vchip" title="Unregistered runner">UNREG <b id="vc-UNREGISTERED">0</b></span>
-  </div>
- </div>
- <div class="bar-r">
-  <div class="status" id="conn-status"><div class="dot"></div><span>Initializing</span></div>
-  <span class="fps" id="fps-display">FPS: --</span>
-  <a href="/" class="nav-link">📺 Dashboard</a>
-  <a href="/register" class="nav-link">📋 Register</a>
- </div>
-</div>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Checkpoint | RunnerTrack AI</title>
+  <link
+    href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap"
+    rel="stylesheet">
+  <style>
+    :root {
+      --pri: #1D9E75;
+      --pri-g: rgba(29, 158, 117, .35);
+      --bg: #0b0f14;
+      --sf: #141a22;
+      --card: rgba(22, 30, 40, .85);
+      --bdr: rgba(255, 255, 255, .08);
+      --txt: #f0f2f5;
+      --mut: #7a8594;
+      --red: #e53e3e;
+      --grn: #38c172
+    }
 
-<div class="main">
- <div class="cam-area">
-  <video id="video" autoplay playsinline muted></video>
-  <canvas id="overlay"></canvas>
- </div>
- <div class="sidebar">
-  <div class="sb-h">📋 RECENT RECORDS</div>
-  <div class="sb-list" id="sb-list"></div>
-  <div class="sb-status">Runners loaded: <strong id="runner-count">0</strong></div>
- </div>
-</div>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box
+    }
 
-<!-- INIT SCREEN -->
-<div class="init-screen" id="init-screen">
- <div class="spinner"></div>
- <div class="init-text">กำลังเตรียมระบบ...</div>
- <ul class="init-steps" id="init-steps">
-  <li id="step-models">⏳ โหลดโมเดล AI...</li>
-  <li id="step-runners">⏳ โหลดข้อมูลนักวิ่ง...</li>
-  <li id="step-camera">⏳ เปิดกล้อง...</li>
- </ul>
-</div>
+    body {
+      font-family: 'DM Sans', sans-serif;
+      background: var(--bg);
+      color: var(--txt);
+      min-height: 100vh;
+      overflow: hidden
+    }
 
-<script src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
-<script>
-const API="https://script.google.com/macros/s/AKfycbyI4vNBRqjO5f00DN7VDCTaMKUoDqN2L10JHtQtM4tW5A-Uca_btGkOW1ei6OTBcf8g0g/exec";
-// Pinned to a release tag — `@master` would silently change at any time.
-const MODEL_URL="https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js@0.22.2/weights/";
+    .bar {
+      background: rgba(11, 15, 20, .95);
+      backdrop-filter: blur(18px);
+      border-bottom: 1px solid var(--bdr);
+      padding: .7rem 1.5rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      position: sticky;
+      top: 0;
+      z-index: 50
+    }
 
-// ── DEBUG MODE ─────────────────────────────────────────────────
-// Append `?debug=1` to the URL to enable verbose OCR/vote console
-// logs and an overlay HUD showing tracked-runner / vote / cooldown /
-// ocrBusy state. Side-effect-free: production paths are unchanged.
-const DEBUG = new URLSearchParams(location.search).get("debug") === "1";
+    .bar-l {
+      display: flex;
+      align-items: center;
+      gap: 1rem
+    }
 
-// ── VIDEO ──────────────────────────────────────────────────────
-// 720p protects FPS while giving the operator a usable preview.
-// TinyFaceDetector internally downsizes to FACE_DETECTOR_INPUT_SIZE
-// before inference, so this only affects what the operator sees and
-// what we crop for OCR. Going higher (1080p+) bottlenecks face-api.
-const VIDEO_WIDTH = 1280;
-const VIDEO_HEIGHT = 720;
+    .bar h1 {
+      font-family: 'Bebas Neue', sans-serif;
+      font-size: 1.4rem;
+      letter-spacing: 2px;
+      background: linear-gradient(135deg, var(--pri), #2dd4a8);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent
+    }
 
-// ── FACE DETECTION ─────────────────────────────────────────────
-// TinyFaceDetector chosen over SSD MobileNet for ~5× higher FPS.
-// At checkpoint distance the accuracy delta is negligible. To revert
-// to SSD: load `ssdMobilenetv1` instead and pass NO detector options
-// to detectAllFaces().
-const FACE_DETECTOR_INPUT_SIZE = 320;       // 128/160/224/320/416/512/608
-const FACE_DETECTOR_SCORE_THRESHOLD = 0.5;
-// Tighter than the v5 default (0.5). Trades more "Unknown" labels for
-// fewer false matches — appropriate at a checkpoint where misidentifying
-// a runner is more costly than missing them on one frame.
-const FACE_MATCH_DISTANCE = 0.45;
+    /* Live violation counters (per type) — replaces the old CP selector */
+    .vcounts {
+      display: flex;
+      gap: .35rem;
+      flex-wrap: wrap
+    }
 
-// ── AUTO-ENROLL (form-registered runners) ──────────────────────
-// Form intake (FormIntake.gs) creates runners with photos but BLANK
-// Embeddings (Apps Script can't run face-api — Guardrail 16). Without face
-// data faceMatcher is null and the live loop recognizes NO ONE (the
-// "camera on but no boxes" symptom). At startup we compute the missing
-// embeddings IN THE BROWSER from each runner's stored angle photos and
-// persist them via updateEmbeddings — same approach as the Drive Scanner's
-// pre-scan auto-enroll. Quality-guarded: a photo contributes only when
-// EXACTLY one face ≥ ENROLL_MIN_FACE_SIZE is detected (never fabricate a
-// descriptor — Guardrail 33). One-time cost; later startups fast-return.
-const ENROLL_PHOTO_FIELDS = ["Photo_Front","Photo_Top","Photo_Bottom","Photo_Left","Photo_Right"];
-const ENROLL_MIN_FACE_SIZE = 60;            // px floor for a usable enroll face
-const ENROLL_MAX_WIDTH = 1920;              // downscale big phone uploads before detection
-const ENROLL_DETECTOR_INPUT_SIZE = 416;     // Tiny inputSize for enroll recall (one-time)
+    .vchip {
+      display: flex;
+      align-items: center;
+      gap: .3rem;
+      padding: .3rem .55rem;
+      border-radius: 8px;
+      border: 1px solid var(--bdr);
+      background: rgba(255, 255, 255, .03);
+      font-family: 'JetBrains Mono', monospace;
+      font-size: .72rem;
+      color: var(--mut);
+      letter-spacing: .5px
+    }
 
-// ── BBOX SMOOTHING (EMA) ───────────────────────────────────────
-// Per-runner exponential moving average. α=0.35 → ~3-frame half-life.
-// Lower α = smoother but laggier. The smoothed box drives BOTH the
-// overlay rectangle AND the OCR chest crop — without this, every
-// detection-frame jitter shakes the crop and Tesseract reads garbage.
-const BBOX_EMA_ALPHA = 0.35;
-const BBOX_EMA_RESET_FRAMES = 10;           // drop EMA after N missing frames
+    .vchip b {
+      color: var(--txt);
+      font-size: .85rem
+    }
 
-// ── RECORDING / COOLDOWNS ──────────────────────────────────────
-const RECORD_AFTER_FRAMES = 5;              // consecutive recognitions before logging
-const COOLDOWN_SEC = 30;                    // per-CP per-runner record cooldown
-const VIOLATION_COOLDOWN_SEC = 60;          // per-CP per-runner violation cooldown
+    .vchip.vc-wrong {
+      border-color: rgba(229, 62, 62, .5);
+      color: #ff8585
+    }
 
-// ── OCR PIPELINE ───────────────────────────────────────────────
-const OCR_AFTER_FRAMES = 10;                // consecutive recognitions before triggering OCR
-const OCR_CACHE_TTL_MS = 15000;             // stale read purge AND vote-buffer expiry
+    .vchip.vc-wrong b {
+      color: var(--red)
+    }
 
-// Adaptive threshold: each pixel compared to the mean of an
-// (ADAPTIVE_THRESHOLD_BLOCK²)-pixel local window minus C. Computed via
-// integral image so cost is O(1) per pixel regardless of block size.
-const ADAPTIVE_THRESHOLD_BLOCK = 15;        // odd; 11–19 typical
-const ADAPTIVE_THRESHOLD_C = 10;
-const OCR_UPSCALE = 2;                      // nearest-neighbor; preserves binary edges
-// Pre-threshold smooth upscale for small crops — mirrored from
-// photo_scanner.html per Guardrail 19 + 27 (2026-05-20). Rarely fires
-// in live mode (webcam faces are usually large), but kept in lockstep.
-const OCR_PRE_UPSCALE_TARGET = 360;        // px target long-edge before threshold
-const OCR_PRE_UPSCALE_MAX = 4;             // cap on the pre-threshold factor
-// CLAHE local contrast — mirrored from photo_scanner.html (Guardrail
-// 19 + 27, 2026-05-21). Lifts faded digit strokes before thresholding.
-const CLAHE_TILES = 8;
-const CLAHE_CLIP_LIMIT = 3.0;
+    .bar-r {
+      display: flex;
+      align-items: center;
+      gap: 1rem
+    }
 
-// Aligned 2026-05-22 with the Drive Scanner's PROVEN values — checkpoint
-// OCR was the unrouted/untuned pre-fix pipeline and couldn't read BIBs.
-// 50 is the browser-Tesseract floor on adaptive-threshold crops; the
-// conf===0 "perfect read scored 0" quirk is handled in buildBibCandidates
-// (NOT by this threshold). Majority vote (OCR_VOTE_MIN_CONSENSUS=3) still
-// gates every violation, so these don't lower the violation bar.
-const OCR_MIN_CONFIDENCE = 50;
-const BIB_MIN_LEN = 2;                      // 1-digit "bibs" are Tesseract noise, not real
-const BIB_MAX_LEN = 6;
-// Multi-PSM fallback (mirrors photo_scanner.html). No single PSM fits both
-// layouts: 6 (uniform block) reads normal/large chest BIBs; 7 (single
-// line) reads small upscaled digit rows that 6 fragments. First PSM to
-// yield a valid BIB wins, so normal reads stay single-pass.
-const OCR_PSM_ATTEMPTS = ['6', '7'];
+    .status {
+      display: flex;
+      align-items: center;
+      gap: .4rem;
+      font-size: .8rem
+    }
 
-// Multi-frame majority vote — protects against single-frame OCR misreads.
-// Buffer caps at OCR_VOTE_BUFFER_SIZE; consensus declared when
-// ≥OCR_VOTE_MIN_CONSENSUS entries agree. Stale entries (>OCR_CACHE_TTL_MS)
-// auto-evict, so a drifting OCR self-corrects.
-const OCR_VOTE_BUFFER_SIZE = 5;
-const OCR_VOTE_MIN_CONSENSUS = 3;
+    .status.ok {
+      color: #4ade80
+    }
 
-// ── ADVANCED VIOLATION TRIGGERS ────────────────────────────────
-// Ghost BIB: consecutive failed OCR attempts on a known runner before
-// flagging. Empty result → NO_BIB; failed validation gate (length/conf)
-// → OBSCURED_BIB.
-const NO_BIB_AFTER_FAILURES = 5;
+    .status.err {
+      color: var(--red)
+    }
 
-// Intruder: consecutive frames an unrecognized face must stay visible
-// before firing UNREGISTERED. Higher than RECORD_AFTER_FRAMES (5) so it
-// requires deliberate presence, not a passerby behind a recognized runner.
-const UNREGISTERED_AFTER_FRAMES = 15;
+    .dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      animation: pulse 2s infinite
+    }
 
-// Multiple BIBs: minimum digits per block, minimum block count.
-// 2 digits per block filters Tesseract single-digit fragments;
-// 2 blocks is the trigger.
-const MULTIPLE_BIBS_MIN_BLOCK_LEN = 2;
-const MULTIPLE_BIBS_MIN_BLOCKS = 2;
+    .dot.ok {
+      background: #22c55e
+    }
 
-// ── STATE ──────────────────────────────────────────────────────
-// Single live station — no per-CP timing. CP_KEY is just a constant
-// cooldown-bucket suffix so the per-runner cooldown logic still works.
-const CP_KEY = "live";
-let faceMatcher = null;
-let runnerRegistry = {};                    // name → bib
-let bibToOwner = {};                        // bib → name (reverse map; stranger-BIB check)
-let cooldowns = {};                         // "name:live" → sec (per-runner record cooldown)
-let violationCooldowns = {};                // cooldownKey → sec (per-runner/-type violation cooldown)
-let violationCounts = {};                   // violationType → count (live per-type counters)
-let lastBibBorrowSec = 0;                   // last bib-swap fire — soft-suppresses UNREGISTERED for the same intruder
-let consecutiveFrames = {};                 // name → count
-let bboxEMA = {};                           // name → { x, y, width, height, missingFrames }
-let ocrVotes = {};                          // name → [{ bib, ts, conf }, ...]
-let ocrConsensus = {};                      // name → { bib, ts }
-let ocrFailureCount = {};                   // name → consecutive validation failures (Ghost BIB)
-let ocrLastFailureKind = {};                // name → "empty" | "low_quality" — drives NO_BIB vs OBSCURED_BIB
-let fpsCounter = 0, lastFpsTime = performance.now();
-let ocrBusy = false;
-let tesseractWorker = null;
-let ocrReady = false;
-let videoStream = null;
-let loopRunning = false;
-let rafId = null;
+    .dot.err {
+      background: var(--red)
+    }
 
-// ── LIVE VIOLATION COUNTERS ──
-// Bumped (and reflected in the top-bar chips) only when a violation
-// actually FIRES through tryFireViolation — so the 60 s cooldown is
-// respected and the counts match what's persisted to the backend.
-function bumpViolationCount(type){
- if(!type) return;
- violationCounts[type] = (violationCounts[type]||0) + 1;
- const el = document.getElementById("vc-"+type);
- if(el) el.textContent = violationCounts[type];
-}
+    .fps {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: .8rem;
+      color: var(--mut)
+    }
 
-// ── RUNNERS / FACE-MATCHER / AUTO-ENROLL ───────────────────────
-async function loadRunners(){
- const res=await fetch(API+"?action=getRunners");
- const d=await res.json();
- return d.data||[];
-}
+    .nav-link {
+      color: var(--mut);
+      text-decoration: none;
+      font-size: .8rem
+    }
 
-// Reverse BIB→owner map from ALL runners (incl. embedding-less form-only
-// ones) so the stranger-BIB check works even for runners we can't face-match.
-function buildBibOwnerMap(runners){
- bibToOwner={};
- for(const r of (runners||[])){
-  const ownerBib=String(r.BibNumber||"").trim();
-  if(ownerBib) bibToOwner[ownerBib]=r.Name;
- }
-}
+    .nav-link:hover {
+      color: var(--pri)
+    }
 
-// Build faceMatcher + runnerRegistry from runners that HAVE embeddings.
-// Mirror of photo_scanner.html. faceMatcher stays null if none qualify.
-function buildMatcherFromRunners(runners){
- const labeled=[];
- runnerRegistry={};
- for(const r of (runners||[])){
-  if(!r.Embeddings) continue;
-  try{
-   let emb=JSON.parse(r.Embeddings);
-   if(Array.isArray(emb) && emb.length>0 && Array.isArray(emb[0])) emb=emb[0];
-   if(!Array.isArray(emb) || emb.length!==128){ console.warn('Bad embedding size for',r.Name,emb.length); continue; }
-   labeled.push(new faceapi.LabeledFaceDescriptors(r.Name,[new Float32Array(emb)]));
-   runnerRegistry[r.Name]=String(r.BibNumber||"");
-  }catch(e){ console.warn("Bad embedding for",r.Name,e); }
- }
- faceMatcher = labeled.length>0 ? new faceapi.FaceMatcher(labeled, FACE_MATCH_DISTANCE) : null;
- return labeled.length;
-}
+    /* MAIN */
+    .main {
+      display: flex;
+      height: calc(100vh - 52px)
+    }
 
-// Pull a Drive file ID out of a stored Photo_* URL (lh3 /d/<id> + legacy ?id=).
-function driveIdFromUrl(url){
- if(!url) return null;
- const s=String(url);
- let m=s.match(/\/d\/([-\w]{25,})/); if(m) return m[1];
- m=s.match(/[?&]id=([-\w]{25,})/);   return m?m[1]:null;
-}
+    .cam-area {
+      flex: 1;
+      position: relative;
+      background: #000;
+      display: flex;
+      align-items: center;
+      justify-content: center
+    }
 
-// CORS-safe image bytes via the backend getImageBytes endpoint (the lh3
-// thumbnail URL 302-redirects with no CORS headers → would taint a canvas).
-async function fetchImageBytes(photo){
- try{
-  const res=await fetch(API+"?action=getImageBytes&fileId="+encodeURIComponent(photo.id));
-  const payload=await res.json();
-  if(!payload || payload.status!=="success") return { error:(payload&&payload.message)||"Fetch failed" };
-  return payload;
- }catch(e){ return { error:"Fetch error: "+(e.message||e) }; }
-}
+    #video {
+      width: 100%;
+      height: 100%;
+      object-fit: cover
+    }
 
-function loadImage(src){
- return new Promise((resolve,reject)=>{
-  const img=new Image();
-  img.onload=()=>resolve(img);
-  img.onerror=()=>reject(new Error("image decode failed"));
-  img.src=src;
- });
-}
+    #overlay {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%
+    }
 
-function averageDescriptors(list){
- const out=new Float32Array(128);
- for(const d of list){ for(let i=0;i<128;i++) out[i]+=d[i]; }
- for(let i=0;i<128;i++) out[i]/=list.length;
- return out;
-}
+    /* SIDEBAR */
+    .sidebar {
+      width: 280px;
+      background: var(--sf);
+      border-left: 1px solid var(--bdr);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden
+    }
 
-// Detect faces in a stored enroll photo. Big phone uploads are downscaled
-// to ENROLL_MAX_WIDTH first (descriptor is resolution-independent).
-async function detectFacesForEnroll(img){
- let input=img;
- if(img.naturalWidth>ENROLL_MAX_WIDTH){
-  const dw=ENROLL_MAX_WIDTH, dh=Math.round(img.naturalHeight*(ENROLL_MAX_WIDTH/img.naturalWidth));
-  const c=document.createElement("canvas"); c.width=dw; c.height=dh;
-  c.getContext("2d").drawImage(img,0,0,dw,dh);
-  input=c;
- }
- const opts=new faceapi.TinyFaceDetectorOptions({ inputSize:ENROLL_DETECTOR_INPUT_SIZE, scoreThreshold:FACE_DETECTOR_SCORE_THRESHOLD });
- return faceapi.detectAllFaces(input,opts).withFaceLandmarks().withFaceDescriptors();
-}
+    .sb-h {
+      padding: 1rem;
+      font-family: 'Bebas Neue', sans-serif;
+      font-size: 1.1rem;
+      letter-spacing: 1px;
+      border-bottom: 1px solid var(--bdr);
+      color: var(--pri)
+    }
 
-// Persist a computed descriptor (write-once on the backend unless forced).
-async function saveEmbeddings(name, descriptor){
- try{
-  const resp=await fetch(API,{method:"POST",headers:{"Content-Type":"text/plain"},
-   body:JSON.stringify({ action:"updateEmbeddings", name, embeddings:Array.prototype.slice.call(descriptor) })});
-  const result=await resp.json();
-  return !!(result && result.status==="success");
- }catch(e){ console.warn("saveEmbeddings failed for",name,e); return false; }
-}
+    .sb-list {
+      flex: 1;
+      overflow-y: auto;
+      padding: .5rem
+    }
 
-function setEnrollProgress(done,total){
- const el=document.getElementById("step-runners");
- if(el) el.textContent=`🔄 เตรียมข้อมูลใบหน้า (form) ${done}/${total}...`;
-}
+    .sb-item {
+      padding: .7rem .8rem;
+      border-radius: 10px;
+      margin-bottom: .4rem;
+      background: rgba(255, 255, 255, .03);
+      border: 1px solid var(--bdr);
+      animation: slideIn .3s ease
+    }
 
-// Compute + save embeddings for every runner that has photos but no
-// embeddings (form intake). Returns the count enrolled. Mirror of the
-// scanner's backfillMissingEmbeddings.
-async function enrollMissingEmbeddings(runners){
- const pending=(runners||[]).filter(r => !r.Embeddings && ENROLL_PHOTO_FIELDS.some(f=>driveIdFromUrl(r[f])));
- if(!pending.length) return 0;
- let done=0, enrolled=0;
- for(const r of pending){
-  setEnrollProgress(done,pending.length);
-  const descriptors=[];
-  for(const f of ENROLL_PHOTO_FIELDS){
-   const fileId=driveIdFromUrl(r[f]);
-   if(!fileId) continue;
-   try{
-    const payload=await fetchImageBytes({ id:fileId });
-    if(!payload || payload.error) continue;
-    const img=await loadImage(`data:${payload.mimeType||'image/jpeg'};base64,${payload.base64}`).catch(()=>null);
-    if(!img) continue;
-    const dets=await detectFacesForEnroll(img);
-    // Quality guard: exactly one usable-size face (0 = none, 2+ = ambiguous).
-    const usable=dets.filter(d => d.detection.box.height>=ENROLL_MIN_FACE_SIZE && d.detection.box.width>=ENROLL_MIN_FACE_SIZE);
-    if(usable.length===1) descriptors.push(usable[0].descriptor);
-    else if(DEBUG) console.log(`[enroll] ${r.Name} ${f}: ${dets.length} face(s), ${usable.length} usable — skipped`);
-   }catch(e){ if(DEBUG) console.warn("[enroll]",r.Name,f,e); }
-  }
-  done++;
-  if(descriptors.length){
-   if(await saveEmbeddings(r.Name, averageDescriptors(descriptors))) enrolled++;
-  }
-  setEnrollProgress(done,pending.length);
- }
- if(DEBUG) console.log(`[enroll] done — ${enrolled}/${pending.length} enrolled`);
- return enrolled;
-}
+    .sb-item.violation {
+      border-color: var(--red);
+      background: rgba(229, 62, 62, .06)
+    }
 
-// ── INIT ──
-async function init(){
- try{
-  // 1) Load models — TinyFaceDetector + landmarks + recognition.
-  // SSD MobileNet was the v5 default; TinyFaceDetector is ~5× faster
-  // and accurate enough at checkpoint distance.
-  markStep("step-models","loading");
-  await faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL);
-  await faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL);
-  await faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL);
-  markStep("step-models","done");
+    .sb-name {
+      font-weight: 600;
+      font-size: .9rem
+    }
 
-  // 2) Load runners + build the FaceMatcher. Runners registered via the
-  //    Google Form have photos but BLANK Embeddings, so AUTO-ENROLL them in
-  //    the browser FIRST — otherwise faceMatcher stays null and the live
-  //    loop recognizes no one ("camera on but no boxes"). One-time cost.
-  markStep("step-runners","loading");
-  let runners = await loadRunners();
-  buildBibOwnerMap(runners);                          // reverse BIB→owner (all runners)
-  const enrolled = await enrollMissingEmbeddings(runners);   // form runners → embeddings
-  if (enrolled > 0) runners = await loadRunners();    // refresh: updateEmbeddings invalidated the cache
-  buildMatcherFromRunners(runners);                  // sets faceMatcher + runnerRegistry (null if none usable)
-  document.getElementById("runner-count").textContent = runners.length;
-  markStep("step-runners","done");
+    .sb-name.viol {
+      color: var(--red)
+    }
 
-  // 3) Camera — surface NotAllowedError specifically so the operator
-  // gets actionable feedback instead of a generic stack trace.
-  markStep("step-camera","loading");
-  try{
-   videoStream=await navigator.mediaDevices.getUserMedia({video:{facingMode:"user",width:{ideal:VIDEO_WIDTH},height:{ideal:VIDEO_HEIGHT}}});
-  }catch(camErr){
-   const friendly=(camErr&&(camErr.name==="NotAllowedError"||camErr.name==="PermissionDeniedError"))
-    ?"ไม่ได้รับสิทธิ์เข้าถึงกล้อง — โปรดอนุญาตในเบราว์เซอร์"
-    :"เปิดกล้องไม่สำเร็จ: "+(camErr&&camErr.message||camErr);
-   setStatus("err","❌ "+friendly);
-   return;
-  }
-  const video=document.getElementById("video");
-  video.srcObject=videoStream;
-  await new Promise(r=>video.addEventListener("loadedmetadata",r,{once:true}));
-  // Ensure the video has actually started producing frames
-  if(video.readyState<2){await new Promise(r=>video.addEventListener("loadeddata",r,{once:true}));}
-  const overlay=document.getElementById("overlay");
-  overlay.width=video.videoWidth;
-  overlay.height=video.videoHeight;
-  // Stop the camera when the page is hidden/unloaded so the indicator
-  // light goes off and the OS releases the device.
-  window.addEventListener("pagehide",stopCamera);
-  markStep("step-camera","done");
+    .sb-info {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: .75rem;
+      color: var(--mut);
+      margin-top: .2rem
+    }
 
-  // 4) Init Tesseract — Tesseract.js v5 runs the engine in its own
-  // Web Worker so recognize() is non-blocking from the main thread.
-  // Whitelist + PSM 7 (single text line) optimize for short numeric
-  // BIB strings.
-  try{
-   tesseractWorker=await Tesseract.createWorker("eng");
-   await tesseractWorker.setParameters({
-    tessedit_char_whitelist:'0123456789',
-    tessedit_pageseg_mode:OCR_PSM_ATTEMPTS[0]   // runSmartOCR re-sets PSM per attempt; this is the start state
-   });
-   ocrReady=true;
-  }catch(e){console.warn("Tesseract init failed, OCR disabled:",e);ocrReady=false;}
+    .sb-status {
+      padding: 1rem;
+      border-top: 1px solid var(--bdr);
+      font-size: .8rem;
+      color: var(--mut)
+    }
 
-  setStatus("ok","🟢 Connected");
-  document.getElementById("init-screen").classList.add("hidden");
+    .sb-status strong {
+      color: var(--txt)
+    }
 
-  // Start loop
-  processLoop();
- }catch(e){
-  setStatus("err","❌ "+(e&&e.message||e));
- }
-}
+    /* INIT SCREEN */
+    .init-screen {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, .85);
+      z-index: 200;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+      gap: 1rem
+    }
 
-function stopCamera(){
- if(videoStream){
-  videoStream.getTracks().forEach(t=>t.stop());
-  videoStream=null;
- }
- loopRunning=false;
- if(rafId!==null){cancelAnimationFrame(rafId);rafId=null;}
-}
+    .init-screen.hidden {
+      display: none
+    }
 
-function markStep(id,state){
- const el=document.getElementById(id);
- el.className=state;
- if(state==="done")el.textContent="✅ "+el.textContent.slice(2);
- else if(state==="loading")el.textContent="🔄 "+el.textContent.slice(2);
-}
-function setStatus(type,text){
- const el=document.getElementById("conn-status");
- el.className="status "+type;
- el.innerHTML=`<div class="dot ${esc(type)}"></div><span>${esc(text)}</span>`;
-}
+    .spinner {
+      width: 48px;
+      height: 48px;
+      border: 4px solid rgba(255, 255, 255, .1);
+      border-top-color: var(--pri);
+      border-radius: 50%;
+      animation: spin 1s linear infinite
+    }
 
-// ── BBOX EMA SMOOTHING ──────────────────────────────────────
-// Per-runner exponential moving average on the detection box. Returns
-// the same persistent object so callers can read the latest smoothed
-// values without re-allocating. Without smoothing, every detection-
-// frame jitter shakes the chest crop and Tesseract confidence collapses.
-function smoothBox(name, raw){
- const a=BBOX_EMA_ALPHA;
- const prev=bboxEMA[name];
- if(!prev){
-  bboxEMA[name]={x:raw.x,y:raw.y,width:raw.width,height:raw.height,missingFrames:0};
-  return bboxEMA[name];
- }
- prev.x = a*raw.x + (1-a)*prev.x;
- prev.y = a*raw.y + (1-a)*prev.y;
- prev.width = a*raw.width + (1-a)*prev.width;
- prev.height = a*raw.height + (1-a)*prev.height;
- prev.missingFrames = 0;
- return prev;
-}
+    .init-text {
+      color: var(--mut);
+      font-size: .9rem
+    }
 
-// CLAHE local contrast — mirror of photo_scanner.html (Guardrail
-// 19 + 27, 2026-05-21). Tile-based contrast-limited histogram
-// equalization, bilinearly blended between tiles. Lifts faded digit
-// strokes before thresholding; output is grayscale (re-binarized by
-// the threshold, so no gray reaches Tesseract).
-function enhanceContrastCLAHE(gray, w, h){
- const T = CLAHE_TILES;
- const tw = Math.max(1, Math.floor(w / T));
- const th = Math.max(1, Math.floor(h / T));
- const nx = Math.ceil(w / tw), ny = Math.ceil(h / th);
- const maps = new Array(nx * ny);
- for (let ty = 0; ty < ny; ty++){
-  for (let tx = 0; tx < nx; tx++){
-   const x0 = tx * tw, y0 = ty * th;
-   const x1 = Math.min(w, x0 + tw), y1 = Math.min(h, y0 + th);
-   const hist = new Uint32Array(256);
-   let count = 0;
-   for (let y = y0; y < y1; y++){
-    const row = y * w;
-    for (let x = x0; x < x1; x++){ hist[gray[row + x]]++; count++; }
-   }
-   if (count === 0){ maps[ty * nx + tx] = null; continue; }
-   const clip = Math.max(1, Math.floor(CLAHE_CLIP_LIMIT * count / 256));
-   let excess = 0;
-   for (let i = 0; i < 256; i++){ if (hist[i] > clip){ excess += hist[i] - clip; hist[i] = clip; } }
-   const inc = Math.floor(excess / 256);
-   let rem = excess - inc * 256;
-   for (let i = 0; i < 256; i++){ hist[i] += inc; if (rem > 0){ hist[i]++; rem--; } }
-   const lut = new Uint8ClampedArray(256);
-   let cdf = 0;
-   for (let i = 0; i < 256; i++){ cdf += hist[i]; lut[i] = Math.round((cdf / count) * 255); }
-   maps[ty * nx + tx] = lut;
-  }
- }
- const out = new Uint8ClampedArray(w * h);
- for (let y = 0; y < h; y++){
-  const fy = (y + 0.5) / th - 0.5;
-  let ty0 = Math.floor(fy); let wy = fy - ty0; let ty1 = ty0 + 1;
-  if (ty0 < 0){ ty0 = 0; ty1 = 0; wy = 0; }
-  if (ty1 > ny - 1){ ty1 = ny - 1; if (ty0 > ny - 1) ty0 = ny - 1; }
-  for (let x = 0; x < w; x++){
-   const v = gray[y * w + x];
-   const fx = (x + 0.5) / tw - 0.5;
-   let tx0 = Math.floor(fx); let wx = fx - tx0; let tx1 = tx0 + 1;
-   if (tx0 < 0){ tx0 = 0; tx1 = 0; wx = 0; }
-   if (tx1 > nx - 1){ tx1 = nx - 1; if (tx0 > nx - 1) tx0 = nx - 1; }
-   const m00 = maps[ty0 * nx + tx0], m01 = maps[ty0 * nx + tx1];
-   const m10 = maps[ty1 * nx + tx0], m11 = maps[ty1 * nx + tx1];
-   const base = m00 || m01 || m10 || m11;
-   if (!base){ out[y * w + x] = v; continue; }
-   const a = (m00 || base)[v], b = (m01 || base)[v];
-   const c = (m10 || base)[v], d = (m11 || base)[v];
-   const top = a * (1 - wx) + b * wx;
-   const bot = c * (1 - wx) + d * wx;
-   out[y * w + x] = (top * (1 - wy) + bot * wy) | 0;
-  }
- }
- return out;
-}
+    .init-steps {
+      list-style: none;
+      text-align: left;
+      margin-top: .5rem
+    }
 
-// ── OCR PREPROCESSING ───────────────────────────────────────
-// Pipeline: grayscale (BT.601 luma) → CLAHE local contrast →
-// integral-image-based adaptive threshold (mean − C) → NN 2× upscale.
-//
-// Runs on the main thread because the crop is small (~200×150 px) and
-// the integral-image formulation is <1 ms total. A Web Worker would add
-// postMessage / structured-clone overhead larger than the work itself.
-//
-// Nearest-neighbor (not bilinear) is intentional: the threshold output
-// is binary, and bilinear would introduce gray pixels that Tesseract
-// occasionally mistreats as noise.
-function preprocessForOCR(srcCanvas){
- // Small-crop pre-threshold bilinear upscale (mirror of
- // photo_scanner.html, Guardrail 19 + 27). Separates merged digit
- // strokes on tiny crops before the threshold; threshold below still
- // outputs pure B/W so no gray reaches Tesseract.
- let workCanvas=srcCanvas;
- const srcMax=Math.max(srcCanvas.width, srcCanvas.height);
- if(srcMax>0 && srcMax<OCR_PRE_UPSCALE_TARGET){
-  const f=Math.min(OCR_PRE_UPSCALE_MAX, Math.max(2, Math.round(OCR_PRE_UPSCALE_TARGET/srcMax)));
-  const up=document.createElement("canvas");
-  up.width=srcCanvas.width*f; up.height=srcCanvas.height*f;
-  const uctx=up.getContext("2d");
-  uctx.imageSmoothingEnabled=true; uctx.imageSmoothingQuality="high";
-  uctx.drawImage(srcCanvas,0,0,up.width,up.height);
-  workCanvas=up;
- }
- const w=workCanvas.width, h=workCanvas.height;
- const ctx=workCanvas.getContext("2d");
- const imgData=ctx.getImageData(0,0,w,h);
- const src=imgData.data;
+    .init-steps li {
+      padding: .3rem 0;
+      font-size: .82rem;
+      color: var(--mut)
+    }
 
- // Grayscale
- let gray=new Uint8ClampedArray(w*h);
- for(let i=0,j=0;i<src.length;i+=4,j++){
-  gray[j]=(src[i]*0.299 + src[i+1]*0.587 + src[i+2]*0.114)|0;
- }
+    .init-steps li.done {
+      color: var(--grn)
+    }
 
- // CLAHE local contrast BEFORE thresholding — lifts faded digits.
- gray=enhanceContrastCLAHE(gray, w, h);
+    .init-steps li.loading {
+      color: var(--pri)
+    }
 
- // Integral image — Uint32Array; padded by one row/col so the local-
- // window query doesn't need boundary checks.
- const stride=w+1;
- const integral=new Uint32Array(stride*(h+1));
- for(let y=1;y<=h;y++){
-  let rowSum=0;
-  for(let x=1;x<=w;x++){
-   rowSum += gray[(y-1)*w + (x-1)];
-   integral[y*stride + x] = integral[(y-1)*stride + x] + rowSum;
-  }
- }
-
- // Adaptive threshold (mean − C) using the integral image. O(1) per pixel.
- const block=ADAPTIVE_THRESHOLD_BLOCK;
- const half=block>>1;
- const C=ADAPTIVE_THRESHOLD_C;
- const out=new Uint8ClampedArray(w*h);
- for(let y=0;y<h;y++){
-  const y0=Math.max(0,y-half), y1=Math.min(h,y+half+1);
-  for(let x=0;x<w;x++){
-   const x0=Math.max(0,x-half), x1=Math.min(w,x+half+1);
-   const area=(y1-y0)*(x1-x0);
-   const sum = integral[y1*stride+x1]
-             - integral[y0*stride+x1]
-             - integral[y1*stride+x0]
-             + integral[y0*stride+x0];
-   out[y*w + x] = (gray[y*w + x] < (sum/area) - C) ? 0 : 255;
-  }
- }
-
- // Nearest-neighbor 2× upscale.
- const s=OCR_UPSCALE;
- const w2=w*s, h2=h*s;
- const dst=document.createElement("canvas");
- dst.width=w2; dst.height=h2;
- const dstCtx=dst.getContext("2d");
- const dstImg=dstCtx.createImageData(w2,h2);
- const dPix=dstImg.data;
- for(let y=0;y<h2;y++){
-  const sy=(y/s)|0;
-  for(let x=0;x<w2;x++){
-   const sx=(x/s)|0;
-   const v=out[sy*w + sx];
-   const di=(y*w2 + x)*4;
-   dPix[di]=v; dPix[di+1]=v; dPix[di+2]=v; dPix[di+3]=255;
-  }
- }
- dstCtx.putImageData(dstImg,0,0);
- return dst;
-}
-
-// ── OCR MAJORITY VOTE ───────────────────────────────────────
-// Per-runner rolling buffer of recent valid OCR reads. Returns the
-// majority BIB iff ≥OCR_VOTE_MIN_CONSENSUS entries agree, otherwise
-// null. Stale entries (>OCR_CACHE_TTL_MS) are evicted on every call
-// so a drifting OCR self-corrects within the TTL window.
-function castVote(name, bib, conf){
- const buf = ocrVotes[name] || (ocrVotes[name]=[]);
- buf.push({bib:bib, ts:Date.now(), conf:conf});
- const cutoff = Date.now() - OCR_CACHE_TTL_MS;
- while(buf.length && buf[0].ts < cutoff) buf.shift();
- while(buf.length > OCR_VOTE_BUFFER_SIZE) buf.shift();
-
- const counts={};
- for(let i=0;i<buf.length;i++){
-  const b=buf[i].bib;
-  counts[b]=(counts[b]||0)+1;
- }
- let majBib=null, majCount=0;
- for(const b in counts){
-  if(counts[b]>majCount){majBib=b; majCount=counts[b];}
- }
- if(majCount >= OCR_VOTE_MIN_CONSENSUS){
-  ocrConsensus[name] = {bib:majBib, ts:Date.now()};
-  return majBib;
- }
- return null;
-}
-
-// Returns the cached consensus BIB iff still fresh; drops it on expiry
-// so a returning runner doesn't see a stale read from a previous lap.
-function consensusBib(name){
- const c=ocrConsensus[name];
- if(!c) return null;
- if(Date.now()-c.ts > OCR_CACHE_TTL_MS){delete ocrConsensus[name]; return null;}
- return c.bib;
-}
-
-// ── OCR CROP GEOMETRY ───────────────────────────────────────
-// Single source of truth for the chest-region crop. Used by BOTH
-// processLoop (for the dashed red OCR-debug overlay) AND runSmartOCR
-// (for the actual Tesseract input). Identical geometry is critical —
-// otherwise the operator's visible OCR rectangle would not match where
-// Tesseract is actually looking.
-//
-// Factors are tuned for hand-held BIBs near chin/neck height (field
-// observation: BIBs were missed when held above the chest region).
-//   bx = box.x − 0.5·faceH         ← wider than the face
-//   by = box.y + 0.6·faceH         ← starts in the chin region
-//   bw = box.width + 1.0·faceH     ← roughly 2× face width
-//   bh = 3.0·faceH                 ← extends well below the chest
-function getOCRCropBox(box, video){
- // Tightened vertically 2026-05-20 (was 0.5 / 3.0): top edge pushed
- // to 1.1·faceH and height trimmed to 2.2·faceH so the crop starts
- // squarely on the upper chest, chopping off the neck/chin/shirt-
- // wrinkle noise above the BIB. Mirrored from `photo_scanner.html`
- // per Guardrail 24 + 27 — both files move in lockstep. (This file
- // is unrouted live mode and untested since the change; the scanner
- // is where the tightening was validated. checkpoint.html keeps
- // PSM 7 for its multi-frame loop — see Guardrail 20.)
- const faceH = box.height;
- const bx = Math.max(0, box.x - faceH * 0.7);
- const by = Math.max(0, box.y + faceH * 1.1);
- const bw = Math.min(box.width + faceH * 1.4, video.videoWidth - bx);
- const bh = Math.min(faceH * 2.2, video.videoHeight - by);
- return {bx:bx, by:by, bw:bw, bh:bh};
-}
-
-// ── DEBUG HUD ──────────────────────────────────────────────────
-// Top-left overlay strip showing pipeline state. No-op when DEBUG is
-// false (early return). Drawn on the same overlay canvas as the
-// detection rectangles, so it never touches the DOM (no XSS path).
-function drawDebugHUD(ctx){
- if(!DEBUG) return;
- const nowSec = Date.now()/1000;
- const activeCooldowns = Object.values(violationCooldowns)
-  .filter(t => (nowSec - t) <= VIOLATION_COOLDOWN_SEC).length;
- const totalVotes = Object.values(ocrVotes)
-  .reduce((s,a) => s + (a ? a.length : 0), 0);
- const lines = [
-  `tracked: ${Object.keys(bboxEMA).length}`,
-  `votes: ${totalVotes}`,
-  `cooldowns: ${activeCooldowns}`,
-  `ocrBusy: ${ocrBusy}`,
- ];
- ctx.save();
- ctx.fillStyle = "rgba(0,0,0,.65)";
- ctx.fillRect(8, 8, 180, 18*lines.length + 8);
- ctx.fillStyle = "#fff";
- ctx.font = "11px 'JetBrains Mono',monospace";
- for(let i=0;i<lines.length;i++) ctx.fillText(lines[i], 14, 24 + i*18);
- ctx.restore();
-}
-
-// ── MAIN LOOP ──
-async function processLoop(){
- if(loopRunning)return; // guard against double-start
- loopRunning=true;
- const video=document.getElementById("video");
- const overlay=document.getElementById("overlay");
- const ctx=overlay.getContext("2d");
- // Build detector options once — reusing the instance avoids per-frame
- // allocation. inputSize=320 balances accuracy and speed; tighten to 224
- // for more FPS on weak hardware, loosen to 416 if small/distant faces
- // are missed.
- const detectorOptions = new faceapi.TinyFaceDetectorOptions({
-  inputSize: FACE_DETECTOR_INPUT_SIZE,
-  scoreThreshold: FACE_DETECTOR_SCORE_THRESHOLD,
- });
-
- async function frame(){
-  if(!loopRunning)return;
-  // FPS
-  fpsCounter++;
-  const now=performance.now();
-  if(now-lastFpsTime>=1000){
-   document.getElementById("fps-display").textContent=`FPS: ${fpsCounter}`;
-   fpsCounter=0;lastFpsTime=now;
-  }
-
-  ctx.clearRect(0,0,overlay.width,overlay.height);
-
-  // NOTE: faceMatcher may legitimately be null (e.g. ALL runners came via
-  // the form and auto-enroll found no usable photo). Don't bail — still
-  // detect + draw faces (everyone as Unknown) so the operator sees the
-  // camera works, and the stranger-BIB check can still fire on a real BIB.
-
-  try{
-   const detections = await faceapi.detectAllFaces(video, detectorOptions)
-    .withFaceLandmarks()
-    .withFaceDescriptors();
-
-   const currentNames=new Set();
-   // Per-frame holder for the largest unknown face. Largest by area is the
-   // closest face — most likely the actual intruder rather than a
-   // bystander in the background of a registered runner's frame.
-   let largestUnknownBox = null, largestUnknownArea = 0;
-
-   for(const det of detections){
-    const match=faceMatcher ? faceMatcher.findBestMatch(det.descriptor) : null;
-    const name=match ? match.label : "unknown";
-    const dist=match ? match.distance : 1;
-    const rawBox=det.detection.box;
-    const isKnown = name!=="unknown" && dist<=FACE_MATCH_DISTANCE;
-
-    // EMA-smoothed box only for known runners. Unknowns share the same
-    // identity bucket, so smoothing across multiple unknowns would smear
-    // the EMA — fall back to raw for those (they're not OCR'd anyway).
-    const box = isKnown ? smoothBox(name, rawBox) : rawBox;
-    currentNames.add(isKnown ? name : "unknown");
-
-    if(isKnown){
-     consecutiveFrames[name]=(consecutiveFrames[name]||0)+1;
-
-     // Record once we've seen this person for N consecutive frames —
-     // protects against single-frame false positives. Note: this trigger
-     // is independent of OCR consensus; the FACE recognition is what
-     // identifies the runner. OCR only gates VIOLATION reporting.
-     if(consecutiveFrames[name]>=RECORD_AFTER_FRAMES){
-      const cdKey=name+":"+CP_KEY; // per-runner record cooldown
-      const nowSec=Date.now()/1000;
-      if(!cooldowns[cdKey]||(nowSec-cooldowns[cdKey])>COOLDOWN_SEC){
-       cooldowns[cdKey]=nowSec;
-       recordCP(name);
+    @keyframes spin {
+      to {
+        transform: rotate(360deg)
       }
-     }
-
-     if(consecutiveFrames[name]>=OCR_AFTER_FRAMES && !ocrBusy){
-      // Pass the SMOOTHED box — the chest crop must not jitter or
-      // Tesseract's confidence collapses.
-      runSmartOCR(video, box, name);
-     }
-    } else {
-     // Track the largest unknown face for the post-loop UNREGISTERED
-     // trigger. We never OCR unknowns (they have no registered BIB
-     // anyway), so the only signal is "stayed visible long enough."
-     const area = rawBox.width * rawBox.height;
-     if (area > largestUnknownArea){
-      largestUnknownArea = area;
-      largestUnknownBox = rawBox;
-     }
     }
 
-    // Display uses the consensus BIB if available, else the registered
-    // BIB, else N/A. consensusBib() handles its own staleness.
-    const ocrBib = isKnown ? consensusBib(name) : null;
-    const expectedBib = isKnown ? runnerRegistry[name] : null;
-    const isMismatch = isKnown && ocrBib && expectedBib && ocrBib !== expectedBib;
-    const color = isKnown ? "#38c172" : "#e53e3e";
-    const drawColor = isMismatch ? "#e53e3e" : color;
-    const bib = ocrBib || expectedBib || "N/A";
-    const pct = isKnown ? ((1-dist)*100).toFixed(0) : "0";
-    const label = isKnown ? `${name} (${pct}%)` : "Unknown";
-    const bibLabel = isKnown ? `BIB: ${bib}` : "";
+    @keyframes pulse {
 
-    ctx.strokeStyle=drawColor; ctx.lineWidth=2;
-    ctx.strokeRect(box.x, box.y, box.width, box.height);
+      0%,
+      100% {
+        transform: scale(.95);
+        opacity: .7
+      }
 
-    ctx.fillStyle=drawColor;
-    ctx.fillRect(box.x, box.y-24, box.width, 24);
-    ctx.fillStyle="#fff"; ctx.font="bold 13px 'DM Sans',sans-serif";
-    ctx.fillText(label, box.x+4, box.y-8);
-
-    if(bibLabel){
-     const bibText = isMismatch ? bibLabel+" ⚠️ MISMATCH" : bibLabel;
-     ctx.fillStyle = isMismatch ? "rgba(229,62,62,.8)" : "rgba(29,158,117,.7)";
-     ctx.fillRect(box.x, box.y+box.height, box.width, 20);
-     ctx.fillStyle="#fff"; ctx.font="11px 'JetBrains Mono',monospace";
-     ctx.fillText(bibText, box.x+4, box.y+box.height+14);
+      70% {
+        transform: scale(1.1);
+        opacity: 1
+      }
     }
 
-    // OCR debug overlay — dashed red rect labeled "OCR" showing the
-    // exact region runSmartOCR will crop. Lets the field operator see
-    // whether the BIB they're holding falls inside the AI's chest
-    // region. Drawn for known runners only — we never OCR Unknowns.
-    if(isKnown){
-     const oc = getOCRCropBox(box, video);
-     ctx.save();
-     ctx.strokeStyle = "#ff3b30";
-     ctx.lineWidth = 2;
-     ctx.setLineDash([6, 4]);
-     ctx.strokeRect(oc.bx, oc.by, oc.bw, oc.bh);
-     ctx.setLineDash([]);
-     ctx.fillStyle = "rgba(255,59,48,.85)";
-     ctx.fillRect(oc.bx, oc.by, 32, 16);
-     ctx.fillStyle = "#fff";
-     ctx.font = "bold 11px 'JetBrains Mono',monospace";
-     ctx.fillText("OCR", oc.bx + 4, oc.by + 12);
-     ctx.restore();
-    }
-   }
+    @keyframes slideIn {
+      from {
+        opacity: 0;
+        transform: translateX(10px)
+      }
 
-   // ── POST-LOOP: UNREGISTERED (Intruder) trigger ──
-   // Increments at most once per frame regardless of how many unknowns
-   // are visible. Largest-area pick was decided in the detection loop.
-   // The staleness sweep below resets the counter when no unknown is
-   // in frame — strict reset matches consecutiveFrames' behavior for
-   // known runners (a one-frame miss restarts the warmup).
-   if (largestUnknownBox){
-    consecutiveFrames["unknown"] = (consecutiveFrames["unknown"]||0) + 1;
-
-    // STRANGER-BIB CHECK — once the intruder has stayed visible long
-    // enough to OCR, read their chest. If they're wearing a REGISTERED
-    // runner's BIB it's a bib-swap; runUnknownBibCheck fires WRONG_PERSON
-    // attributed to the BIB's owner (and sets lastBibBorrowSec). Shares
-    // the single ocrBusy guard with known-face OCR.
-    if (consecutiveFrames["unknown"] >= OCR_AFTER_FRAMES && !ocrBusy){
-     runUnknownBibCheck(video, largestUnknownBox);
+      to {
+        opacity: 1;
+        transform: translateX(0)
+      }
     }
 
-    if (consecutiveFrames["unknown"] >= UNREGISTERED_AFTER_FRAMES){
-     const nowSec = Date.now()/1000;
-     // Suppress the plain UNREGISTERED if we just flagged this same
-     // intruder as wearing a registered BIB — that WRONG_PERSON is the
-     // stronger, more specific signal (one intruder at a checkpoint at a
-     // time, so a recent bib-swap fire is almost certainly the same face).
-     if (nowSec - lastBibBorrowSec > VIOLATION_COOLDOWN_SEC){
-      const fired = tryFireViolation("unknown:"+CP_KEY, {
-       name: "Unknown",
-       bib: "",
-       message: `Unregistered runner detected`,
-       violationType: "UNREGISTERED",
-       image: captureFaceCrop(video, largestUnknownBox),
+    @media(max-width:768px) {
+      .sidebar {
+        display: none
+      }
+
+      .bar {
+        flex-wrap: wrap;
+        gap: .5rem
+      }
+    }
+  </style>
+</head>
+
+<body>
+  <div class="bar">
+    <div class="bar-l">
+      <h1>📷 CHECKPOINT</h1>
+      <div class="vcounts" id="vcounts" title="Live violation counts this session">
+        <span class="vchip vc-wrong" title="Wrong person / BIB mismatch (incl. bib-swap)">WRONG <b
+            id="vc-WRONG_PERSON">0</b></span>
+        <span class="vchip" title="BIB not visible">NO BIB <b id="vc-NO_BIB">0</b></span>
+        <span class="vchip" title="BIB unreadable">OBSCURED <b id="vc-OBSCURED_BIB">0</b></span>
+        <span class="vchip" title="Multiple BIBs on one runner">MULTI <b id="vc-MULTIPLE_BIBS">0</b></span>
+        <span class="vchip" title="Unregistered runner">UNREG <b id="vc-UNREGISTERED">0</b></span>
+      </div>
+    </div>
+    <div class="bar-r">
+      <div class="status" id="conn-status">
+        <div class="dot"></div><span>Initializing</span>
+      </div>
+      <span class="fps" id="fps-display">FPS: --</span>
+      <a href="/" class="nav-link">📺 Dashboard</a>
+      <a href="/register" class="nav-link">📋 Register</a>
+    </div>
+  </div>
+
+  <div class="main">
+    <div class="cam-area">
+      <video id="video" autoplay playsinline muted></video>
+      <canvas id="overlay"></canvas>
+    </div>
+    <div class="sidebar">
+      <div class="sb-h">📋 RECENT RECORDS</div>
+      <div class="sb-list" id="sb-list"></div>
+      <div class="sb-status">Runners loaded: <strong id="runner-count">0</strong></div>
+    </div>
+  </div>
+
+  <!-- INIT SCREEN -->
+  <div class="init-screen" id="init-screen">
+    <div class="spinner"></div>
+    <div class="init-text">กำลังเตรียมระบบ...</div>
+    <ul class="init-steps" id="init-steps">
+      <li id="step-models">⏳ โหลดโมเดล AI...</li>
+      <li id="step-runners">⏳ โหลดข้อมูลนักวิ่ง...</li>
+      <li id="step-camera">⏳ เปิดกล้อง...</li>
+    </ul>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+  <script>
+    const API = "https://script.google.com/macros/s/AKfycbyI4vNBRqjO5f00DN7VDCTaMKUoDqN2L10JHtQtM4tW5A-Uca_btGkOW1ei6OTBcf8g0g/exec";
+    // Pinned to a release tag — `@master` would silently change at any time.
+    const MODEL_URL = "https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js@0.22.2/weights/";
+
+    // ── DEBUG MODE ─────────────────────────────────────────────────
+    // Append `?debug=1` to the URL to enable verbose OCR/vote console
+    // logs and an overlay HUD showing tracked-runner / vote / cooldown /
+    // ocrBusy state. Side-effect-free: production paths are unchanged.
+    const DEBUG = new URLSearchParams(location.search).get("debug") === "1";
+
+    // ── VIDEO ──────────────────────────────────────────────────────
+    // 720p protects FPS while giving the operator a usable preview.
+    // TinyFaceDetector internally downsizes to FACE_DETECTOR_INPUT_SIZE
+    // before inference, so this only affects what the operator sees and
+    // what we crop for OCR. Going higher (1080p+) bottlenecks face-api.
+    const VIDEO_WIDTH = 1280;
+    const VIDEO_HEIGHT = 720;
+    // FPS lever (2026-05-22): run SSD on a DOWNSCALED copy of each frame — SSD
+    // cost scales with input pixels, so this raises FPS markedly. Boxes are
+    // scaled BACK to full-res afterward, so OCR still crops the full-resolution
+    // video (BIB accuracy untouched) and the descriptor's face chip stays well
+    // above the recognition net's ~110px need at checkpoint distance (match
+    // accuracy unchanged). Raise toward VIDEO_WIDTH (e.g. 1280) to disable the
+    // downscale; lower (e.g. 720/640) for even more FPS.
+    const DETECT_MAX_WIDTH = 960;
+
+    // ── FACE DETECTION ─────────────────────────────────────────────
+    // SSD MobileNet (2026-05-22) — switched from TinyFaceDetector for higher
+    // accuracy at the operator's request ("ยอมช้าได้ ขอแม่น"). SSD finds faces
+    // (esp. small / angled / partially-occluded) more reliably than Tiny, at
+    // lower FPS — fine at a checkpoint where runners pause. Same detector the
+    // Drive Scanner uses. The await-based loop self-throttles, so the heavier
+    // detector only lowers FPS, never queues. To revert to Tiny (faster, less
+    // accurate): load `tinyFaceDetector` and pass
+    // `new faceapi.TinyFaceDetectorOptions({inputSize, scoreThreshold})`.
+    const SSD_MIN_CONFIDENCE = 0.7;             // detection floor (raised from the 0.5 default → fewer false faces)
+    // Legacy Tiny knobs — only used if you revert the detector above.
+    const FACE_DETECTOR_INPUT_SIZE = 320;
+    const FACE_DETECTOR_SCORE_THRESHOLD = 0.5;
+    // Tighter than the v5 default (0.5). Trades more "Unknown" labels for
+    // fewer false matches — appropriate at a checkpoint where misidentifying
+    // a runner is more costly than missing them on one frame.
+    const FACE_MATCH_DISTANCE = 0.40;
+
+    // ── AUTO-ENROLL (form-registered runners) ──────────────────────
+    // Form intake (FormIntake.gs) creates runners with photos but BLANK
+    // Embeddings (Apps Script can't run face-api — Guardrail 16). Without face
+    // data faceMatcher is null and the live loop recognizes NO ONE (the
+    // "camera on but no boxes" symptom). At startup we compute the missing
+    // embeddings IN THE BROWSER from each runner's stored angle photos and
+    // persist them via updateEmbeddings — same approach as the Drive Scanner's
+    // pre-scan auto-enroll. Quality-guarded: a photo contributes only when
+    // EXACTLY one face ≥ ENROLL_MIN_FACE_SIZE is detected (never fabricate a
+    // descriptor — Guardrail 33). One-time cost; later startups fast-return.
+    const ENROLL_PHOTO_FIELDS = ["Photo_Front", "Photo_Top", "Photo_Bottom", "Photo_Left", "Photo_Right"];
+    const ENROLL_MIN_FACE_SIZE = 60;            // px floor for a usable enroll face
+    const ENROLL_MAX_WIDTH = 1920;              // downscale big phone uploads before detection
+
+    // ── BBOX SMOOTHING (EMA) ───────────────────────────────────────
+    // Per-runner exponential moving average. α=0.35 → ~3-frame half-life.
+    // Lower α = smoother but laggier. The smoothed box drives BOTH the
+    // overlay rectangle AND the OCR chest crop — without this, every
+    // detection-frame jitter shakes the crop and Tesseract reads garbage.
+    const BBOX_EMA_ALPHA = 0.35;
+    const BBOX_EMA_RESET_FRAMES = 10;           // drop EMA after N missing frames
+
+    // ── RECORDING / COOLDOWNS ──────────────────────────────────────
+    const RECORD_AFTER_FRAMES = 5;              // consecutive recognitions before logging
+    const COOLDOWN_SEC = 30;                    // per-CP per-runner record cooldown
+    const VIOLATION_COOLDOWN_SEC = 60;          // per-CP per-runner violation cooldown
+
+    // ── OCR PIPELINE ───────────────────────────────────────────────
+    const OCR_AFTER_FRAMES = 10;                // consecutive recognitions before triggering OCR
+    const OCR_CACHE_TTL_MS = 15000;             // stale read purge AND vote-buffer expiry
+
+    // Adaptive threshold: each pixel compared to the mean of an
+    // (ADAPTIVE_THRESHOLD_BLOCK²)-pixel local window minus C. Computed via
+    // integral image so cost is O(1) per pixel regardless of block size.
+    const ADAPTIVE_THRESHOLD_BLOCK = 15;        // odd; 11–19 typical
+    const ADAPTIVE_THRESHOLD_C = 10;
+    const OCR_UPSCALE = 2;                      // nearest-neighbor; preserves binary edges
+    // Pre-threshold smooth upscale for small crops — mirrored from
+    // photo_scanner.html per Guardrail 19 + 27 (2026-05-20). Rarely fires
+    // in live mode (webcam faces are usually large), but kept in lockstep.
+    const OCR_PRE_UPSCALE_TARGET = 360;        // px target long-edge before threshold
+    const OCR_PRE_UPSCALE_MAX = 4;             // cap on the pre-threshold factor
+    // CLAHE local contrast — mirrored from photo_scanner.html (Guardrail
+    // 19 + 27, 2026-05-21). Lifts faded digit strokes before thresholding.
+    const CLAHE_TILES = 8;
+    const CLAHE_CLIP_LIMIT = 3.0;
+
+    // Aligned 2026-05-22 with the Drive Scanner's PROVEN values — checkpoint
+    // OCR was the unrouted/untuned pre-fix pipeline and couldn't read BIBs.
+    // 50 is the browser-Tesseract floor on adaptive-threshold crops; the
+    // conf===0 "perfect read scored 0" quirk is handled in buildBibCandidates
+    // (NOT by this threshold). Majority vote (OCR_VOTE_MIN_CONSENSUS=3) still
+    // gates every violation, so these don't lower the violation bar.
+    const OCR_MIN_CONFIDENCE = 50;
+    const BIB_MIN_LEN = 2;                      // 1-digit "bibs" are Tesseract noise, not real
+    const BIB_MAX_LEN = 6;
+    // Multi-PSM fallback (mirrors photo_scanner.html). No single PSM fits both
+    // layouts: 6 (uniform block) reads normal/large chest BIBs; 7 (single
+    // line) reads small upscaled digit rows that 6 fragments. First PSM to
+    // yield a valid BIB wins, so normal reads stay single-pass.
+    const OCR_PSM_ATTEMPTS = ['6', '7'];
+
+    // Multi-frame majority vote — protects against single-frame OCR misreads.
+    // Buffer caps at OCR_VOTE_BUFFER_SIZE; consensus declared when
+    // ≥OCR_VOTE_MIN_CONSENSUS entries agree. Stale entries (>OCR_CACHE_TTL_MS)
+    // auto-evict, so a drifting OCR self-corrects.
+    const OCR_VOTE_BUFFER_SIZE = 7;             // 5→7 (2026-05-22): wider read window…
+    const OCR_VOTE_MIN_CONSENSUS = 4;           // 3→4: …and more reads must AGREE before a BIB is trusted (accuracy)
+
+    // ── ADVANCED VIOLATION TRIGGERS ────────────────────────────────
+    // Ghost BIB: consecutive failed OCR attempts on a known runner before
+    // flagging. Empty result → NO_BIB; failed validation gate (length/conf)
+    // → OBSCURED_BIB.
+    const NO_BIB_AFTER_FAILURES = 5;
+
+    // Intruder: consecutive frames an unrecognized face must stay visible
+    // before firing UNREGISTERED. Higher than RECORD_AFTER_FRAMES (5) so it
+    // requires deliberate presence, not a passerby behind a recognized runner.
+    const UNREGISTERED_AFTER_FRAMES = 15;
+
+    // Multiple BIBs: minimum digits per block, minimum block count.
+    // 2 digits per block filters Tesseract single-digit fragments;
+    // 2 blocks is the trigger.
+    const MULTIPLE_BIBS_MIN_BLOCK_LEN = 2;
+    const MULTIPLE_BIBS_MIN_BLOCKS = 2;
+
+    // ── STATE ──────────────────────────────────────────────────────
+    // Single live station — no per-CP timing. CP_KEY is just a constant
+    // cooldown-bucket suffix so the per-runner cooldown logic still works.
+    const CP_KEY = "live";
+    let faceMatcher = null;
+    let runnerRegistry = {};                    // name → bib
+    let bibToOwner = {};                        // bib → name (reverse map; stranger-BIB check)
+    let cooldowns = {};                         // "name:live" → sec (per-runner record cooldown)
+    let violationCooldowns = {};                // cooldownKey → sec (per-runner/-type violation cooldown)
+    let violationCounts = {};                   // violationType → count (live per-type counters)
+    let lastBibBorrowSec = 0;                   // last bib-swap fire — soft-suppresses UNREGISTERED for the same intruder
+    let consecutiveFrames = {};                 // name → count
+    let bboxEMA = {};                           // name → { x, y, width, height, missingFrames }
+    let ocrVotes = {};                          // name → [{ bib, ts, conf }, ...]
+    let ocrConsensus = {};                      // name → { bib, ts }
+    let ocrFailureCount = {};                   // name → consecutive validation failures (Ghost BIB)
+    let ocrLastFailureKind = {};                // name → "empty" | "low_quality" — drives NO_BIB vs OBSCURED_BIB
+    let fpsCounter = 0, lastFpsTime = performance.now();
+    let ocrBusy = false;
+    let tesseractWorker = null;
+    let ocrReady = false;
+    let videoStream = null;
+    let loopRunning = false;
+    let rafId = null;
+
+    // ── LIVE VIOLATION COUNTERS ──
+    // Bumped (and reflected in the top-bar chips) only when a violation
+    // actually FIRES through tryFireViolation — so the 60 s cooldown is
+    // respected and the counts match what's persisted to the backend.
+    function bumpViolationCount(type) {
+      if (!type) return;
+      violationCounts[type] = (violationCounts[type] || 0) + 1;
+      const el = document.getElementById("vc-" + type);
+      if (el) el.textContent = violationCounts[type];
+    }
+
+    // ── RUNNERS / FACE-MATCHER / AUTO-ENROLL ───────────────────────
+    async function loadRunners() {
+      const res = await fetch(API + "?action=getRunners");
+      const d = await res.json();
+      return d.data || [];
+    }
+
+    // Reverse BIB→owner map from ALL runners (incl. embedding-less form-only
+    // ones) so the stranger-BIB check works even for runners we can't face-match.
+    function buildBibOwnerMap(runners) {
+      bibToOwner = {};
+      for (const r of (runners || [])) {
+        const ownerBib = String(r.BibNumber || "").trim();
+        if (ownerBib) bibToOwner[ownerBib] = r.Name;
+      }
+    }
+
+    // Build faceMatcher + runnerRegistry from runners that HAVE embeddings.
+    // Mirror of photo_scanner.html. faceMatcher stays null if none qualify.
+    function buildMatcherFromRunners(runners) {
+      const labeled = [];
+      runnerRegistry = {};
+      for (const r of (runners || [])) {
+        if (!r.Embeddings) continue;
+        try {
+          let emb = JSON.parse(r.Embeddings);
+          if (Array.isArray(emb) && emb.length > 0 && Array.isArray(emb[0])) emb = emb[0];
+          if (!Array.isArray(emb) || emb.length !== 128) { console.warn('Bad embedding size for', r.Name, emb.length); continue; }
+          labeled.push(new faceapi.LabeledFaceDescriptors(r.Name, [new Float32Array(emb)]));
+          runnerRegistry[r.Name] = String(r.BibNumber || "");
+        } catch (e) { console.warn("Bad embedding for", r.Name, e); }
+      }
+      faceMatcher = labeled.length > 0 ? new faceapi.FaceMatcher(labeled, FACE_MATCH_DISTANCE) : null;
+      return labeled.length;
+    }
+
+    // Pull a Drive file ID out of a stored Photo_* URL (lh3 /d/<id> + legacy ?id=).
+    function driveIdFromUrl(url) {
+      if (!url) return null;
+      const s = String(url);
+      let m = s.match(/\/d\/([-\w]{25,})/); if (m) return m[1];
+      m = s.match(/[?&]id=([-\w]{25,})/); return m ? m[1] : null;
+    }
+
+    // CORS-safe image bytes via the backend getImageBytes endpoint (the lh3
+    // thumbnail URL 302-redirects with no CORS headers → would taint a canvas).
+    async function fetchImageBytes(photo) {
+      try {
+        const res = await fetch(API + "?action=getImageBytes&fileId=" + encodeURIComponent(photo.id));
+        const payload = await res.json();
+        if (!payload || payload.status !== "success") return { error: (payload && payload.message) || "Fetch failed" };
+        return payload;
+      } catch (e) { return { error: "Fetch error: " + (e.message || e) }; }
+    }
+
+    function loadImage(src) {
+      return new Promise((resolve, reject) => {
+        const img = new Image();
+        img.onload = () => resolve(img);
+        img.onerror = () => reject(new Error("image decode failed"));
+        img.src = src;
       });
-      if (fired) consecutiveFrames["unknown"] = 0;
-     }
     }
-   }
 
-   // Reset stale per-name state. consecutiveFrames goes to 0 immediately
-   // (a one-frame miss should retrigger the warmup). EMA persists for
-   // BBOX_EMA_RESET_FRAMES so a brief detection miss doesn't kill the
-   // smoothing — when it finally expires we also drop the vote buffer
-   // and the Ghost BIB failure counters so a returning runner starts
-   // with a clean slate.
-   for(const n of Object.keys(consecutiveFrames)){
-    if(!currentNames.has(n)) consecutiveFrames[n]=0;
-   }
-   for(const n of Object.keys(bboxEMA)){
-    if(!currentNames.has(n)){
-     bboxEMA[n].missingFrames = (bboxEMA[n].missingFrames||0) + 1;
-     if(bboxEMA[n].missingFrames > BBOX_EMA_RESET_FRAMES){
-      delete bboxEMA[n];
-      delete ocrVotes[n];
-      delete ocrConsensus[n];
-      delete ocrFailureCount[n];
-      delete ocrLastFailureKind[n];
-     }
+    function averageDescriptors(list) {
+      const out = new Float32Array(128);
+      for (const d of list) { for (let i = 0; i < 128; i++) out[i] += d[i]; }
+      for (let i = 0; i < 128; i++) out[i] /= list.length;
+      return out;
     }
-   }
 
-   drawDebugHUD(ctx);
-  }catch(e){console.error("Detection error:",e)}
+    // Detect faces in a stored enroll photo. Big phone uploads are downscaled
+    // to ENROLL_MAX_WIDTH first (descriptor is resolution-independent).
+    async function detectFacesForEnroll(img) {
+      let input = img;
+      if (img.naturalWidth > ENROLL_MAX_WIDTH) {
+        const dw = ENROLL_MAX_WIDTH, dh = Math.round(img.naturalHeight * (ENROLL_MAX_WIDTH / img.naturalWidth));
+        const c = document.createElement("canvas"); c.width = dw; c.height = dh;
+        c.getContext("2d").drawImage(img, 0, 0, dw, dh);
+        input = c;
+      }
+      const opts = new faceapi.SsdMobilenetv1Options({ minConfidence: SSD_MIN_CONFIDENCE });   // same detector as the live loop
+      return faceapi.detectAllFaces(input, opts).withFaceLandmarks().withFaceDescriptors();
+    }
 
-  rafId=requestAnimationFrame(frame);
- }
- rafId=requestAnimationFrame(frame);
-}
+    // Persist a computed descriptor (write-once on the backend unless forced).
+    async function saveEmbeddings(name, descriptor) {
+      try {
+        const resp = await fetch(API, {
+          method: "POST", headers: { "Content-Type": "text/plain" },
+          body: JSON.stringify({ action: "updateEmbeddings", name, embeddings: Array.prototype.slice.call(descriptor) })
+        });
+        const result = await resp.json();
+        return !!(result && result.status === "success");
+      } catch (e) { console.warn("saveEmbeddings failed for", name, e); return false; }
+    }
 
-// ── BIB OCR PIPELINE ──
-// Aligned 2026-05-22 with photo_scanner.html's PROVEN reader (Guardrail
-// 20 + 27). The old checkpoint OCR couldn't read BIBs: it gated on the
-// DOCUMENT confidence, but Tesseract.js (LSTM + digit whitelist)
-// intermittently scores a PERFECT isolated-number read as confidence 0,
-// which the old `conf < OCR_MIN_CONFIDENCE` gate rejected outright; and a
-// single PSM 7 can't find a digit block inside a tall chest crop. The fix
-// mirrors the scanner:
-//   1. getOCRCropBox + preprocessForOCR (CLAHE → adaptive threshold → upscale)
-//   2. multi-PSM recognize (OCR_PSM_ATTEMPTS [6,7]) requesting per-word data
-//   3. WORD-LEVEL candidates: each WORD's own digits/length/conf, not the
-//      doc average (which noise words tank)
-//   4. conf===0 = "unscored" → admitted on the OTHER gates (face match,
-//      whitelist, BIB length); a genuine low read has a LOW NONZERO conf
-//      and is still rejected
-//   5. multi-frame majority vote (castVote) still gates every violation
-// ocrBusy serializes OCR so Tesseract can't queue behind real time.
+    function setEnrollProgress(done, total) {
+      const el = document.getElementById("step-runners");
+      if (el) el.textContent = `🔄 เตรียมข้อมูลใบหน้า (form) ${done}/${total}...`;
+    }
 
-// Flatten Tesseract's result into [{text, conf}] words. Prefers
-// data.words; falls back to the block→para→line→word hierarchy
-// ({blocks:true}); last-resort treats raw-text digit blocks as
-// pseudo-words carrying the doc confidence. Mirror of photo_scanner.html.
-function extractOcrWords(data){
- if (Array.isArray(data.words) && data.words.length){
-  return data.words.map(w => ({ text: w.text, conf: Number(w.confidence || 0) }));
- }
- const out = [];
- for (const b of (data.blocks || [])){
-  for (const p of (b.paragraphs || [])){
-   for (const l of (p.lines || [])){
-    for (const w of (l.words || [])) out.push({ text: w.text, conf: Number(w.confidence || 0) });
-   }
-  }
- }
- if (out.length) return out;
- const docConf = Number(data.confidence || 0);
- const blockRe = new RegExp("\\d{" + MULTIPLE_BIBS_MIN_BLOCK_LEN + ",}", "g");
- return (String(data.text || "").match(blockRe) || []).map(t => ({ text: t, conf: docConf }));
-}
+    // Compute + save embeddings for every runner that has photos but no
+    // embeddings (form intake). Returns the count enrolled. Mirror of the
+    // scanner's backfillMissingEmbeddings.
+    async function enrollMissingEmbeddings(runners) {
+      const pending = (runners || []).filter(r => !r.Embeddings && ENROLL_PHOTO_FIELDS.some(f => driveIdFromUrl(r[f])));
+      if (!pending.length) return 0;
+      let done = 0, enrolled = 0;
+      for (const r of pending) {
+        setEnrollProgress(done, pending.length);
+        const descriptors = [];
+        for (const f of ENROLL_PHOTO_FIELDS) {
+          const fileId = driveIdFromUrl(r[f]);
+          if (!fileId) continue;
+          try {
+            const payload = await fetchImageBytes({ id: fileId });
+            if (!payload || payload.error) continue;
+            const img = await loadImage(`data:${payload.mimeType || 'image/jpeg'};base64,${payload.base64}`).catch(() => null);
+            if (!img) continue;
+            const dets = await detectFacesForEnroll(img);
+            // Quality guard: exactly one usable-size face (0 = none, 2+ = ambiguous).
+            const usable = dets.filter(d => d.detection.box.height >= ENROLL_MIN_FACE_SIZE && d.detection.box.width >= ENROLL_MIN_FACE_SIZE);
+            if (usable.length === 1) descriptors.push(usable[0].descriptor);
+            else if (DEBUG) console.log(`[enroll] ${r.Name} ${f}: ${dets.length} face(s), ${usable.length} usable — skipped`);
+          } catch (e) { if (DEBUG) console.warn("[enroll]", r.Name, f, e); }
+        }
+        done++;
+        if (descriptors.length) {
+          if (await saveEmbeddings(r.Name, averageDescriptors(descriptors))) enrolled++;
+        }
+        setEnrollProgress(done, pending.length);
+      }
+      if (DEBUG) console.log(`[enroll] done — ${enrolled}/${pending.length} enrolled`);
+      return enrolled;
+    }
 
-// Digits-only, BIB-length, per-WORD confidence gate — WITH the conf===0
-// "unscored" escape (the perfect-read-scored-0 quirk). Mirror of
-// photo_scanner.html. Returns { candidates:[bib...], confByBib }.
-function buildBibCandidates(words){
- const confByBib = {};
- const candidates = [];
- for (const w of words){
-  const digits = String(w.text || "").replace(/[^0-9]/g, "");
-  const wconf = Number(w.conf || 0);
-  if (digits.length < BIB_MIN_LEN || digits.length > BIB_MAX_LEN) continue;
-  const scored = wconf > 0;                        // 0 = Tesseract.js broken-confidence sentinel
-  if (scored && wconf < OCR_MIN_CONFIDENCE) continue;
-  if (confByBib[digits] == null){ confByBib[digits] = wconf; candidates.push(digits); }
-  else if (wconf > confByBib[digits]){ confByBib[digits] = wconf; }
- }
- return { candidates, confByBib };
-}
+    // ── INIT ──
+    async function init() {
+      try {
+        // 1) Load models — SSD MobileNet (accuracy) + landmarks + recognition.
+        // Pin the WebGL (GPU) backend FIRST so SSD runs fast enough for live
+        // video; fall back to CPU if WebGL is unavailable. Mirror of the Drive
+        // Scanner's High-Performance setup.
+        markStep("step-models", "loading");
+        try { await faceapi.tf.setBackend('webgl'); await faceapi.tf.ready(); }
+        catch (be) { console.warn("WebGL backend unavailable, using CPU (slower):", be); }
+        await faceapi.nets.ssdMobilenetv1.loadFromUri(MODEL_URL);
+        await faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL);
+        await faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL);
+        markStep("step-models", "done");
 
-// Crop → preprocess → multi-PSM recognize → word-level candidates. Shared
-// by runSmartOCR (known faces) and runUnknownBibCheck (stranger-BIB). The
-// crop geometry (getOCRCropBox) matches the dashed-red overlay drawn in
-// processLoop. Returns { candidates, confByBib, hadDigits } — hadDigits
-// separates a truly empty read (NO_BIB) from unreadable digits (OBSCURED_BIB).
-async function ocrReadBib(video, box){
- const {bx, by, bw, bh} = getOCRCropBox(box, video);
- if(bw<=0 || bh<=0) return { candidates: [], confByBib: {}, hadDigits: false };
- const cropCanvas=document.createElement("canvas");
- cropCanvas.width=bw; cropCanvas.height=bh;
- cropCanvas.getContext("2d").drawImage(video, bx, by, bw, bh, 0, 0, bw, bh);
- const processed=preprocessForOCR(cropCanvas);    // CLAHE → adaptive threshold → upscale
- let candidates=[], confByBib={}, hadDigits=false;
- for(const psm of OCR_PSM_ATTEMPTS){
-  await tesseractWorker.setParameters({ tessedit_pageseg_mode: psm });
-  const result=await tesseractWorker.recognize(processed, {}, { blocks: true });
-  const words=extractOcrWords(result.data);
-  if(!hadDigits && words.some(w => /[0-9]/.test(String(w.text||"")))) hadDigits=true;
-  const built=buildBibCandidates(words);
-  candidates=built.candidates; confByBib=built.confByBib;
-  if(DEBUG){
-   console.log("[debug] OCR", { psm, words: words.map(w=>`${w.text}@${Math.round(w.conf)}`), candidates });
-   dumpOcrCrop(cropCanvas, processed, words, candidates, box, psm);
-  }
-  if(candidates.length) break;                     // valid BIB — don't pay for the next PSM
- }
- return { candidates, confByBib, hadDigits };
-}
+        // 2) Load runners + build the FaceMatcher. Runners registered via the
+        //    Google Form have photos but BLANK Embeddings, so AUTO-ENROLL them in
+        //    the browser FIRST — otherwise faceMatcher stays null and the live
+        //    loop recognizes no one ("camera on but no boxes"). One-time cost.
+        markStep("step-runners", "loading");
+        let runners = await loadRunners();
+        buildBibOwnerMap(runners);                          // reverse BIB→owner (all runners)
+        const enrolled = await enrollMissingEmbeddings(runners);   // form runners → embeddings
+        if (enrolled > 0) runners = await loadRunners();    // refresh: updateEmbeddings invalidated the cache
+        buildMatcherFromRunners(runners);                  // sets faceMatcher + runnerRegistry (null if none usable)
+        document.getElementById("runner-count").textContent = runners.length;
+        markStep("step-runners", "done");
 
-async function runSmartOCR(video, box, name){
- if(ocrBusy || !ocrReady || !tesseractWorker) return;
- ocrBusy=true;
- try{
-  const { candidates, confByBib, hadDigits } = await ocrReadBib(video, box);
+        // 3) Camera — surface NotAllowedError specifically so the operator
+        // gets actionable feedback instead of a generic stack trace.
+        markStep("step-camera", "loading");
+        try {
+          videoStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user", width: { ideal: VIDEO_WIDTH }, height: { ideal: VIDEO_HEIGHT } } });
+        } catch (camErr) {
+          const friendly = (camErr && (camErr.name === "NotAllowedError" || camErr.name === "PermissionDeniedError"))
+            ? "ไม่ได้รับสิทธิ์เข้าถึงกล้อง — โปรดอนุญาตในเบราว์เซอร์"
+            : "เปิดกล้องไม่สำเร็จ: " + (camErr && camErr.message || camErr);
+          setStatus("err", "❌ " + friendly);
+          return;
+        }
+        const video = document.getElementById("video");
+        video.srcObject = videoStream;
+        await new Promise(r => video.addEventListener("loadedmetadata", r, { once: true }));
+        // Ensure the video has actually started producing frames
+        if (video.readyState < 2) { await new Promise(r => video.addEventListener("loadeddata", r, { once: true })); }
+        const overlay = document.getElementById("overlay");
+        overlay.width = video.videoWidth;
+        overlay.height = video.videoHeight;
+        // Stop the camera when the page is hidden/unloaded so the indicator
+        // light goes off and the OS releases the device.
+        window.addEventListener("pagehide", stopCamera);
+        markStep("step-camera", "done");
 
-  // ── MULTIPLE BIBS ── 2+ DISTINCT valid BIB-length words (Tesseract's
-  // own segmentation); single-digit / low-conf noise already filtered.
-  if (candidates.length >= MULTIPLE_BIBS_MIN_BLOCKS){
-   const fired = tryFireViolation(name+":"+CP_KEY, {
-    name, bib: "",                                  // BIB_PATTERN rejects commas; full list in message
-    message: `Multiple BIBs detected on ${name}: ${candidates.join(", ")}`,
-    violationType: "MULTIPLE_BIBS",
-    image: captureFullFrame(video),
-   });
-   if (fired){ ocrFailureCount[name] = 0; return; }
-   // cooldown blocked — fall through and vote the first candidate
-  }
+        // 4) Init Tesseract — Tesseract.js v5 runs the engine in its own
+        // Web Worker so recognize() is non-blocking from the main thread.
+        // Whitelist + PSM 7 (single text line) optimize for short numeric
+        // BIB strings.
+        try {
+          tesseractWorker = await Tesseract.createWorker("eng");
+          await tesseractWorker.setParameters({
+            tessedit_char_whitelist: '0123456789',
+            tessedit_pageseg_mode: OCR_PSM_ATTEMPTS[0]   // runSmartOCR re-sets PSM per attempt; this is the start state
+          });
+          ocrReady = true;
+        } catch (e) { console.warn("Tesseract init failed, OCR disabled:", e); ocrReady = false; }
 
-  // ── No valid candidate → Ghost BIB counter ──
-  // No digits at all → NO_BIB; digits seen but failed length/conf → OBSCURED_BIB.
-  if (candidates.length === 0){
-   const failureKind = hadDigits ? "low_quality" : "empty";
-   ocrFailureCount[name] = (ocrFailureCount[name]||0) + 1;
-   ocrLastFailureKind[name] = failureKind;
-   if (ocrFailureCount[name] >= NO_BIB_AFTER_FAILURES){
-    const expected = runnerRegistry[name] || "";
-    const violationType = failureKind === "empty" ? "NO_BIB" : "OBSCURED_BIB";
-    const fired = tryFireViolation(name+":"+CP_KEY, {
-     name, bib: expected,
-     message: violationType==="NO_BIB"
-      ? `BIB not visible for ${name}`
-      : `BIB unreadable for ${name} (low confidence / wrong length)`,
-     violationType,
-     image: captureFullFrame(video),
-    });
-    if (fired) ocrFailureCount[name] = 0;
-   }
-   return;
-  }
+        setStatus("ok", "🟢 Connected");
+        document.getElementById("init-screen").classList.add("hidden");
 
-  // ── Valid read — clear failure state, then vote ──
-  ocrFailureCount[name] = 0;
-  ocrLastFailureKind[name] = null;
-  const readBib = candidates[0];
-  const consensus = castVote(name, readBib, confByBib[readBib]||0);
-  if(DEBUG) console.log("[debug] vote", { name, readBib, buffer:(ocrVotes[name]||[]).length, consensus });
-  if(!consensus) return;
+        // Start loop
+        processLoop();
+      } catch (e) {
+        setStatus("err", "❌ " + (e && e.message || e));
+      }
+    }
 
-  const expectedBib=runnerRegistry[name];
-  if(expectedBib && consensus !== expectedBib){
-   // Registered face A wearing a BIB that isn't A's → cheating. Shares the
-   // single name cooldown bucket with NO_BIB / OBSCURED_BIB / MULTIPLE_BIBS
-   // (Guardrail 25). On a fresh fire, flag A in Results.IsCheating (🚨).
-   const fired = tryFireViolation(name+":"+CP_KEY, {
-    name, bib: consensus,
-    message: `Expected BIB ${expectedBib}, Found ${consensus}`,
-    violationType: "WRONG_PERSON",
-    image: captureFullFrame(video),
-   });
-   if(fired) markCheating(name);
-  }
- }catch(e){console.warn("OCR error:",e)}
- finally{ocrBusy=false}
-}
+    function stopCamera() {
+      if (videoStream) {
+        videoStream.getTracks().forEach(t => t.stop());
+        videoStream = null;
+      }
+      loopRunning = false;
+      if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null; }
+    }
 
-// OCR debug crop dump (?debug=1 only) — mirror of photo_scanner.html. Per
-// face + PSM pass: the raw chest crop, the thresholded crop Tesseract saw,
-// the per-word reads (`text@conf`), the picked BIB, and the PSM. This is
-// the diagnostic that cracked the scanner's OCR — use it to tell a
-// geometry miss (BIB not in the raw crop) from a preprocessing failure
-// (blobs in the thresholded crop) from a recognition failure (clean crop,
-// bad read). No-op unless DEBUG. Tesseract output is untrusted → built via
-// textContent, never innerHTML (Guardrail 7).
-function dumpOcrCrop(rawCanvas, processedCanvas, words, candidates, box, psm){
- let panel = document.getElementById("ocr-debug-panel");
- if (!panel){
-  panel = document.createElement("div");
-  panel.id = "ocr-debug-panel";
-  panel.style.cssText = "position:fixed;right:8px;bottom:8px;width:360px;max-height:60vh;overflow:auto;z-index:99999;background:rgba(0,0,0,.88);border:1px solid #555;border-radius:8px;padding:8px;font:11px ui-monospace,monospace;color:#ddd";
-  panel.innerHTML = '<div style="font-weight:700;margin-bottom:6px">🔍 OCR DEBUG — raw | thresholded | per-word</div>';
-  document.body.appendChild(panel);
- }
- const row = document.createElement("div");
- row.style.cssText = "display:flex;gap:6px;align-items:flex-start;border-top:1px solid #333;padding:5px 0";
- const raw = document.createElement("img");
- raw.src = rawCanvas.toDataURL(); raw.style.cssText = "height:54px;border:1px solid #555;background:#222";
- const proc = document.createElement("img");
- proc.src = processedCanvas.toDataURL(); proc.style.cssText = "height:54px;border:1px solid #555;background:#fff";
- const txt = document.createElement("div");
- txt.style.cssText = "flex:1;min-width:0;word-break:break-all";
- const faceWH = box ? `${Math.round(box.width)}×${Math.round(box.height)}` : "?";
- const pickedLine = document.createElement("div");
- const pickedVal = document.createElement("b");
- pickedVal.style.color = (candidates && candidates.length) ? "#7CFC9A" : "#ff7a7a";
- pickedVal.textContent = (candidates && candidates.length) ? candidates.join(", ") : "—";
- pickedLine.append("BIB: ", pickedVal);
- const wordsLine = document.createElement("div");
- wordsLine.style.color = "#9fb3c8";
- wordsLine.textContent = "words: " + ((words && words.length)
-   ? words.map(w=>`${String(w.text).replace(/\s+/g,"")}@${Math.round(w.conf)}`).join(" ") : "(none)");
- const metaLine = document.createElement("div");
- metaLine.style.color = "#888";
- metaLine.textContent = `psm: ${psm} · face: ${faceWH}px`;
- txt.append(pickedLine, wordsLine, metaLine);
- row.appendChild(raw); row.appendChild(proc); row.appendChild(txt);
- panel.insertBefore(row, panel.children[1] || null);
- while (panel.children.length > 25) panel.removeChild(panel.lastChild);
-}
+    function markStep(id, state) {
+      const el = document.getElementById(id);
+      el.className = state;
+      if (state === "done") el.textContent = "✅ " + el.textContent.slice(2);
+      else if (state === "loading") el.textContent = "🔄 " + el.textContent.slice(2);
+    }
+    function setStatus(type, text) {
+      const el = document.getElementById("conn-status");
+      el.className = "status " + type;
+      el.innerHTML = `<div class="dot ${esc(type)}"></div><span>${esc(text)}</span>`;
+    }
 
-// ── CHECKPOINT RECORDING ──
-async function recordCP(name){
- const ts=new Date();
- const timeStr=ts.toTimeString().split(" ")[0];// HH:MM:SS
- const bib=runnerRegistry[name]||"";
+    // ── BBOX EMA SMOOTHING ──────────────────────────────────────
+    // Per-runner exponential moving average on the detection box. Returns
+    // the same persistent object so callers can read the latest smoothed
+    // values without re-allocating. Without smoothing, every detection-
+    // frame jitter shakes the chest crop and Tesseract confidence collapses.
+    function smoothBox(name, raw) {
+      const a = BBOX_EMA_ALPHA;
+      const prev = bboxEMA[name];
+      if (!prev) {
+        bboxEMA[name] = { x: raw.x, y: raw.y, width: raw.width, height: raw.height, missingFrames: 0 };
+        return bboxEMA[name];
+      }
+      prev.x = a * raw.x + (1 - a) * prev.x;
+      prev.y = a * raw.y + (1 - a) * prev.y;
+      prev.width = a * raw.width + (1 - a) * prev.width;
+      prev.height = a * raw.height + (1 - a) * prev.height;
+      prev.missingFrames = 0;
+      return prev;
+    }
 
- addSidebarItem(name,`Verified (BIB ${bib||"—"}) @ ${timeStr}`,false);
+    // CLAHE local contrast — mirror of photo_scanner.html (Guardrail
+    // 19 + 27, 2026-05-21). Tile-based contrast-limited histogram
+    // equalization, bilinearly blended between tiles. Lifts faded digit
+    // strokes before thresholding; output is grayscale (re-binarized by
+    // the threshold, so no gray reaches Tesseract).
+    function enhanceContrastCLAHE(gray, w, h) {
+      const T = CLAHE_TILES;
+      const tw = Math.max(1, Math.floor(w / T));
+      const th = Math.max(1, Math.floor(h / T));
+      const nx = Math.ceil(w / tw), ny = Math.ceil(h / th);
+      const maps = new Array(nx * ny);
+      for (let ty = 0; ty < ny; ty++) {
+        for (let tx = 0; tx < nx; tx++) {
+          const x0 = tx * tw, y0 = ty * th;
+          const x1 = Math.min(w, x0 + tw), y1 = Math.min(h, y0 + th);
+          const hist = new Uint32Array(256);
+          let count = 0;
+          for (let y = y0; y < y1; y++) {
+            const row = y * w;
+            for (let x = x0; x < x1; x++) { hist[gray[row + x]]++; count++; }
+          }
+          if (count === 0) { maps[ty * nx + tx] = null; continue; }
+          const clip = Math.max(1, Math.floor(CLAHE_CLIP_LIMIT * count / 256));
+          let excess = 0;
+          for (let i = 0; i < 256; i++) { if (hist[i] > clip) { excess += hist[i] - clip; hist[i] = clip; } }
+          const inc = Math.floor(excess / 256);
+          let rem = excess - inc * 256;
+          for (let i = 0; i < 256; i++) { hist[i] += inc; if (rem > 0) { hist[i]++; rem--; } }
+          const lut = new Uint8ClampedArray(256);
+          let cdf = 0;
+          for (let i = 0; i < 256; i++) { cdf += hist[i]; lut[i] = Math.round((cdf / count) * 255); }
+          maps[ty * nx + tx] = lut;
+        }
+      }
+      const out = new Uint8ClampedArray(w * h);
+      for (let y = 0; y < h; y++) {
+        const fy = (y + 0.5) / th - 0.5;
+        let ty0 = Math.floor(fy); let wy = fy - ty0; let ty1 = ty0 + 1;
+        if (ty0 < 0) { ty0 = 0; ty1 = 0; wy = 0; }
+        if (ty1 > ny - 1) { ty1 = ny - 1; if (ty0 > ny - 1) ty0 = ny - 1; }
+        for (let x = 0; x < w; x++) {
+          const v = gray[y * w + x];
+          const fx = (x + 0.5) / tw - 0.5;
+          let tx0 = Math.floor(fx); let wx = fx - tx0; let tx1 = tx0 + 1;
+          if (tx0 < 0) { tx0 = 0; tx1 = 0; wx = 0; }
+          if (tx1 > nx - 1) { tx1 = nx - 1; if (tx0 > nx - 1) tx0 = nx - 1; }
+          const m00 = maps[ty0 * nx + tx0], m01 = maps[ty0 * nx + tx1];
+          const m10 = maps[ty1 * nx + tx0], m11 = maps[ty1 * nx + tx1];
+          const base = m00 || m01 || m10 || m11;
+          if (!base) { out[y * w + x] = v; continue; }
+          const a = (m00 || base)[v], b = (m01 || base)[v];
+          const c = (m10 || base)[v], d = (m11 || base)[v];
+          const top = a * (1 - wx) + b * wx;
+          const bot = c * (1 - wx) + d * wx;
+          out[y * w + x] = (top * (1 - wy) + bot * wy) | 0;
+        }
+      }
+      return out;
+    }
 
- try{
-  // Identity verification — the "photo_verified" sentinel routes to
-  // _recordPhotoVerification (writes Name + BibNumber + UpdatedAt; the
-  // CP_Time columns no longer exist). Same contract as the Drive
-  // Scanner's sendIdentification (Guardrail 29). A real CP id would
-  // throw schema_error on the post-pivot Results sheet.
-  const resp=await fetch(API,{method:"POST",headers:{"Content-Type":"text/plain"},body:JSON.stringify({
-   action:"recordCheckpoint",name,checkpoint_id:"photo_verified",timestamp:timeStr,bib
-  }),redirect:"follow"});
-  const result=await resp.json();
-  if(!result||result.status!=="success"){
-   addSidebarItem(name,`❌ บันทึกไม่สำเร็จ: ${(result&&result.message)||"Unknown"}`,true);
-  }
- }catch(e){
-  console.warn("Failed to send identification:",e);
-  addSidebarItem(name,"❌ บันทึกไม่สำเร็จ: เชื่อมต่อเซิร์ฟเวอร์ไม่ได้",true);
- }
-}
+    // ── OCR PREPROCESSING ───────────────────────────────────────
+    // Pipeline: grayscale (BT.601 luma) → CLAHE local contrast →
+    // integral-image-based adaptive threshold (mean − C) → NN 2× upscale.
+    //
+    // Runs on the main thread because the crop is small (~200×150 px) and
+    // the integral-image formulation is <1 ms total. A Web Worker would add
+    // postMessage / structured-clone overhead larger than the work itself.
+    //
+    // Nearest-neighbor (not bilinear) is intentional: the threshold output
+    // is binary, and bilinear would introduce gray pixels that Tesseract
+    // occasionally mistreats as noise.
+    function preprocessForOCR(srcCanvas) {
+      // Small-crop pre-threshold bilinear upscale (mirror of
+      // photo_scanner.html, Guardrail 19 + 27). Separates merged digit
+      // strokes on tiny crops before the threshold; threshold below still
+      // outputs pure B/W so no gray reaches Tesseract.
+      let workCanvas = srcCanvas;
+      const srcMax = Math.max(srcCanvas.width, srcCanvas.height);
+      if (srcMax > 0 && srcMax < OCR_PRE_UPSCALE_TARGET) {
+        const f = Math.min(OCR_PRE_UPSCALE_MAX, Math.max(2, Math.round(OCR_PRE_UPSCALE_TARGET / srcMax)));
+        const up = document.createElement("canvas");
+        up.width = srcCanvas.width * f; up.height = srcCanvas.height * f;
+        const uctx = up.getContext("2d");
+        uctx.imageSmoothingEnabled = true; uctx.imageSmoothingQuality = "high";
+        uctx.drawImage(srcCanvas, 0, 0, up.width, up.height);
+        workCanvas = up;
+      }
+      const w = workCanvas.width, h = workCanvas.height;
+      const ctx = workCanvas.getContext("2d");
+      const imgData = ctx.getImageData(0, 0, w, h);
+      const src = imgData.data;
 
-// ── VIOLATION REPORTING ──
-// Options-style payload. All five trigger sites (WRONG_PERSON, NO_BIB,
-// OBSCURED_BIB, UNREGISTERED, MULTIPLE_BIBS) build their own message +
-// image and call this with a uniform shape. The cooldown gate lives
-// in tryFireViolation so the 60 s budget is enforced before we hit
-// the network or sidebar.
-async function reportViolation({ name, bib, message, violationType, image }){
- addSidebarItem(name, `⚠️ ${message}`, "violation");
- try{
-  await fetch(API,{method:"POST",headers:{"Content-Type":"text/plain"},body:JSON.stringify({
-   action:"reportViolation",
-   name, bib, message, violationType,
-   timestamp:new Date().toISOString(),
-   image,
-  })});
- }catch(e){
-  console.warn("Failed to send violation:",e);
-  addSidebarItem(name,"❌ ส่ง violation ไม่ได้",true);
- }
-}
+      // Grayscale
+      let gray = new Uint8ClampedArray(w * h);
+      for (let i = 0, j = 0; i < src.length; i += 4, j++) {
+        gray[j] = (src[i] * 0.299 + src[i + 1] * 0.587 + src[i + 2] * 0.114) | 0;
+      }
 
-// Flag a runner as cheating in Results.IsCheating → lights up the
-// leaderboard 🚨 badge. Fire-and-forget (idempotent on the backend);
-// mirrors photo_scanner.html's markCheating block. Used by BOTH
-// WRONG_PERSON paths: a registered face wearing the wrong BIB, and a
-// stranger wearing this runner's BIB (attributed to the BIB owner).
-function markCheating(name){
- try{
-  fetch(API,{method:"POST",headers:{"Content-Type":"text/plain"},body:JSON.stringify({
-   action:"markCheating", name, isCheating:true
-  })});
- }catch(e){console.warn("markCheating failed for",name,e);}
-}
+      // CLAHE local contrast BEFORE thresholding — lifts faded digits.
+      gray = enhanceContrastCLAHE(gray, w, h);
 
-// ── STRANGER-BIB CHECK (bib-swap detection) ──
-// We never face-match an unknown, so there's no per-face identity to vote
-// under — votes accumulate in one "__unknown__" bucket (one intruder at a
-// checkpoint at a time, so a real bib-swapper still reaches consensus;
-// two different intruders split the vote and safely don't fire). Only
-// fires when the consensus digits EXACTLY equal a REGISTERED BIB
-// (bibToOwner) — random OCR noise that isn't a real BIB is ignored — and
-// is attributed to that BIB's registered owner, who is then flagged
-// cheating (their identity was worn by someone else). See AI_CONTEXT §4.2.
-async function runUnknownBibCheck(video, box){
- if(ocrBusy || !ocrReady || !tesseractWorker) return;
- ocrBusy=true;
- try{
-  const { candidates, confByBib } = await ocrReadBib(video, box);   // same word-level reader as known faces
-  if(!candidates.length) return;
-  const read=candidates[0];
-  const consensus=castVote("__unknown__", read, confByBib[read]||0);   // reuse the multi-frame voter
-  if(!consensus) return;
-  const owner=bibToOwner[consensus];
-  if(!owner) return;                                 // not a registered BIB → leave it to UNREGISTERED
-  const fired=tryFireViolation("bibborrow:"+consensus, {
-   name: owner,
-   bib: consensus,
-   message: `BIB ${consensus} (registered to ${owner}) worn by an unmatched/unregistered face`,
-   violationType: "WRONG_PERSON",
-   image: captureFullFrame(video),
-  });
-  if(fired){
-   markCheating(owner);
-   lastBibBorrowSec = Date.now()/1000;               // soft-suppress UNREGISTERED for this intruder
-   consecutiveFrames["unknown"] = 0;
-  }
- }catch(e){console.warn("Unknown BIB check error:",e)}
- finally{ocrBusy=false}
-}
+      // Integral image — Uint32Array; padded by one row/col so the local-
+      // window query doesn't need boundary checks.
+      const stride = w + 1;
+      const integral = new Uint32Array(stride * (h + 1));
+      for (let y = 1; y <= h; y++) {
+        let rowSum = 0;
+        for (let x = 1; x <= w; x++) {
+          rowSum += gray[(y - 1) * w + (x - 1)];
+          integral[y * stride + x] = integral[(y - 1) * stride + x] + rowSum;
+        }
+      }
 
-// Snapshot helpers — every fire allocates one canvas; bounded to ≤1
-// per minute per cooldown bucket by VIOLATION_COOLDOWN_SEC.
-function captureFullFrame(video){
- const canvas=document.createElement("canvas");
- canvas.width=video.videoWidth; canvas.height=video.videoHeight;
- canvas.getContext("2d").drawImage(video,0,0);
- return canvas.toDataURL("image/jpeg",0.7);
-}
+      // Adaptive threshold (mean − C) using the integral image. O(1) per pixel.
+      const block = ADAPTIVE_THRESHOLD_BLOCK;
+      const half = block >> 1;
+      const C = ADAPTIVE_THRESHOLD_C;
+      const out = new Uint8ClampedArray(w * h);
+      for (let y = 0; y < h; y++) {
+        const y0 = Math.max(0, y - half), y1 = Math.min(h, y + half + 1);
+        for (let x = 0; x < w; x++) {
+          const x0 = Math.max(0, x - half), x1 = Math.min(w, x + half + 1);
+          const area = (y1 - y0) * (x1 - x0);
+          const sum = integral[y1 * stride + x1]
+            - integral[y0 * stride + x1]
+            - integral[y1 * stride + x0]
+            + integral[y0 * stride + x0];
+          out[y * w + x] = (gray[y * w + x] < (sum / area) - C) ? 0 : 255;
+        }
+      }
 
-// Pads 50% beyond the face on each side so the operator sees who it is,
-// not just a tightly-framed head. Clamped to video bounds.
-function captureFaceCrop(video, box){
- const pad = box.height * 0.5;
- const cx = Math.max(0, box.x - pad);
- const cy = Math.max(0, box.y - pad);
- const cw = Math.min(box.width  + pad*2, video.videoWidth  - cx);
- const ch = Math.min(box.height + pad*2, video.videoHeight - cy);
- const canvas=document.createElement("canvas");
- canvas.width=cw; canvas.height=ch;
- canvas.getContext("2d").drawImage(video, cx, cy, cw, ch, 0, 0, cw, ch);
- return canvas.toDataURL("image/jpeg",0.7);
-}
+      // Nearest-neighbor 2× upscale.
+      const s = OCR_UPSCALE;
+      const w2 = w * s, h2 = h * s;
+      const dst = document.createElement("canvas");
+      dst.width = w2; dst.height = h2;
+      const dstCtx = dst.getContext("2d");
+      const dstImg = dstCtx.createImageData(w2, h2);
+      const dPix = dstImg.data;
+      for (let y = 0; y < h2; y++) {
+        const sy = (y / s) | 0;
+        for (let x = 0; x < w2; x++) {
+          const sx = (x / s) | 0;
+          const v = out[sy * w + sx];
+          const di = (y * w2 + x) * 4;
+          dPix[di] = v; dPix[di + 1] = v; dPix[di + 2] = v; dPix[di + 3] = 255;
+        }
+      }
+      dstCtx.putImageData(dstImg, 0, 0);
+      return dst;
+    }
 
-// Single cooldown gate for ALL violation types. Returns true if the
-// violation fired, false if blocked by cooldown. Sharing the bucket
-// across types prevents stacking different violation types on the same
-// name+CP from bypassing the 60 s spam-prevention budget (Guardrail 25).
-function tryFireViolation(cooldownKey, payload){
- const nowSec = Date.now()/1000;
- if (violationCooldowns[cooldownKey]
-     && (nowSec - violationCooldowns[cooldownKey]) <= VIOLATION_COOLDOWN_SEC){
-  return false;
- }
- violationCooldowns[cooldownKey] = nowSec;
- bumpViolationCount(payload.violationType);
- reportViolation(payload);
- return true;
-}
+    // ── OCR MAJORITY VOTE ───────────────────────────────────────
+    // Per-runner rolling buffer of recent valid OCR reads. Returns the
+    // majority BIB iff ≥OCR_VOTE_MIN_CONSENSUS entries agree, otherwise
+    // null. Stale entries (>OCR_CACHE_TTL_MS) are evicted on every call
+    // so a drifting OCR self-corrects within the TTL window.
+    function castVote(name, bib, conf) {
+      const buf = ocrVotes[name] || (ocrVotes[name] = []);
+      buf.push({ bib: bib, ts: Date.now(), conf: conf });
+      const cutoff = Date.now() - OCR_CACHE_TTL_MS;
+      while (buf.length && buf[0].ts < cutoff) buf.shift();
+      while (buf.length > OCR_VOTE_BUFFER_SIZE) buf.shift();
 
-// ── SIDEBAR ──
-// HTML escape — the `info` field can carry OCR-extracted text and
-// `name` carries the runner label, both of which must not be inserted
-// raw into innerHTML.
-function esc(s){
- return String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-}
-function addSidebarItem(name,info,isViol){
- const list=document.getElementById("sb-list");
- const item=document.createElement("div");
- item.className="sb-item"+(isViol?" violation":"");
- item.innerHTML=`<div class="sb-name${isViol?" viol":""}">${isViol?"🔴":"✅"} ${esc(name)}</div><div class="sb-info">${esc(info)}</div>`;
- list.prepend(item);
- // Keep max 20
- while(list.children.length>20)list.lastChild.remove();
-}
+      const counts = {};
+      for (let i = 0; i < buf.length; i++) {
+        const b = buf[i].bib;
+        counts[b] = (counts[b] || 0) + 1;
+      }
+      let majBib = null, majCount = 0;
+      for (const b in counts) {
+        if (counts[b] > majCount) { majBib = b; majCount = counts[b]; }
+      }
+      if (majCount >= OCR_VOTE_MIN_CONSENSUS) {
+        ocrConsensus[name] = { bib: majBib, ts: Date.now() };
+        return majBib;
+      }
+      return null;
+    }
 
-// START
-init();
-</script>
+    // Returns the cached consensus BIB iff still fresh; drops it on expiry
+    // so a returning runner doesn't see a stale read from a previous lap.
+    function consensusBib(name) {
+      const c = ocrConsensus[name];
+      if (!c) return null;
+      if (Date.now() - c.ts > OCR_CACHE_TTL_MS) { delete ocrConsensus[name]; return null; }
+      return c.bib;
+    }
+
+    // ── OCR CROP GEOMETRY ───────────────────────────────────────
+    // Single source of truth for the chest-region crop. Used by BOTH
+    // processLoop (for the dashed red OCR-debug overlay) AND runSmartOCR
+    // (for the actual Tesseract input). Identical geometry is critical —
+    // otherwise the operator's visible OCR rectangle would not match where
+    // Tesseract is actually looking.
+    //
+    // Factors are tuned for hand-held BIBs near chin/neck height (field
+    // observation: BIBs were missed when held above the chest region).
+    //   bx = box.x − 0.5·faceH         ← wider than the face
+    //   by = box.y + 0.6·faceH         ← starts in the chin region
+    //   bw = box.width + 1.0·faceH     ← roughly 2× face width
+    //   bh = 3.0·faceH                 ← extends well below the chest
+    function getOCRCropBox(box, video) {
+      // Tightened vertically 2026-05-20 (was 0.5 / 3.0): top edge pushed
+      // to 1.1·faceH and height trimmed to 2.2·faceH so the crop starts
+      // squarely on the upper chest, chopping off the neck/chin/shirt-
+      // wrinkle noise above the BIB. Mirrored from `photo_scanner.html`
+      // per Guardrail 24 + 27 — both files move in lockstep. (This file
+      // is unrouted live mode and untested since the change; the scanner
+      // is where the tightening was validated. checkpoint.html keeps
+      // PSM 7 for its multi-frame loop — see Guardrail 20.)
+      const faceH = box.height;
+      const bx = Math.max(0, box.x - faceH * 0.7);
+      const by = Math.max(0, box.y + faceH * 1.1);
+      const bw = Math.min(box.width + faceH * 1.4, video.videoWidth - bx);
+      const bh = Math.min(faceH * 2.2, video.videoHeight - by);
+      return { bx: bx, by: by, bw: bw, bh: bh };
+    }
+
+    // ── DEBUG HUD ──────────────────────────────────────────────────
+    // Top-left overlay strip showing pipeline state. No-op when DEBUG is
+    // false (early return). Drawn on the same overlay canvas as the
+    // detection rectangles, so it never touches the DOM (no XSS path).
+    function drawDebugHUD(ctx) {
+      if (!DEBUG) return;
+      const nowSec = Date.now() / 1000;
+      const activeCooldowns = Object.values(violationCooldowns)
+        .filter(t => (nowSec - t) <= VIOLATION_COOLDOWN_SEC).length;
+      const totalVotes = Object.values(ocrVotes)
+        .reduce((s, a) => s + (a ? a.length : 0), 0);
+      const lines = [
+        `tracked: ${Object.keys(bboxEMA).length}`,
+        `votes: ${totalVotes}`,
+        `cooldowns: ${activeCooldowns}`,
+        `ocrBusy: ${ocrBusy}`,
+      ];
+      ctx.save();
+      ctx.fillStyle = "rgba(0,0,0,.65)";
+      ctx.fillRect(8, 8, 180, 18 * lines.length + 8);
+      ctx.fillStyle = "#fff";
+      ctx.font = "11px 'JetBrains Mono',monospace";
+      for (let i = 0; i < lines.length; i++) ctx.fillText(lines[i], 14, 24 + i * 18);
+      ctx.restore();
+    }
+
+    // ── MAIN LOOP ──
+    // Downscaled detection input (see DETECT_MAX_WIDTH). Returns the canvas to
+    // run SSD on + the scale factor to map boxes back to full-res. Reuses one
+    // canvas to avoid per-frame allocation.
+    let _detCanvas = null, _detCtx = null;
+    function scaleForDetect(video) {
+      const vw = video.videoWidth, vh = video.videoHeight;
+      if (!vw || vw <= DETECT_MAX_WIDTH) return { canvas: video, scale: 1 };
+      const w = DETECT_MAX_WIDTH, h = Math.round(vh * (w / vw));
+      if (!_detCanvas) { _detCanvas = document.createElement("canvas"); _detCtx = _detCanvas.getContext("2d"); }
+      if (_detCanvas.width !== w || _detCanvas.height !== h) { _detCanvas.width = w; _detCanvas.height = h; }
+      _detCtx.drawImage(video, 0, 0, w, h);
+      return { canvas: _detCanvas, scale: vw / w };
+    }
+    // Map a detection box from downscaled-detector space back to full-res.
+    function scaleBox(b, s) { return { x: b.x * s, y: b.y * s, width: b.width * s, height: b.height * s }; }
+
+    async function processLoop() {
+      if (loopRunning) return; // guard against double-start
+      loopRunning = true;
+      const video = document.getElementById("video");
+      const overlay = document.getElementById("overlay");
+      const ctx = overlay.getContext("2d");
+      // Build detector options once — reusing the instance avoids per-frame
+      // allocation. inputSize=320 balances accuracy and speed; tighten to 224
+      // for more FPS on weak hardware, loosen to 416 if small/distant faces
+      // are missed.
+      const detectorOptions = new faceapi.SsdMobilenetv1Options({ minConfidence: SSD_MIN_CONFIDENCE });
+
+      async function frame() {
+        if (!loopRunning) return;
+        // FPS
+        fpsCounter++;
+        const now = performance.now();
+        if (now - lastFpsTime >= 1000) {
+          document.getElementById("fps-display").textContent = `FPS: ${fpsCounter}`;
+          fpsCounter = 0; lastFpsTime = now;
+        }
+
+        ctx.clearRect(0, 0, overlay.width, overlay.height);
+
+        // NOTE: faceMatcher may legitimately be null (e.g. ALL runners came via
+        // the form and auto-enroll found no usable photo). Don't bail — still
+        // detect + draw faces (everyone as Unknown) so the operator sees the
+        // camera works, and the stranger-BIB check can still fire on a real BIB.
+
+        try {
+          // Detect on the downscaled copy for FPS; keep the scale to map boxes
+          // back to full-res below (OCR + drawing stay full-resolution).
+          const detIn = scaleForDetect(video);
+          const detections = await faceapi.detectAllFaces(detIn.canvas, detectorOptions)
+            .withFaceLandmarks()
+            .withFaceDescriptors();
+
+          const currentNames = new Set();
+          // Per-frame holder for the largest unknown face. Largest by area is the
+          // closest face — most likely the actual intruder rather than a
+          // bystander in the background of a registered runner's frame.
+          let largestUnknownBox = null, largestUnknownArea = 0;
+
+          for (const det of detections) {
+            const match = faceMatcher ? faceMatcher.findBestMatch(det.descriptor) : null;
+            const name = match ? match.label : "unknown";
+            const dist = match ? match.distance : 1;
+            const rawBox = detIn.scale === 1 ? det.detection.box : scaleBox(det.detection.box, detIn.scale);
+            const isKnown = name !== "unknown" && dist <= FACE_MATCH_DISTANCE;
+
+            // EMA-smoothed box only for known runners. Unknowns share the same
+            // identity bucket, so smoothing across multiple unknowns would smear
+            // the EMA — fall back to raw for those (they're not OCR'd anyway).
+            const box = isKnown ? smoothBox(name, rawBox) : rawBox;
+            currentNames.add(isKnown ? name : "unknown");
+
+            if (isKnown) {
+              consecutiveFrames[name] = (consecutiveFrames[name] || 0) + 1;
+
+              // Record once we've seen this person for N consecutive frames —
+              // protects against single-frame false positives. Note: this trigger
+              // is independent of OCR consensus; the FACE recognition is what
+              // identifies the runner. OCR only gates VIOLATION reporting.
+              if (consecutiveFrames[name] >= RECORD_AFTER_FRAMES) {
+                const cdKey = name + ":" + CP_KEY; // per-runner record cooldown
+                const nowSec = Date.now() / 1000;
+                if (!cooldowns[cdKey] || (nowSec - cooldowns[cdKey]) > COOLDOWN_SEC) {
+                  cooldowns[cdKey] = nowSec;
+                  recordCP(name);
+                }
+              }
+
+              if (consecutiveFrames[name] >= OCR_AFTER_FRAMES && !ocrBusy) {
+                // Pass the SMOOTHED box — the chest crop must not jitter or
+                // Tesseract's confidence collapses.
+                runSmartOCR(video, box, name);
+              }
+            } else {
+              // Track the largest unknown face for the post-loop UNREGISTERED
+              // trigger. We never OCR unknowns (they have no registered BIB
+              // anyway), so the only signal is "stayed visible long enough."
+              const area = rawBox.width * rawBox.height;
+              if (area > largestUnknownArea) {
+                largestUnknownArea = area;
+                largestUnknownBox = rawBox;
+              }
+            }
+
+            // Display uses the consensus BIB if available, else the registered
+            // BIB, else N/A. consensusBib() handles its own staleness.
+            const ocrBib = isKnown ? consensusBib(name) : null;
+            const expectedBib = isKnown ? runnerRegistry[name] : null;
+            const isMismatch = isKnown && ocrBib && expectedBib && ocrBib !== expectedBib;
+            const color = isKnown ? "#38c172" : "#e53e3e";
+            const drawColor = isMismatch ? "#e53e3e" : color;
+            const bib = ocrBib || expectedBib || "N/A";
+            const pct = isKnown ? ((1 - dist) * 100).toFixed(0) : "0";
+            const label = isKnown ? `${name} (${pct}%)` : "Unknown";
+            const bibLabel = isKnown ? `BIB: ${bib}` : "";
+
+            ctx.strokeStyle = drawColor; ctx.lineWidth = 2;
+            ctx.strokeRect(box.x, box.y, box.width, box.height);
+
+            ctx.fillStyle = drawColor;
+            ctx.fillRect(box.x, box.y - 24, box.width, 24);
+            ctx.fillStyle = "#fff"; ctx.font = "bold 13px 'DM Sans',sans-serif";
+            ctx.fillText(label, box.x + 4, box.y - 8);
+
+            if (bibLabel) {
+              const bibText = isMismatch ? bibLabel + " ⚠️ MISMATCH" : bibLabel;
+              ctx.fillStyle = isMismatch ? "rgba(229,62,62,.8)" : "rgba(29,158,117,.7)";
+              ctx.fillRect(box.x, box.y + box.height, box.width, 20);
+              ctx.fillStyle = "#fff"; ctx.font = "11px 'JetBrains Mono',monospace";
+              ctx.fillText(bibText, box.x + 4, box.y + box.height + 14);
+            }
+
+            // OCR debug overlay — dashed red rect labeled "OCR" showing the
+            // exact region runSmartOCR will crop. Lets the field operator see
+            // whether the BIB they're holding falls inside the AI's chest
+            // region. Drawn for known runners only — we never OCR Unknowns.
+            if (isKnown) {
+              const oc = getOCRCropBox(box, video);
+              ctx.save();
+              ctx.strokeStyle = "#ff3b30";
+              ctx.lineWidth = 2;
+              ctx.setLineDash([6, 4]);
+              ctx.strokeRect(oc.bx, oc.by, oc.bw, oc.bh);
+              ctx.setLineDash([]);
+              ctx.fillStyle = "rgba(255,59,48,.85)";
+              ctx.fillRect(oc.bx, oc.by, 32, 16);
+              ctx.fillStyle = "#fff";
+              ctx.font = "bold 11px 'JetBrains Mono',monospace";
+              ctx.fillText("OCR", oc.bx + 4, oc.by + 12);
+              ctx.restore();
+            }
+          }
+
+          // ── POST-LOOP: UNREGISTERED (Intruder) trigger ──
+          // UNREGISTERED and Stranger-BIB violations disabled per user request: 
+          // "เมื่อเจอใบหน้าของผู้สมัครเเล้วเช็คbibเเล้วไม่ตรงให้เเจ้งเตือน" (สนใจเฉพาะคนที่ลงทะเบียน)
+
+          // Reset stale per-name state. consecutiveFrames goes to 0 immediately
+          // (a one-frame miss should retrigger the warmup). EMA persists for
+          // BBOX_EMA_RESET_FRAMES so a brief detection miss doesn't kill the
+          // smoothing — when it finally expires we also drop the vote buffer
+          // and the Ghost BIB failure counters so a returning runner starts
+          // with a clean slate.
+          for (const n of Object.keys(consecutiveFrames)) {
+            if (!currentNames.has(n)) consecutiveFrames[n] = 0;
+          }
+          for (const n of Object.keys(bboxEMA)) {
+            if (!currentNames.has(n)) {
+              bboxEMA[n].missingFrames = (bboxEMA[n].missingFrames || 0) + 1;
+              if (bboxEMA[n].missingFrames > BBOX_EMA_RESET_FRAMES) {
+                delete bboxEMA[n];
+                delete ocrVotes[n];
+                delete ocrConsensus[n];
+                delete ocrFailureCount[n];
+                delete ocrLastFailureKind[n];
+              }
+            }
+          }
+
+          drawDebugHUD(ctx);
+        } catch (e) { console.error("Detection error:", e) }
+
+        rafId = requestAnimationFrame(frame);
+      }
+      rafId = requestAnimationFrame(frame);
+    }
+
+    // ── BIB OCR PIPELINE ──
+    // Aligned 2026-05-22 with photo_scanner.html's PROVEN reader (Guardrail
+    // 20 + 27). The old checkpoint OCR couldn't read BIBs: it gated on the
+    // DOCUMENT confidence, but Tesseract.js (LSTM + digit whitelist)
+    // intermittently scores a PERFECT isolated-number read as confidence 0,
+    // which the old `conf < OCR_MIN_CONFIDENCE` gate rejected outright; and a
+    // single PSM 7 can't find a digit block inside a tall chest crop. The fix
+    // mirrors the scanner:
+    //   1. getOCRCropBox + preprocessForOCR (CLAHE → adaptive threshold → upscale)
+    //   2. multi-PSM recognize (OCR_PSM_ATTEMPTS [6,7]) requesting per-word data
+    //   3. WORD-LEVEL candidates: each WORD's own digits/length/conf, not the
+    //      doc average (which noise words tank)
+    //   4. conf===0 = "unscored" → admitted on the OTHER gates (face match,
+    //      whitelist, BIB length); a genuine low read has a LOW NONZERO conf
+    //      and is still rejected
+    //   5. multi-frame majority vote (castVote) still gates every violation
+    // ocrBusy serializes OCR so Tesseract can't queue behind real time.
+
+    // Flatten Tesseract's result into [{text, conf}] words. Prefers
+    // data.words; falls back to the block→para→line→word hierarchy
+    // ({blocks:true}); last-resort treats raw-text digit blocks as
+    // pseudo-words carrying the doc confidence. Mirror of photo_scanner.html.
+    function extractOcrWords(data) {
+      if (Array.isArray(data.words) && data.words.length) {
+        return data.words.map(w => ({ text: w.text, conf: Number(w.confidence || 0) }));
+      }
+      const out = [];
+      for (const b of (data.blocks || [])) {
+        for (const p of (b.paragraphs || [])) {
+          for (const l of (p.lines || [])) {
+            for (const w of (l.words || [])) out.push({ text: w.text, conf: Number(w.confidence || 0) });
+          }
+        }
+      }
+      if (out.length) return out;
+      const docConf = Number(data.confidence || 0);
+      const blockRe = new RegExp("\\d{" + MULTIPLE_BIBS_MIN_BLOCK_LEN + ",}", "g");
+      return (String(data.text || "").match(blockRe) || []).map(t => ({ text: t, conf: docConf }));
+    }
+
+    // Digits-only, BIB-length, per-WORD confidence gate — WITH the conf===0
+    // "unscored" escape (the perfect-read-scored-0 quirk). Mirror of
+    // photo_scanner.html. Returns { candidates:[bib...], confByBib }.
+    function buildBibCandidates(words) {
+      const confByBib = {};
+      const candidates = [];
+      for (const w of words) {
+        const digits = String(w.text || "").replace(/[^0-9]/g, "");
+        const wconf = Number(w.conf || 0);
+        if (digits.length < BIB_MIN_LEN || digits.length > BIB_MAX_LEN) continue;
+        const scored = wconf > 0;                        // 0 = Tesseract.js broken-confidence sentinel
+        if (scored && wconf < OCR_MIN_CONFIDENCE) continue;
+        if (confByBib[digits] == null) { confByBib[digits] = wconf; candidates.push(digits); }
+        else if (wconf > confByBib[digits]) { confByBib[digits] = wconf; }
+      }
+      return { candidates, confByBib };
+    }
+
+    // Crop → preprocess → multi-PSM recognize → word-level candidates. Shared
+    // by runSmartOCR (known faces) and runUnknownBibCheck (stranger-BIB). The
+    // crop geometry (getOCRCropBox) matches the dashed-red overlay drawn in
+    // processLoop. Returns { candidates, confByBib, hadDigits } — hadDigits
+    // separates a truly empty read (NO_BIB) from unreadable digits (OBSCURED_BIB).
+    async function ocrReadBib(video, box) {
+      const { bx, by, bw, bh } = getOCRCropBox(box, video);
+      if (bw <= 0 || bh <= 0) return { candidates: [], confByBib: {}, hadDigits: false };
+      const cropCanvas = document.createElement("canvas");
+      cropCanvas.width = bw; cropCanvas.height = bh;
+      cropCanvas.getContext("2d").drawImage(video, bx, by, bw, bh, 0, 0, bw, bh);
+      const processed = preprocessForOCR(cropCanvas);    // CLAHE → adaptive threshold → upscale
+      let candidates = [], confByBib = {}, hadDigits = false;
+      for (const psm of OCR_PSM_ATTEMPTS) {
+        await tesseractWorker.setParameters({ tessedit_pageseg_mode: psm });
+        const result = await tesseractWorker.recognize(processed, {}, { blocks: true });
+        const words = extractOcrWords(result.data);
+        if (!hadDigits && words.some(w => /[0-9]/.test(String(w.text || "")))) hadDigits = true;
+        const built = buildBibCandidates(words);
+        candidates = built.candidates; confByBib = built.confByBib;
+        if (DEBUG) {
+          console.log("[debug] OCR", { psm, words: words.map(w => `${w.text}@${Math.round(w.conf)}`), candidates });
+          dumpOcrCrop(cropCanvas, processed, words, candidates, box, psm);
+        }
+        if (candidates.length) break;                     // valid BIB — don't pay for the next PSM
+      }
+      return { candidates, confByBib, hadDigits };
+    }
+
+    async function runSmartOCR(video, box, name) {
+      if (ocrBusy || !ocrReady || !tesseractWorker) return;
+      ocrBusy = true;
+      try {
+        const { candidates, confByBib, hadDigits } = await ocrReadBib(video, box);
+
+        // ข้ามกรณีที่อ่านไม่ได้เลย หรืออ่านได้หลายเบอร์ ("อย่างอื่นไม่ต้อง")
+        if (candidates.length === 0 || candidates.length >= MULTIPLE_BIBS_MIN_BLOCKS) {
+          return;
+        }
+
+        // ── Valid read — clear failure state, then vote ──
+        ocrFailureCount[name] = 0;
+        ocrLastFailureKind[name] = null;
+        const readBib = candidates[0];
+        const consensus = castVote(name, readBib, confByBib[readBib] || 0);
+        if (DEBUG) console.log("[debug] vote", { name, readBib, buffer: (ocrVotes[name] || []).length, consensus });
+        if (!consensus) return;
+
+        const expectedBib = runnerRegistry[name];
+        if (expectedBib && consensus !== expectedBib) {
+          // Registered face A wearing a BIB that isn't A's → cheating. Shares the
+          // single name cooldown bucket with NO_BIB / OBSCURED_BIB / MULTIPLE_BIBS
+          // (Guardrail 25). On a fresh fire, flag A in Results.IsCheating (🚨).
+          const fired = tryFireViolation(name + ":" + CP_KEY, {
+            name, bib: consensus,
+            message: `Expected BIB ${expectedBib}, Found ${consensus}`,
+            violationType: "WRONG_PERSON",
+            image: captureFullFrame(video),
+          });
+          if (fired) markCheating(name);
+        }
+      } catch (e) { console.warn("OCR error:", e) }
+      finally { ocrBusy = false }
+    }
+
+    // OCR debug crop dump (?debug=1 only) — mirror of photo_scanner.html. Per
+    // face + PSM pass: the raw chest crop, the thresholded crop Tesseract saw,
+    // the per-word reads (`text@conf`), the picked BIB, and the PSM. This is
+    // the diagnostic that cracked the scanner's OCR — use it to tell a
+    // geometry miss (BIB not in the raw crop) from a preprocessing failure
+    // (blobs in the thresholded crop) from a recognition failure (clean crop,
+    // bad read). No-op unless DEBUG. Tesseract output is untrusted → built via
+    // textContent, never innerHTML (Guardrail 7).
+    function dumpOcrCrop(rawCanvas, processedCanvas, words, candidates, box, psm) {
+      let panel = document.getElementById("ocr-debug-panel");
+      if (!panel) {
+        panel = document.createElement("div");
+        panel.id = "ocr-debug-panel";
+        panel.style.cssText = "position:fixed;right:8px;bottom:8px;width:360px;max-height:60vh;overflow:auto;z-index:99999;background:rgba(0,0,0,.88);border:1px solid #555;border-radius:8px;padding:8px;font:11px ui-monospace,monospace;color:#ddd";
+        panel.innerHTML = '<div style="font-weight:700;margin-bottom:6px">🔍 OCR DEBUG — raw | thresholded | per-word</div>';
+        document.body.appendChild(panel);
+      }
+      const row = document.createElement("div");
+      row.style.cssText = "display:flex;gap:6px;align-items:flex-start;border-top:1px solid #333;padding:5px 0";
+      const raw = document.createElement("img");
+      raw.src = rawCanvas.toDataURL(); raw.style.cssText = "height:54px;border:1px solid #555;background:#222";
+      const proc = document.createElement("img");
+      proc.src = processedCanvas.toDataURL(); proc.style.cssText = "height:54px;border:1px solid #555;background:#fff";
+      const txt = document.createElement("div");
+      txt.style.cssText = "flex:1;min-width:0;word-break:break-all";
+      const faceWH = box ? `${Math.round(box.width)}×${Math.round(box.height)}` : "?";
+      const pickedLine = document.createElement("div");
+      const pickedVal = document.createElement("b");
+      pickedVal.style.color = (candidates && candidates.length) ? "#7CFC9A" : "#ff7a7a";
+      pickedVal.textContent = (candidates && candidates.length) ? candidates.join(", ") : "—";
+      pickedLine.append("BIB: ", pickedVal);
+      const wordsLine = document.createElement("div");
+      wordsLine.style.color = "#9fb3c8";
+      wordsLine.textContent = "words: " + ((words && words.length)
+        ? words.map(w => `${String(w.text).replace(/\s+/g, "")}@${Math.round(w.conf)}`).join(" ") : "(none)");
+      const metaLine = document.createElement("div");
+      metaLine.style.color = "#888";
+      metaLine.textContent = `psm: ${psm} · face: ${faceWH}px`;
+      txt.append(pickedLine, wordsLine, metaLine);
+      row.appendChild(raw); row.appendChild(proc); row.appendChild(txt);
+      panel.insertBefore(row, panel.children[1] || null);
+      while (panel.children.length > 25) panel.removeChild(panel.lastChild);
+    }
+
+    // ── CHECKPOINT RECORDING ──
+    async function recordCP(name) {
+      const ts = new Date();
+      const timeStr = ts.toTimeString().split(" ")[0];// HH:MM:SS
+      const bib = runnerRegistry[name] || "";
+
+      addSidebarItem(name, `Verified (BIB ${bib || "—"}) @ ${timeStr}`, false);
+
+      try {
+        // Identity verification — the "photo_verified" sentinel routes to
+        // _recordPhotoVerification (writes Name + BibNumber + UpdatedAt; the
+        // CP_Time columns no longer exist). Same contract as the Drive
+        // Scanner's sendIdentification (Guardrail 29). A real CP id would
+        // throw schema_error on the post-pivot Results sheet.
+        const resp = await fetch(API, {
+          method: "POST", headers: { "Content-Type": "text/plain" }, body: JSON.stringify({
+            action: "recordCheckpoint", name, checkpoint_id: "photo_verified", timestamp: timeStr, bib
+          }), redirect: "follow"
+        });
+        const result = await resp.json();
+        if (!result || result.status !== "success") {
+          addSidebarItem(name, `❌ บันทึกไม่สำเร็จ: ${(result && result.message) || "Unknown"}`, true);
+        }
+      } catch (e) {
+        console.warn("Failed to send identification:", e);
+        addSidebarItem(name, "❌ บันทึกไม่สำเร็จ: เชื่อมต่อเซิร์ฟเวอร์ไม่ได้", true);
+      }
+    }
+
+    // ── VIOLATION REPORTING ──
+    // Options-style payload. All five trigger sites (WRONG_PERSON, NO_BIB,
+    // OBSCURED_BIB, UNREGISTERED, MULTIPLE_BIBS) build their own message +
+    // image and call this with a uniform shape. The cooldown gate lives
+    // in tryFireViolation so the 60 s budget is enforced before we hit
+    // the network or sidebar.
+    async function reportViolation({ name, bib, message, violationType, image }) {
+      addSidebarItem(name, `⚠️ ${message}`, "violation");
+      try {
+        await fetch(API, {
+          method: "POST", headers: { "Content-Type": "text/plain" }, body: JSON.stringify({
+            action: "reportViolation",
+            name, bib, message, violationType,
+            timestamp: new Date().toISOString(),
+            image,
+          })
+        });
+      } catch (e) {
+        console.warn("Failed to send violation:", e);
+        addSidebarItem(name, "❌ ส่ง violation ไม่ได้", true);
+      }
+    }
+
+    // Flag a runner as cheating in Results.IsCheating → lights up the
+    // leaderboard 🚨 badge. Fire-and-forget (idempotent on the backend);
+    // mirrors photo_scanner.html's markCheating block. Used by BOTH
+    // WRONG_PERSON paths: a registered face wearing the wrong BIB, and a
+    // stranger wearing this runner's BIB (attributed to the BIB owner).
+    function markCheating(name) {
+      try {
+        fetch(API, {
+          method: "POST", headers: { "Content-Type": "text/plain" }, body: JSON.stringify({
+            action: "markCheating", name, isCheating: true
+          })
+        });
+      } catch (e) { console.warn("markCheating failed for", name, e); }
+    }
+
+    // ── STRANGER-BIB CHECK (bib-swap detection) ──
+    // We never face-match an unknown, so there's no per-face identity to vote
+    // under — votes accumulate in one "__unknown__" bucket (one intruder at a
+    // checkpoint at a time, so a real bib-swapper still reaches consensus;
+    // two different intruders split the vote and safely don't fire). Only
+    // fires when the consensus digits EXACTLY equal a REGISTERED BIB
+    // (bibToOwner) — random OCR noise that isn't a real BIB is ignored — and
+    // is attributed to that BIB's registered owner, who is then flagged
+    // cheating (their identity was worn by someone else). See AI_CONTEXT §4.2.
+    async function runUnknownBibCheck(video, box) {
+      if (ocrBusy || !ocrReady || !tesseractWorker) return;
+      ocrBusy = true;
+      try {
+        const { candidates, confByBib } = await ocrReadBib(video, box);   // same word-level reader as known faces
+        if (!candidates.length) return;
+        const read = candidates[0];
+        const consensus = castVote("__unknown__", read, confByBib[read] || 0);   // reuse the multi-frame voter
+        if (!consensus) return;
+        const owner = bibToOwner[consensus];
+        if (!owner) return;                                 // not a registered BIB → leave it to UNREGISTERED
+        const fired = tryFireViolation("bibborrow:" + consensus, {
+          name: owner,
+          bib: consensus,
+          message: `BIB ${consensus} (registered to ${owner}) worn by an unmatched/unregistered face`,
+          violationType: "WRONG_PERSON",
+          image: captureFullFrame(video),
+        });
+        if (fired) {
+          markCheating(owner);
+          lastBibBorrowSec = Date.now() / 1000;               // soft-suppress UNREGISTERED for this intruder
+          consecutiveFrames["unknown"] = 0;
+        }
+      } catch (e) { console.warn("Unknown BIB check error:", e) }
+      finally { ocrBusy = false }
+    }
+
+    // Snapshot helpers — every fire allocates one canvas; bounded to ≤1
+    // per minute per cooldown bucket by VIOLATION_COOLDOWN_SEC.
+    function captureFullFrame(video) {
+      const canvas = document.createElement("canvas");
+      canvas.width = video.videoWidth; canvas.height = video.videoHeight;
+      canvas.getContext("2d").drawImage(video, 0, 0);
+      return canvas.toDataURL("image/jpeg", 0.7);
+    }
+
+    // Pads 50% beyond the face on each side so the operator sees who it is,
+    // not just a tightly-framed head. Clamped to video bounds.
+    function captureFaceCrop(video, box) {
+      const pad = box.height * 0.5;
+      const cx = Math.max(0, box.x - pad);
+      const cy = Math.max(0, box.y - pad);
+      const cw = Math.min(box.width + pad * 2, video.videoWidth - cx);
+      const ch = Math.min(box.height + pad * 2, video.videoHeight - cy);
+      const canvas = document.createElement("canvas");
+      canvas.width = cw; canvas.height = ch;
+      canvas.getContext("2d").drawImage(video, cx, cy, cw, ch, 0, 0, cw, ch);
+      return canvas.toDataURL("image/jpeg", 0.7);
+    }
+
+    // Single cooldown gate for ALL violation types. Returns true if the
+    // violation fired, false if blocked by cooldown. Sharing the bucket
+    // across types prevents stacking different violation types on the same
+    // name+CP from bypassing the 60 s spam-prevention budget (Guardrail 25).
+    function tryFireViolation(cooldownKey, payload) {
+      const nowSec = Date.now() / 1000;
+      if (violationCooldowns[cooldownKey]
+        && (nowSec - violationCooldowns[cooldownKey]) <= VIOLATION_COOLDOWN_SEC) {
+        return false;
+      }
+      violationCooldowns[cooldownKey] = nowSec;
+      bumpViolationCount(payload.violationType);
+      reportViolation(payload);
+      return true;
+    }
+
+    // ── SIDEBAR ──
+    // HTML escape — the `info` field can carry OCR-extracted text and
+    // `name` carries the runner label, both of which must not be inserted
+    // raw into innerHTML.
+    function esc(s) {
+      return String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+    }
+    function addSidebarItem(name, info, isViol) {
+      const list = document.getElementById("sb-list");
+      const item = document.createElement("div");
+      item.className = "sb-item" + (isViol ? " violation" : "");
+      item.innerHTML = `<div class="sb-name${isViol ? " viol" : ""}">${isViol ? "🔴" : "✅"} ${esc(name)}</div><div class="sb-info">${esc(info)}</div>`;
+      list.prepend(item);
+      // Keep max 20
+      while (list.children.length > 20) list.lastChild.remove();
+    }
+
+    // START
+    init();
+  </script>
 </body>
+
 </html>
