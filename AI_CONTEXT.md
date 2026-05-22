@@ -9,6 +9,48 @@
 > cadence, caching, or guardrails MUST update this file in the same change
 > set.
 >
+> **Last updated:** 2026-05-22 — **Live Checkpoint now auto-enrolls
+> form-registered runners (fixes "camera on but no face boxes").** With
+> every runner imported via the Google Form (BLANK Embeddings),
+> `faceMatcher` was null and the loop's `if(!faceMatcher) return` killed ALL
+> detection — no boxes at all. `checkpoint.html` now mirrors the Drive
+> Scanner's pre-scan auto-enroll (§4.7): at startup `enrollMissingEmbeddings`
+> computes embeddings IN THE BROWSER from each runner's stored angle photos
+> (CORS-safe bytes via `getImageBytes`, face-api detect+descriptor,
+> quality-guarded to exactly one face ≥ `ENROLL_MIN_FACE_SIZE`), persists
+> them via `updateEmbeddings`, then `buildMatcherFromRunners` rebuilds the
+> matcher. Ported helpers: `loadRunners`, `buildBibOwnerMap`,
+> `buildMatcherFromRunners`, `driveIdFromUrl`, `fetchImageBytes`,
+> `loadImage`, `averageDescriptors`, `detectFacesForEnroll` (Tiny @
+> inputSize 416), `saveEmbeddings`. The detection loop also no longer
+> hard-returns on a null matcher — it still detects + draws faces (as
+> Unknown) so the operator sees the camera works and the stranger-BIB check
+> can still fire on a registered BIB. One-time cost; later startups
+> fast-return once embeddings exist. NO backend change (`updateEmbeddings`
+> already exists). Updates §4.2, §4.7. Files: `templates/checkpoint.html`.
+>
+> **Last updated:** 2026-05-22 — **Live Checkpoint can now READ BIBs (OCR
+> aligned with the Drive Scanner).** The revived `/checkpoint` couldn't read
+> BIBs because it still ran the pre-fix OCR: a SINGLE PSM 7 + a gate on the
+> DOCUMENT confidence — but Tesseract.js scores a perfect isolated-number
+> read as conf 0 (the documented LSTM+whitelist quirk), so
+> `conf < OCR_MIN_CONFIDENCE` rejected exactly the good reads, and PSM 7
+> alone can't find a digit block in a tall chest crop. `checkpoint.html` now
+> mirrors `photo_scanner.html`'s proven reader via a shared `ocrReadBib`:
+> multi-PSM `OCR_PSM_ATTEMPTS=['6','7']` recognize with `{blocks:true}`,
+> `extractOcrWords` + `buildBibCandidates` evaluating each WORD's own
+> digits/length/confidence (not the doc average that noise tanks), and an
+> exact `conf===0` treated as "unscored" → admitted on the other gates
+> (face match + whitelist + BIB length). BOTH the known-face `runSmartOCR`
+> and the stranger-BIB `runUnknownBibCheck` go through `ocrReadBib`.
+> Constants aligned to the scanner (`OCR_MIN_CONFIDENCE 60→50`,
+> `BIB_MIN_LEN 1→2`; init PSM seeds from `OCR_PSM_ATTEMPTS[0]`). The
+> scanner's `?debug=1` crop-dump panel (`dumpOcrCrop`: raw | thresholded |
+> per-word `@conf` | picked BIB | PSM) is ported so OCR is diagnosable live.
+> The multi-frame majority vote (`castVote`, consensus 3) still gates every
+> violation. Updates §4.2, Guardrail 20 + 27. Files:
+> `templates/checkpoint.html`.
+>
 > **Last updated:** 2026-05-22 — **Live Checkpoint page revived as a
 > cheating-detection station (no timing).** `/checkpoint` is routed again
 > (`web_app.py`) and `templates/checkpoint.html` is realigned to the
@@ -1005,8 +1047,14 @@ constant `CP_KEY`); every WRONG_PERSON also POSTs `markCheating`; new
 (OCR an unknown face → if its consensus digits equal a registered BIB, fire
 WRONG_PERSON against that BIB's owner and soft-suppress the intruder's
 UNREGISTERED via `lastBibBorrowSec`); new top-bar live per-type counters
-(`bumpViolationCount`, called inside `tryFireViolation`). The detection /
-OCR-consensus loop documented below is otherwise unchanged.
+(`bumpViolationCount`, called inside `tryFireViolation`). Startup also
+AUTO-ENROLLS form-registered runners (blank Embeddings) in the browser via
+`enrollMissingEmbeddings` — the same approach as §4.7's pre-scan enroll —
+so they're recognizable; the loop no longer bails when `faceMatcher` is
+null (it draws Unknown boxes instead). The BIB OCR read was realigned with
+the scanner (multi-PSM `[6,7]`, word-level candidates, `conf===0` escape) —
+the old single-PSM/doc-confidence reader couldn't read BIBs. The detection
+/ OCR-consensus loop is otherwise unchanged.
 
 The pipeline has two **independent triggers**:
 
@@ -2043,7 +2091,13 @@ explicit, justified, and accompanied by an update to this file.
     not just the scanner. It additionally OCRs UNKNOWN faces
     (`runUnknownBibCheck`) to catch a stranger wearing a registered BIB;
     that path reuses the same `getOCRCropBox` + `preprocessForOCR` + the
-    multi-frame voter (under a `"__unknown__"` bucket).
+    multi-frame voter (under a `"__unknown__"` bucket). The OCR READ logic
+    is now mirrored too — `extractOcrWords` + `buildBibCandidates` + the
+    multi-PSM `['6','7']` recognize + the `conf===0` "unscored" escape are
+    duplicated in lockstep (alongside `getOCRCropBox`/`preprocessForOCR`),
+    so a fix to either file must be applied to both. The remaining
+    INTENTIONAL divergence is the detector (Tiny vs SSD) and checkpoint's
+    multi-frame majority vote (the scanner is single-shot per photo).
 28. **The Drive scanner MUST fetch image bytes via `getImageBytes`,
     not via `<img crossOrigin=anonymous>` against the thumbnail URL.**
     `drive.google.com/thumbnail?id=…&sz=w800` 302-redirects to

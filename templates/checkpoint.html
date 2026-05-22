@@ -132,6 +132,21 @@ const FACE_DETECTOR_SCORE_THRESHOLD = 0.5;
 // a runner is more costly than missing them on one frame.
 const FACE_MATCH_DISTANCE = 0.45;
 
+// ── AUTO-ENROLL (form-registered runners) ──────────────────────
+// Form intake (FormIntake.gs) creates runners with photos but BLANK
+// Embeddings (Apps Script can't run face-api — Guardrail 16). Without face
+// data faceMatcher is null and the live loop recognizes NO ONE (the
+// "camera on but no boxes" symptom). At startup we compute the missing
+// embeddings IN THE BROWSER from each runner's stored angle photos and
+// persist them via updateEmbeddings — same approach as the Drive Scanner's
+// pre-scan auto-enroll. Quality-guarded: a photo contributes only when
+// EXACTLY one face ≥ ENROLL_MIN_FACE_SIZE is detected (never fabricate a
+// descriptor — Guardrail 33). One-time cost; later startups fast-return.
+const ENROLL_PHOTO_FIELDS = ["Photo_Front","Photo_Top","Photo_Bottom","Photo_Left","Photo_Right"];
+const ENROLL_MIN_FACE_SIZE = 60;            // px floor for a usable enroll face
+const ENROLL_MAX_WIDTH = 1920;              // downscale big phone uploads before detection
+const ENROLL_DETECTOR_INPUT_SIZE = 416;     // Tiny inputSize for enroll recall (one-time)
+
 // ── BBOX SMOOTHING (EMA) ───────────────────────────────────────
 // Per-runner exponential moving average. α=0.35 → ~3-frame half-life.
 // Lower α = smoother but laggier. The smoothed box drives BOTH the
@@ -165,13 +180,20 @@ const OCR_PRE_UPSCALE_MAX = 4;             // cap on the pre-threshold factor
 const CLAHE_TILES = 8;
 const CLAHE_CLIP_LIMIT = 3.0;
 
-// FIELD-TEST: relaxed for indoor lighting + short BIBs.
-// Revert to 70 / 2 / 5 once real-world setups are validated. The
-// majority-vote gate (OCR_VOTE_MIN_CONSENSUS=3) still requires three
-// agreeing reads, so loosening these doesn't lower the violation bar.
-const OCR_MIN_CONFIDENCE = 60;
-const BIB_MIN_LEN = 1;
+// Aligned 2026-05-22 with the Drive Scanner's PROVEN values — checkpoint
+// OCR was the unrouted/untuned pre-fix pipeline and couldn't read BIBs.
+// 50 is the browser-Tesseract floor on adaptive-threshold crops; the
+// conf===0 "perfect read scored 0" quirk is handled in buildBibCandidates
+// (NOT by this threshold). Majority vote (OCR_VOTE_MIN_CONSENSUS=3) still
+// gates every violation, so these don't lower the violation bar.
+const OCR_MIN_CONFIDENCE = 50;
+const BIB_MIN_LEN = 2;                      // 1-digit "bibs" are Tesseract noise, not real
 const BIB_MAX_LEN = 6;
+// Multi-PSM fallback (mirrors photo_scanner.html). No single PSM fits both
+// layouts: 6 (uniform block) reads normal/large chest BIBs; 7 (single
+// line) reads small upscaled digit rows that 6 fragments. First PSM to
+// yield a valid BIB wins, so normal reads stay single-pass.
+const OCR_PSM_ATTEMPTS = ['6', '7'];
 
 // Multi-frame majority vote — protects against single-frame OCR misreads.
 // Buffer caps at OCR_VOTE_BUFFER_SIZE; consensus declared when
@@ -233,6 +255,141 @@ function bumpViolationCount(type){
  if(el) el.textContent = violationCounts[type];
 }
 
+// ── RUNNERS / FACE-MATCHER / AUTO-ENROLL ───────────────────────
+async function loadRunners(){
+ const res=await fetch(API+"?action=getRunners");
+ const d=await res.json();
+ return d.data||[];
+}
+
+// Reverse BIB→owner map from ALL runners (incl. embedding-less form-only
+// ones) so the stranger-BIB check works even for runners we can't face-match.
+function buildBibOwnerMap(runners){
+ bibToOwner={};
+ for(const r of (runners||[])){
+  const ownerBib=String(r.BibNumber||"").trim();
+  if(ownerBib) bibToOwner[ownerBib]=r.Name;
+ }
+}
+
+// Build faceMatcher + runnerRegistry from runners that HAVE embeddings.
+// Mirror of photo_scanner.html. faceMatcher stays null if none qualify.
+function buildMatcherFromRunners(runners){
+ const labeled=[];
+ runnerRegistry={};
+ for(const r of (runners||[])){
+  if(!r.Embeddings) continue;
+  try{
+   let emb=JSON.parse(r.Embeddings);
+   if(Array.isArray(emb) && emb.length>0 && Array.isArray(emb[0])) emb=emb[0];
+   if(!Array.isArray(emb) || emb.length!==128){ console.warn('Bad embedding size for',r.Name,emb.length); continue; }
+   labeled.push(new faceapi.LabeledFaceDescriptors(r.Name,[new Float32Array(emb)]));
+   runnerRegistry[r.Name]=String(r.BibNumber||"");
+  }catch(e){ console.warn("Bad embedding for",r.Name,e); }
+ }
+ faceMatcher = labeled.length>0 ? new faceapi.FaceMatcher(labeled, FACE_MATCH_DISTANCE) : null;
+ return labeled.length;
+}
+
+// Pull a Drive file ID out of a stored Photo_* URL (lh3 /d/<id> + legacy ?id=).
+function driveIdFromUrl(url){
+ if(!url) return null;
+ const s=String(url);
+ let m=s.match(/\/d\/([-\w]{25,})/); if(m) return m[1];
+ m=s.match(/[?&]id=([-\w]{25,})/);   return m?m[1]:null;
+}
+
+// CORS-safe image bytes via the backend getImageBytes endpoint (the lh3
+// thumbnail URL 302-redirects with no CORS headers → would taint a canvas).
+async function fetchImageBytes(photo){
+ try{
+  const res=await fetch(API+"?action=getImageBytes&fileId="+encodeURIComponent(photo.id));
+  const payload=await res.json();
+  if(!payload || payload.status!=="success") return { error:(payload&&payload.message)||"Fetch failed" };
+  return payload;
+ }catch(e){ return { error:"Fetch error: "+(e.message||e) }; }
+}
+
+function loadImage(src){
+ return new Promise((resolve,reject)=>{
+  const img=new Image();
+  img.onload=()=>resolve(img);
+  img.onerror=()=>reject(new Error("image decode failed"));
+  img.src=src;
+ });
+}
+
+function averageDescriptors(list){
+ const out=new Float32Array(128);
+ for(const d of list){ for(let i=0;i<128;i++) out[i]+=d[i]; }
+ for(let i=0;i<128;i++) out[i]/=list.length;
+ return out;
+}
+
+// Detect faces in a stored enroll photo. Big phone uploads are downscaled
+// to ENROLL_MAX_WIDTH first (descriptor is resolution-independent).
+async function detectFacesForEnroll(img){
+ let input=img;
+ if(img.naturalWidth>ENROLL_MAX_WIDTH){
+  const dw=ENROLL_MAX_WIDTH, dh=Math.round(img.naturalHeight*(ENROLL_MAX_WIDTH/img.naturalWidth));
+  const c=document.createElement("canvas"); c.width=dw; c.height=dh;
+  c.getContext("2d").drawImage(img,0,0,dw,dh);
+  input=c;
+ }
+ const opts=new faceapi.TinyFaceDetectorOptions({ inputSize:ENROLL_DETECTOR_INPUT_SIZE, scoreThreshold:FACE_DETECTOR_SCORE_THRESHOLD });
+ return faceapi.detectAllFaces(input,opts).withFaceLandmarks().withFaceDescriptors();
+}
+
+// Persist a computed descriptor (write-once on the backend unless forced).
+async function saveEmbeddings(name, descriptor){
+ try{
+  const resp=await fetch(API,{method:"POST",headers:{"Content-Type":"text/plain"},
+   body:JSON.stringify({ action:"updateEmbeddings", name, embeddings:Array.prototype.slice.call(descriptor) })});
+  const result=await resp.json();
+  return !!(result && result.status==="success");
+ }catch(e){ console.warn("saveEmbeddings failed for",name,e); return false; }
+}
+
+function setEnrollProgress(done,total){
+ const el=document.getElementById("step-runners");
+ if(el) el.textContent=`🔄 เตรียมข้อมูลใบหน้า (form) ${done}/${total}...`;
+}
+
+// Compute + save embeddings for every runner that has photos but no
+// embeddings (form intake). Returns the count enrolled. Mirror of the
+// scanner's backfillMissingEmbeddings.
+async function enrollMissingEmbeddings(runners){
+ const pending=(runners||[]).filter(r => !r.Embeddings && ENROLL_PHOTO_FIELDS.some(f=>driveIdFromUrl(r[f])));
+ if(!pending.length) return 0;
+ let done=0, enrolled=0;
+ for(const r of pending){
+  setEnrollProgress(done,pending.length);
+  const descriptors=[];
+  for(const f of ENROLL_PHOTO_FIELDS){
+   const fileId=driveIdFromUrl(r[f]);
+   if(!fileId) continue;
+   try{
+    const payload=await fetchImageBytes({ id:fileId });
+    if(!payload || payload.error) continue;
+    const img=await loadImage(`data:${payload.mimeType||'image/jpeg'};base64,${payload.base64}`).catch(()=>null);
+    if(!img) continue;
+    const dets=await detectFacesForEnroll(img);
+    // Quality guard: exactly one usable-size face (0 = none, 2+ = ambiguous).
+    const usable=dets.filter(d => d.detection.box.height>=ENROLL_MIN_FACE_SIZE && d.detection.box.width>=ENROLL_MIN_FACE_SIZE);
+    if(usable.length===1) descriptors.push(usable[0].descriptor);
+    else if(DEBUG) console.log(`[enroll] ${r.Name} ${f}: ${dets.length} face(s), ${usable.length} usable — skipped`);
+   }catch(e){ if(DEBUG) console.warn("[enroll]",r.Name,f,e); }
+  }
+  done++;
+  if(descriptors.length){
+   if(await saveEmbeddings(r.Name, averageDescriptors(descriptors))) enrolled++;
+  }
+  setEnrollProgress(done,pending.length);
+ }
+ if(DEBUG) console.log(`[enroll] done — ${enrolled}/${pending.length} enrolled`);
+ return enrolled;
+}
+
 // ── INIT ──
 async function init(){
  try{
@@ -245,35 +402,17 @@ async function init(){
   await faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL);
   markStep("step-models","done");
 
-  // 2) Load runners
+  // 2) Load runners + build the FaceMatcher. Runners registered via the
+  //    Google Form have photos but BLANK Embeddings, so AUTO-ENROLL them in
+  //    the browser FIRST — otherwise faceMatcher stays null and the live
+  //    loop recognizes no one ("camera on but no boxes"). One-time cost.
   markStep("step-runners","loading");
-  const res=await fetch(API+"?action=getRunners");
-  const d=await res.json();
-  const runners=d.data||[];
-  document.getElementById("runner-count").textContent=runners.length;
-
-  const labeled=[];
-  for(const r of runners){
-   // Reverse BIB→owner map covers ALL registered runners (incl. form-only
-   // ones without embeddings) so a stranger wearing their BIB is still
-   // caught by the stranger-BIB check, even if that owner can't be
-   // face-matched.
-   const ownerBib=String(r.BibNumber||"").trim();
-   if(ownerBib) bibToOwner[ownerBib]=r.Name;
-   if(!r.Embeddings)continue;
-   try{
-    let emb=JSON.parse(r.Embeddings);
-    // Handle nested array [[...]] from multi-angle
-    if(Array.isArray(emb) && emb.length>0 && Array.isArray(emb[0])){
-     emb=emb[0];
-    }
-    if(!Array.isArray(emb)||emb.length!==128){console.warn('Bad embedding size for',r.Name,emb.length);continue}
-    const desc=new Float32Array(emb);
-    labeled.push(new faceapi.LabeledFaceDescriptors(r.Name,[desc]));
-    runnerRegistry[r.Name]=String(r.BibNumber||"");
-   }catch(e){console.warn("Bad embedding for",r.Name,e)}
-  }
-  if(labeled.length>0)faceMatcher=new faceapi.FaceMatcher(labeled, FACE_MATCH_DISTANCE);
+  let runners = await loadRunners();
+  buildBibOwnerMap(runners);                          // reverse BIB→owner (all runners)
+  const enrolled = await enrollMissingEmbeddings(runners);   // form runners → embeddings
+  if (enrolled > 0) runners = await loadRunners();    // refresh: updateEmbeddings invalidated the cache
+  buildMatcherFromRunners(runners);                  // sets faceMatcher + runnerRegistry (null if none usable)
+  document.getElementById("runner-count").textContent = runners.length;
   markStep("step-runners","done");
 
   // 3) Camera — surface NotAllowedError specifically so the operator
@@ -309,7 +448,7 @@ async function init(){
    tesseractWorker=await Tesseract.createWorker("eng");
    await tesseractWorker.setParameters({
     tessedit_char_whitelist:'0123456789',
-    tessedit_pageseg_mode:'7'
+    tessedit_pageseg_mode:OCR_PSM_ATTEMPTS[0]   // runSmartOCR re-sets PSM per attempt; this is the start state
    });
    ocrReady=true;
   }catch(e){console.warn("Tesseract init failed, OCR disabled:",e);ocrReady=false;}
@@ -638,7 +777,10 @@ async function processLoop(){
 
   ctx.clearRect(0,0,overlay.width,overlay.height);
 
-  if(!faceMatcher){rafId=requestAnimationFrame(frame);return}
+  // NOTE: faceMatcher may legitimately be null (e.g. ALL runners came via
+  // the form and auto-enroll found no usable photo). Don't bail — still
+  // detect + draw faces (everyone as Unknown) so the operator sees the
+  // camera works, and the stranger-BIB check can still fire on a real BIB.
 
   try{
    const detections = await faceapi.detectAllFaces(video, detectorOptions)
@@ -652,9 +794,9 @@ async function processLoop(){
    let largestUnknownBox = null, largestUnknownArea = 0;
 
    for(const det of detections){
-    const match=faceMatcher.findBestMatch(det.descriptor);
-    const name=match.label;
-    const dist=match.distance;
+    const match=faceMatcher ? faceMatcher.findBestMatch(det.descriptor) : null;
+    const name=match ? match.label : "unknown";
+    const dist=match ? match.distance : 1;
     const rawBox=det.detection.box;
     const isKnown = name!=="unknown" && dist<=FACE_MATCH_DISTANCE;
 
@@ -812,84 +954,121 @@ async function processLoop(){
  rafId=requestAnimationFrame(frame);
 }
 
-// ── SMART OCR ──
-// Pipeline (all on top of an EMA-stable box):
-//   1. Crop chest region below the face
-//   2. preprocessForOCR: grayscale → adaptive threshold → 2× upscale
-//   3. Tesseract recognize (worker-thread; non-blocking)
-//   4. Validate: digits-only ∧ length ∈ [BIB_MIN_LEN, BIB_MAX_LEN]
-//      ∧ confidence ≥ OCR_MIN_CONFIDENCE
-//   5. castVote — accumulate per-runner votes; consensus only when
-//      ≥OCR_VOTE_MIN_CONSENSUS of the last OCR_VOTE_BUFFER_SIZE agree
-//   6. On consensus mismatch with the registered BIB AND no recent
-//      violation report on this CP, fire reportViolation
-//
-// ocrBusy is a single global guard: at most one OCR runs at a time so
-// Tesseract can't queue up and drift behind real time. The face-api
-// detection loop continues unblocked because tesseractWorker.recognize
-// is async and runs in its own Web Worker.
+// ── BIB OCR PIPELINE ──
+// Aligned 2026-05-22 with photo_scanner.html's PROVEN reader (Guardrail
+// 20 + 27). The old checkpoint OCR couldn't read BIBs: it gated on the
+// DOCUMENT confidence, but Tesseract.js (LSTM + digit whitelist)
+// intermittently scores a PERFECT isolated-number read as confidence 0,
+// which the old `conf < OCR_MIN_CONFIDENCE` gate rejected outright; and a
+// single PSM 7 can't find a digit block inside a tall chest crop. The fix
+// mirrors the scanner:
+//   1. getOCRCropBox + preprocessForOCR (CLAHE → adaptive threshold → upscale)
+//   2. multi-PSM recognize (OCR_PSM_ATTEMPTS [6,7]) requesting per-word data
+//   3. WORD-LEVEL candidates: each WORD's own digits/length/conf, not the
+//      doc average (which noise words tank)
+//   4. conf===0 = "unscored" → admitted on the OTHER gates (face match,
+//      whitelist, BIB length); a genuine low read has a LOW NONZERO conf
+//      and is still rejected
+//   5. multi-frame majority vote (castVote) still gates every violation
+// ocrBusy serializes OCR so Tesseract can't queue behind real time.
+
+// Flatten Tesseract's result into [{text, conf}] words. Prefers
+// data.words; falls back to the block→para→line→word hierarchy
+// ({blocks:true}); last-resort treats raw-text digit blocks as
+// pseudo-words carrying the doc confidence. Mirror of photo_scanner.html.
+function extractOcrWords(data){
+ if (Array.isArray(data.words) && data.words.length){
+  return data.words.map(w => ({ text: w.text, conf: Number(w.confidence || 0) }));
+ }
+ const out = [];
+ for (const b of (data.blocks || [])){
+  for (const p of (b.paragraphs || [])){
+   for (const l of (p.lines || [])){
+    for (const w of (l.words || [])) out.push({ text: w.text, conf: Number(w.confidence || 0) });
+   }
+  }
+ }
+ if (out.length) return out;
+ const docConf = Number(data.confidence || 0);
+ const blockRe = new RegExp("\\d{" + MULTIPLE_BIBS_MIN_BLOCK_LEN + ",}", "g");
+ return (String(data.text || "").match(blockRe) || []).map(t => ({ text: t, conf: docConf }));
+}
+
+// Digits-only, BIB-length, per-WORD confidence gate — WITH the conf===0
+// "unscored" escape (the perfect-read-scored-0 quirk). Mirror of
+// photo_scanner.html. Returns { candidates:[bib...], confByBib }.
+function buildBibCandidates(words){
+ const confByBib = {};
+ const candidates = [];
+ for (const w of words){
+  const digits = String(w.text || "").replace(/[^0-9]/g, "");
+  const wconf = Number(w.conf || 0);
+  if (digits.length < BIB_MIN_LEN || digits.length > BIB_MAX_LEN) continue;
+  const scored = wconf > 0;                        // 0 = Tesseract.js broken-confidence sentinel
+  if (scored && wconf < OCR_MIN_CONFIDENCE) continue;
+  if (confByBib[digits] == null){ confByBib[digits] = wconf; candidates.push(digits); }
+  else if (wconf > confByBib[digits]){ confByBib[digits] = wconf; }
+ }
+ return { candidates, confByBib };
+}
+
+// Crop → preprocess → multi-PSM recognize → word-level candidates. Shared
+// by runSmartOCR (known faces) and runUnknownBibCheck (stranger-BIB). The
+// crop geometry (getOCRCropBox) matches the dashed-red overlay drawn in
+// processLoop. Returns { candidates, confByBib, hadDigits } — hadDigits
+// separates a truly empty read (NO_BIB) from unreadable digits (OBSCURED_BIB).
+async function ocrReadBib(video, box){
+ const {bx, by, bw, bh} = getOCRCropBox(box, video);
+ if(bw<=0 || bh<=0) return { candidates: [], confByBib: {}, hadDigits: false };
+ const cropCanvas=document.createElement("canvas");
+ cropCanvas.width=bw; cropCanvas.height=bh;
+ cropCanvas.getContext("2d").drawImage(video, bx, by, bw, bh, 0, 0, bw, bh);
+ const processed=preprocessForOCR(cropCanvas);    // CLAHE → adaptive threshold → upscale
+ let candidates=[], confByBib={}, hadDigits=false;
+ for(const psm of OCR_PSM_ATTEMPTS){
+  await tesseractWorker.setParameters({ tessedit_pageseg_mode: psm });
+  const result=await tesseractWorker.recognize(processed, {}, { blocks: true });
+  const words=extractOcrWords(result.data);
+  if(!hadDigits && words.some(w => /[0-9]/.test(String(w.text||"")))) hadDigits=true;
+  const built=buildBibCandidates(words);
+  candidates=built.candidates; confByBib=built.confByBib;
+  if(DEBUG){
+   console.log("[debug] OCR", { psm, words: words.map(w=>`${w.text}@${Math.round(w.conf)}`), candidates });
+   dumpOcrCrop(cropCanvas, processed, words, candidates, box, psm);
+  }
+  if(candidates.length) break;                     // valid BIB — don't pay for the next PSM
+ }
+ return { candidates, confByBib, hadDigits };
+}
+
 async function runSmartOCR(video, box, name){
  if(ocrBusy || !ocrReady || !tesseractWorker) return;
  ocrBusy=true;
  try{
-  // Crop geometry shared with the OCR debug overlay in processLoop
-  // via getOCRCropBox — must remain identical or the operator's
-  // visible rectangle won't match what Tesseract actually sees.
-  const {bx, by, bw, bh} = getOCRCropBox(box, video);
-  if(bw<=0 || bh<=0) return;
+  const { candidates, confByBib, hadDigits } = await ocrReadBib(video, box);
 
-  const cropCanvas=document.createElement("canvas");
-  cropCanvas.width=bw; cropCanvas.height=bh;
-  cropCanvas.getContext("2d").drawImage(video, bx, by, bw, bh, 0, 0, bw, bh);
-
-  // Adaptive threshold + 2× nearest-neighbor upscale on the crop. <1 ms.
-  const processed=preprocessForOCR(cropCanvas);
-
-  const result=await tesseractWorker.recognize(processed);
-  const rawText=String(result.data.text||"");
-  const conf=Number(result.data.confidence||0);
-
-  if(DEBUG) console.log("[debug] OCR", { name, rawText, conf });
-
-  // ── MULTIPLE BIBS (Cluttered Chest) ──
-  // Run on RAW text BEFORE digit-only normalization — once normalized,
-  // the whitespace separating distinct BIB blocks is gone (Guardrail 26).
-  // Two-or-more digits per block filters Tesseract single-digit
-  // artefacts; ≥2 distinct blocks fires the violation.
-  const blockRe = new RegExp("\\d{"+MULTIPLE_BIBS_MIN_BLOCK_LEN+",}", "g");
-  const blocks = rawText.match(blockRe) || [];
-  if (blocks.length >= MULTIPLE_BIBS_MIN_BLOCKS){
+  // ── MULTIPLE BIBS ── 2+ DISTINCT valid BIB-length words (Tesseract's
+  // own segmentation); single-digit / low-conf noise already filtered.
+  if (candidates.length >= MULTIPLE_BIBS_MIN_BLOCKS){
    const fired = tryFireViolation(name+":"+CP_KEY, {
-    name,
-    bib: "",                                          // BIB_PATTERN rejects commas; full list lives in message
-    message: `Multiple BIBs detected on ${name}: ${blocks.join(", ")}`,
+    name, bib: "",                                  // BIB_PATTERN rejects commas; full list in message
+    message: `Multiple BIBs detected on ${name}: ${candidates.join(", ")}`,
     violationType: "MULTIPLE_BIBS",
     image: captureFullFrame(video),
    });
-   if (fired){
-    ocrFailureCount[name] = 0;                       // a multi-bib read isn't a "failure"
-    return;
-   }
-   // Cooldown blocked it — fall through to normal validation. Better to
-   // try voting one of the bibs than drop the frame entirely.
+   if (fired){ ocrFailureCount[name] = 0; return; }
+   // cooldown blocked — fall through and vote the first candidate
   }
 
-  const text=rawText.replace(/[^0-9]/g,"").trim();
-
-  // ── VALIDATION GATE → Ghost BIB counter ──
-  // Failures used to silently return; now they feed the Ghost BIB counter.
-  // Empty text → NO_BIB; length/confidence fail → OBSCURED_BIB.
-  let failureKind = null;
-  if (!text) failureKind = "empty";
-  else if (text.length < BIB_MIN_LEN || text.length > BIB_MAX_LEN || conf < OCR_MIN_CONFIDENCE)
-   failureKind = "low_quality";
-
-  if (failureKind){
+  // ── No valid candidate → Ghost BIB counter ──
+  // No digits at all → NO_BIB; digits seen but failed length/conf → OBSCURED_BIB.
+  if (candidates.length === 0){
+   const failureKind = hadDigits ? "low_quality" : "empty";
    ocrFailureCount[name] = (ocrFailureCount[name]||0) + 1;
    ocrLastFailureKind[name] = failureKind;
    if (ocrFailureCount[name] >= NO_BIB_AFTER_FAILURES){
     const expected = runnerRegistry[name] || "";
-    const violationType = ocrLastFailureKind[name] === "empty" ? "NO_BIB" : "OBSCURED_BIB";
+    const violationType = failureKind === "empty" ? "NO_BIB" : "OBSCURED_BIB";
     const fired = tryFireViolation(name+":"+CP_KEY, {
      name, bib: expected,
      message: violationType==="NO_BIB"
@@ -898,27 +1077,24 @@ async function runSmartOCR(video, box, name){
      violationType,
      image: captureFullFrame(video),
     });
-    if (fired) ocrFailureCount[name] = 0;            // reset; next 5 failures can re-trigger after the 60 s cooldown
+    if (fired) ocrFailureCount[name] = 0;
    }
    return;
   }
 
-  // Validation passed — clear failure state before the vote.
+  // ── Valid read — clear failure state, then vote ──
   ocrFailureCount[name] = 0;
   ocrLastFailureKind[name] = null;
-
-  // Cast vote. Returns the consensus BIB (or null if not yet reached).
-  const consensus=castVote(name, text, conf);
-  if(DEBUG) console.log("[debug] vote", { name, text, conf,
-   buffer: (ocrVotes[name]||[]).length, consensus });
+  const readBib = candidates[0];
+  const consensus = castVote(name, readBib, confByBib[readBib]||0);
+  if(DEBUG) console.log("[debug] vote", { name, readBib, buffer:(ocrVotes[name]||[]).length, consensus });
   if(!consensus) return;
 
   const expectedBib=runnerRegistry[name];
   if(expectedBib && consensus !== expectedBib){
-   // Registered face A wearing a BIB that isn't A's → cheating. Shares
-   // the single name cooldown bucket with NO_BIB / OBSCURED_BIB /
-   // MULTIPLE_BIBS (Guardrail 25). On a fresh fire, flag A in
-   // Results.IsCheating so the leaderboard shows 🚨.
+   // Registered face A wearing a BIB that isn't A's → cheating. Shares the
+   // single name cooldown bucket with NO_BIB / OBSCURED_BIB / MULTIPLE_BIBS
+   // (Guardrail 25). On a fresh fire, flag A in Results.IsCheating (🚨).
    const fired = tryFireViolation(name+":"+CP_KEY, {
     name, bib: consensus,
     message: `Expected BIB ${expectedBib}, Found ${consensus}`,
@@ -929,6 +1105,50 @@ async function runSmartOCR(video, box, name){
   }
  }catch(e){console.warn("OCR error:",e)}
  finally{ocrBusy=false}
+}
+
+// OCR debug crop dump (?debug=1 only) — mirror of photo_scanner.html. Per
+// face + PSM pass: the raw chest crop, the thresholded crop Tesseract saw,
+// the per-word reads (`text@conf`), the picked BIB, and the PSM. This is
+// the diagnostic that cracked the scanner's OCR — use it to tell a
+// geometry miss (BIB not in the raw crop) from a preprocessing failure
+// (blobs in the thresholded crop) from a recognition failure (clean crop,
+// bad read). No-op unless DEBUG. Tesseract output is untrusted → built via
+// textContent, never innerHTML (Guardrail 7).
+function dumpOcrCrop(rawCanvas, processedCanvas, words, candidates, box, psm){
+ let panel = document.getElementById("ocr-debug-panel");
+ if (!panel){
+  panel = document.createElement("div");
+  panel.id = "ocr-debug-panel";
+  panel.style.cssText = "position:fixed;right:8px;bottom:8px;width:360px;max-height:60vh;overflow:auto;z-index:99999;background:rgba(0,0,0,.88);border:1px solid #555;border-radius:8px;padding:8px;font:11px ui-monospace,monospace;color:#ddd";
+  panel.innerHTML = '<div style="font-weight:700;margin-bottom:6px">🔍 OCR DEBUG — raw | thresholded | per-word</div>';
+  document.body.appendChild(panel);
+ }
+ const row = document.createElement("div");
+ row.style.cssText = "display:flex;gap:6px;align-items:flex-start;border-top:1px solid #333;padding:5px 0";
+ const raw = document.createElement("img");
+ raw.src = rawCanvas.toDataURL(); raw.style.cssText = "height:54px;border:1px solid #555;background:#222";
+ const proc = document.createElement("img");
+ proc.src = processedCanvas.toDataURL(); proc.style.cssText = "height:54px;border:1px solid #555;background:#fff";
+ const txt = document.createElement("div");
+ txt.style.cssText = "flex:1;min-width:0;word-break:break-all";
+ const faceWH = box ? `${Math.round(box.width)}×${Math.round(box.height)}` : "?";
+ const pickedLine = document.createElement("div");
+ const pickedVal = document.createElement("b");
+ pickedVal.style.color = (candidates && candidates.length) ? "#7CFC9A" : "#ff7a7a";
+ pickedVal.textContent = (candidates && candidates.length) ? candidates.join(", ") : "—";
+ pickedLine.append("BIB: ", pickedVal);
+ const wordsLine = document.createElement("div");
+ wordsLine.style.color = "#9fb3c8";
+ wordsLine.textContent = "words: " + ((words && words.length)
+   ? words.map(w=>`${String(w.text).replace(/\s+/g,"")}@${Math.round(w.conf)}`).join(" ") : "(none)");
+ const metaLine = document.createElement("div");
+ metaLine.style.color = "#888";
+ metaLine.textContent = `psm: ${psm} · face: ${faceWH}px`;
+ txt.append(pickedLine, wordsLine, metaLine);
+ row.appendChild(raw); row.appendChild(proc); row.appendChild(txt);
+ panel.insertBefore(row, panel.children[1] || null);
+ while (panel.children.length > 25) panel.removeChild(panel.lastChild);
 }
 
 // ── CHECKPOINT RECORDING ──
@@ -1005,17 +1225,10 @@ async function runUnknownBibCheck(video, box){
  if(ocrBusy || !ocrReady || !tesseractWorker) return;
  ocrBusy=true;
  try{
-  const {bx,by,bw,bh}=getOCRCropBox(box, video);   // same crop geometry as known-face OCR
-  if(bw<=0||bh<=0) return;
-  const cropCanvas=document.createElement("canvas");
-  cropCanvas.width=bw; cropCanvas.height=bh;
-  cropCanvas.getContext("2d").drawImage(video, bx, by, bw, bh, 0, 0, bw, bh);
-  const processed=preprocessForOCR(cropCanvas);
-  const result=await tesseractWorker.recognize(processed);
-  const conf=Number(result.data.confidence||0);
-  const text=String(result.data.text||"").replace(/[^0-9]/g,"").trim();
-  if(!text || text.length<BIB_MIN_LEN || text.length>BIB_MAX_LEN || conf<OCR_MIN_CONFIDENCE) return;
-  const consensus=castVote("__unknown__", text, conf);   // reuse the multi-frame voter
+  const { candidates, confByBib } = await ocrReadBib(video, box);   // same word-level reader as known faces
+  if(!candidates.length) return;
+  const read=candidates[0];
+  const consensus=castVote("__unknown__", read, confByBib[read]||0);   // reuse the multi-frame voter
   if(!consensus) return;
   const owner=bibToOwner[consensus];
   if(!owner) return;                                 // not a registered BIB → leave it to UNREGISTERED
