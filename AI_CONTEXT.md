@@ -9,6 +9,64 @@
 > cadence, caching, or guardrails MUST update this file in the same change
 > set.
 >
+> **Last updated:** 2026-05-22 — **Form intake: a combined "Name-Surname"
+> question no longer doubles the name (backfill bug fix).** A real form used
+> a SINGLE `"ชื่อ-นามสกุล (Name-Surname)"` question (whole name in one
+> field), but `processFormSubmission` read `name` and `surname`
+> independently — and that one title matches BOTH candidate sets
+> (`"name"`/`"ชื่อ"` AND `"surname"`/`"นามสกุล"` are all substrings), so the
+> SAME column was read twice and the key doubled (`"Chakapol
+> Chandsawangbhuwana Chakapol Chandsawangbhuwana"`) → tripped the >50-char
+> and `NAME_PATTERN` guards → EVERY backfill row skipped (`inserted: 0`).
+> Fix: `formFirstValue` is now a thin wrapper over new `formFirstMatch`
+> (returns `{value, key}`, accepts an `excludeKeys` list); new
+> `resolveRunnerName(nv)` resolves the name first, then looks up the surname
+> EXCLUDING the name's own column — a combined field yields `first=<full
+> name>, last=""` (no phantom surname), while a genuinely separate surname
+> column is still found. BOTH the live trigger and the
+> `_backfillExistingResponses` pre-skip route through `resolveRunnerName`
+> (one path, can't drift). Combined titles were added to
+> `FORM_FIELD_MAP.name`, and the "unsupported characters" skip log now
+> prints the actual name instead of `[object Object]`. Verified with a Node
+> harness against the real column titles (name not doubled; bib/email/photos
+> resolve; all 5 photo IDs extracted in order; separate first+surname form
+> still works). A one-shot `_cleanupDoubledRunnerNames(commit)` (DRY-RUN by
+> default; `isDoubledName_` flags an exact two-identical-halves `"X X"`
+> name) removes the doubled rows + their now-empty folders left by the buggy
+> prior run — run it AFTER the re-backfill, which moves the photos out by
+> file ID into the correct-named folder. A folder-only companion
+> `_cleanupEmptyDoubledFolders(commit)` (also dry-run by default) trashes
+> doubled-name folders directly under RunnerFaces ONLY when EMPTY — it never
+> deletes a folder that still holds photos. Updates §4.8. Files:
+> `apps_script/FormIntake.gs`.
+>
+> **Last updated:** 2026-05-22 — **Form intake accepts ONE multi-file
+> photo question (all 5 faces in a single upload), not only 5 separate
+> per-angle questions.** Most self-registration Forms collect the face
+> photos with a SINGLE file-upload question (max 5 files), but
+> `FormIntake.gs` previously read only five SEPARATE per-angle questions
+> (`photo_front…right`), and `extractDriveFileId` returns just the FIRST
+> match — so a one-question form filed only 1 of the 5 photos. Google packs
+> a multi-file answer into one response cell as comma-separated
+> `…/open?id=<ID>` URLs; the new `extractDriveFileIds` (plural — one global
+> regex over the `?id=` / `/file/d/` / `/d/` forms, de-duped,
+> order-preserving) pulls EVERY id. `processFormSubmission` now tries the
+> new `FORM_FIELD_MAP.photos` question FIRST and fills the 5 angle slots
+> positionally in upload order, falling back to the per-angle questions
+> only when `photos` matches nothing (BOTH shapes supported). The angle
+> label is purely NOMINAL on this path (the 5 files are unordered) — safe
+> because the scanner's pre-scan auto-enroll averages descriptors across
+> all angle photos (§4.7), so a "front"-slotted left photo costs nothing.
+> A 6th+ file is still moved into `RunnerFaces/<name>/` (named generically)
+> so none orphan in "(File responses)", but only the first 5 get `Photo_*`
+> columns (the schema has exactly 5). The move/share/rename body is
+> extracted into a shared `moveAndShareRunnerPhoto_`; `findResponsesSheet_`
+> now also recognizes the `photos` column when auto-detecting the responses
+> tab for `_backfillExistingResponses`. The `photos` candidate titles
+> deliberately omit the bare word `Photo`/`รูป` so a substring match can't
+> steal a per-angle `Photo Front` title in the fallback shape. Updates
+> §4.8. Files: `apps_script/FormIntake.gs`.
+>
 > **Last updated:** 2026-05-22 — **Thai names supported (NAME_PATTERN
 > widened).** Supersedes the ASCII-slugify half of the same-day entry
 > below: names are NO LONGER stripped to ASCII. `Runners.Name` — the
@@ -1579,8 +1637,13 @@ handleFormSubmit(e):            ← installable trigger, e = spreadsheet form-su
   nv = e.namedValues            ← { "Question title": ["answer", …] }
 
   ── 1) identity ──
-  first = formFirstValue(nv, FORM_FIELD_MAP.name)    ← exact-then-substring title match
-  last  = formFirstValue(nv, FORM_FIELD_MAP.surname) ← optional surname field
+  {first, last} = resolveRunnerName(nv)   ← resolves name, THEN surname EXCLUDING the
+                                            name's own column, so a COMBINED "ชื่อ-นามสกุล
+                                            (Name-Surname)" question (whole name in one
+                                            field) isn't read twice — reading it twice
+                                            doubled the key ("John Smith John Smith") and
+                                            skipped every backfill row. Separate first +
+                                            surname fields still both resolve.
   abort (log only) if (first+last) is empty, or raw length > 50 (junk paste)
   name  = normalizeName([first, last])              ← collapse spaces+trim+cap50, case/Thai kept
   abort (log only) if !NAME_PATTERN.test(name)      ← emoji/other scripts → skip
@@ -1591,15 +1654,25 @@ handleFormSubmit(e):            ← installable trigger, e = spreadsheet form-su
   root         = getRootFolder(RUNNER_FACES_FOLDER)
   personFolder = getOrCreateFolder(root, name)      ← LockService-protected, shared on create
 
-  ── 3) move + share + rename the 5 angle photos ──
-  for angle in [front, top, bottom, left, right]:
-    fileId = extractDriveFileId( formFirstValue(nv, FORM_FIELD_MAP["photo_"+angle]) )
-             ← Form upload answers are drive.google.com/open?id=<ID> URLs
-    file.moveTo(personFolder)                        ← out of "(File responses)"
-    file.setName(name+"_"+angle+"_"+ts+".jpg")
-    file.setSharing(ANYONE_WITH_LINK, VIEW)          ← so the lh3 Photo_* URL renders (Guardrail 11)
-    photoUrls[angle] = DRIVE_THUMBNAIL_URL(fileId, 800)
-    (each photo isolated in try-catch — one bad file never blocks the rest)
+  ── 3) move + share + rename the face photos ──  (single-question shape tried FIRST)
+  ids = extractDriveFileIds( formFirstValue(nv, FORM_FIELD_MAP.photos) )
+        ← a SINGLE multi-file question packs all 5 uploads into one cell as
+          comma-separated drive.google.com/open?id=<ID> URLs; the plural
+          extractor pulls EVERY id (extractDriveFileId saw only the first)
+  if ids.length > 0:                                 ← (a) PRIMARY shape
+    for i, fileId in ids:
+      angle = [front,top,bottom,left,right][i]  or  "photo"+(i+1) for a 6th+ file
+      moveAndShareRunnerPhoto_(personFolder, name, angle, fileId)
+        → file.moveTo(personFolder); setName(name_angle_ts.jpg); setSharing(ANYONE,VIEW)
+      photoUrls[angle] = DRIVE_THUMBNAIL_URL(fileId, 800)   (only first 5 → Photo_* cols)
+    ← files are UNORDERED, so angle is positional/nominal — fine because
+      embeddings average across all angles (§4.7); 6th+ file still filed,
+      just no column
+  else:                                              ← (b) FALLBACK shape
+    for angle in [front, top, bottom, left, right]:
+      fileId = extractDriveFileId( formFirstValue(nv, FORM_FIELD_MAP["photo_"+angle]) )
+      photoUrls[angle] = moveAndShareRunnerPhoto_(personFolder, name, angle, fileId)
+  (each photo isolated in try-catch — one bad file never blocks the rest)
 
   ── 4) upsert the Runners row ──
   rowData = [name, bib, email, ISO-now,
@@ -1611,11 +1684,18 @@ handleFormSubmit(e):            ← installable trigger, e = spreadsheet form-su
 ```
 
 **Field mapping is configurable.** `FORM_FIELD_MAP` maps each logical
-field (`name`, `surname`, `bib`, `email`, `photo_front…right`) to a list
-of candidate question titles; `formFirstValue` matches case-insensitively
-(exact first, then substring) so "Your Name" or "BIB number (1-9999)"
-still resolve. Edit the map to your form's exact wording — the EN/TH
-defaults are a starting point, not a contract.
+field (`name`, `surname`, `bib`, `email`, `photos`, `photo_front…right`)
+to a list of candidate question titles; `formFirstValue` matches
+case-insensitively (exact first, then substring) so "Your Name" or "BIB
+number (1-9999)" still resolve. Edit the map to your form's exact wording
+— the EN/TH defaults are a starting point, not a contract. **Two photo
+shapes are supported** (2026-05-22): `photos` is the PRIMARY single
+multi-file upload question (all 5 faces in one question — what most
+self-registration forms use); `photo_front…right` are a FALLBACK of five
+separate per-angle questions, tried only when `photos` matches nothing.
+The `photos` candidates deliberately omit the bare word `Photo`/`รูป` so a
+substring match can't steal a per-angle `Photo Front` title in the
+fallback shape.
 
 **Name = first + optional surname, normalized (Thai-capable).** The
 `Runners.Name` key is built by `normalizeName([first, last])`: join the

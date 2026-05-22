@@ -15,8 +15,10 @@
 //   This onFormSubmit trigger does the per-person organization the
 //   FolderUrl column in the Runners schema implies. On every submission
 //   it:
-//     1) reads Name / BIB / Email + the 5 angle photo uploads from
-//        e.namedValues (spreadsheet-bound form-submit event),
+//     1) reads Name / BIB / Email + the face photos from e.namedValues
+//        (spreadsheet-bound form-submit event) — either ONE multi-file
+//        upload question holding all 5 (tried first) OR five separate
+//        per-angle questions (fallback); see FORM_FIELD_MAP,
 //     2) creates (or reuses) RunnerFaces/<name>/ — the per-person
 //        folder, shared ANYONE_WITH_LINK/VIEW (getOrCreateFolder),
 //     3) moves each uploaded photo into that folder, shares it (so the
@@ -61,16 +63,40 @@
 // CONFIG — edit FORM_FIELD_MAP below so the candidate titles match your
 //   form's EXACT question wording. Matching is case-insensitive +
 //   trimmed, with a substring fallback, but exact titles are safest.
+//   PHOTOS: the primary shape is ONE multi-file question
+//   (FORM_FIELD_MAP.photos) holding all 5 face photos; the five per-angle
+//   questions are a fallback used only if that question matches nothing.
+//   The single question's files fill the angle slots positionally (upload
+//   order) — fine because embeddings average across all angles (§4.7).
 // ============================================================
 
 // Each logical field → the form question title(s) that may carry it.
 // First match wins (exact case-insensitive first, then substring).
 // Add your form's real question titles here if they differ.
 const FORM_FIELD_MAP = Object.freeze({
-  name:         ["First Name", "Firstname", "Name", "Username", "ชื่อจริง", "ชื่อ", "ชื่อผู้ใช้", "ชื่อนักวิ่ง"],
+  // Accepts a COMBINED "ชื่อ-นามสกุล (Name-Surname)" question (whole name
+  // in one field) as well as a first-name-only field. resolveRunnerName
+  // makes sure a combined field isn't ALSO read as the surname (which would
+  // double the name) — see that function + the `surname` note below.
+  name:         ["ชื่อ-นามสกุล", "ชื่อ-สกุล", "ชื่อ นามสกุล", "ชื่อ-นามสกุล (Name-Surname)", "Name-Surname", "Full Name", "First Name", "Firstname", "Name", "Username", "ชื่อจริง", "ชื่อ", "ชื่อผู้ใช้", "ชื่อนักวิ่ง"],
   surname:      ["Last Name", "Lastname", "Surname", "นามสกุล", "สกุล"],
   bib:          ["BIB", "Bib Number", "BibNumber", "หมายเลข BIB", "เลข BIB", "เบอร์วิ่ง"],
   email:        ["Email", "E-mail", "อีเมล"],
+
+  // PRIMARY shape — ONE multi-file upload question holding ALL 5 face
+  // photos. Tried BEFORE the per-angle questions below. Google packs the
+  // uploads into a SINGLE response cell as a comma-separated list of Drive
+  // URLs; they carry no per-angle label, so they fill front→…→right
+  // positionally in upload order (the label is purely nominal downstream —
+  // embeddings average across all 5 regardless; see AI_CONTEXT.md
+  // §4.7/§4.8). Set this to your form's EXACT question title (substring
+  // also matches). Deliberately excludes the bare word "Photo"/"รูป" so it
+  // can't substring-collide with a per-angle "Photo Front" title when the
+  // fallback shape is in use.
+  photos:       ["Face Photos", "Photos of Faces", "5 Photos of Faces", "Upload Photos", "Photos", "5 Photos", "รูปถ่ายใบหน้า 5 รูป", "รูปถ่ายใบหน้า", "รูปใบหน้า", "อัปโหลดรูปใบหน้า", "ใบหน้า"],
+
+  // FALLBACK shape — five SEPARATE per-angle upload questions (the original
+  // layout). Used only when `photos` above matches no uploaded files.
   photo_front:  ["Front", "Photo Front", "รูปหน้าตรง", "หน้าตรง"],
   photo_top:    ["Top", "Photo Top", "รูปมุมบน", "มุมบน", "เงยหน้า"],
   photo_bottom: ["Bottom", "Photo Bottom", "รูปมุมล่าง", "มุมล่าง", "ก้มหน้า"],
@@ -122,8 +148,11 @@ function processFormSubmission(nv) {
   // fine — the backend NAME_PATTERN (widened 2026-05-22) accepts the
   // Thai block + spaces. This replaced the old slugify-to-ASCII rule,
   // which dropped Thai names and forced "first_last" underscores.
-  const first = formFirstValue(nv, FORM_FIELD_MAP.name);
-  const last  = formFirstValue(nv, FORM_FIELD_MAP.surname);
+  // resolveRunnerName handles BOTH a combined "ชื่อ-นามสกุล" question and
+  // separate first/surname fields without doubling the name.
+  const nameParts = resolveRunnerName(nv);
+  const first = nameParts.first;
+  const last  = nameParts.last;
   const rawName = [first, last].filter(p => p && String(p).trim()).join(" ").replace(/\s+/g, " ").trim();
   if (!rawName) {
     logErr("processFormSubmission: no Name question matched FORM_FIELD_MAP.name", Object.keys(nv));
@@ -140,8 +169,8 @@ function processFormSubmission(nv) {
   const name = normalizeName([first, last]);   // Thai + spaces preserved
   if (!NAME_PATTERN.test(name)) {
     // Survives only ASCII/Thai/space/_-. — emoji or other scripts fail.
-    logErr("processFormSubmission: name has unsupported characters, skipped",
-      { raw: rawName, normalized: name });
+    logErr("processFormSubmission: name has unsupported characters, skipped: raw='"
+      + rawName + "' normalized='" + name + "'");
     return { status: "skipped", reason: "bad_name" };
   }
 
@@ -155,27 +184,35 @@ function processFormSubmission(nv) {
   const root = getRootFolder(RUNNER_FACES_FOLDER);
   const personFolder = getOrCreateFolder(root, name);
 
-  // ── 3) Move + share + rename each angle photo; build Photo_* URLs ──
+  // ── 3) Move + share + rename the face photos; build Photo_* URLs ──
+  // Two supported form shapes; the single-question shape is tried first.
+  //   (a) PRIMARY — ONE multi-file upload question (FORM_FIELD_MAP.photos)
+  //       holding all 5 photos. Google packs them into a single response
+  //       cell as comma-separated Drive URLs, so extractDriveFileIds pulls
+  //       EVERY ID (extractDriveFileId would see only the first). The files
+  //       have no per-angle label, so they fill front→top→bottom→left→right
+  //       positionally in upload order — the angle name is purely nominal
+  //       (embeddings average across all angles; see §4.7/§4.8). A 6th+
+  //       file is still moved into the folder (named generically) so
+  //       nothing is orphaned in the shared "(File responses)" folder, but
+  //       only the first 5 get a Photo_* column (the schema has exactly 5).
+  //   (b) FALLBACK — five SEPARATE per-angle questions (original layout),
+  //       used only when (a) matched no files.
   const photoUrls = { front: "", top: "", bottom: "", left: "", right: "" };
-  for (let i = 0; i < FORM_PHOTO_ANGLES.length; i++) {
-    const angle = FORM_PHOTO_ANGLES[i];
-    const answer = formFirstValue(nv, FORM_FIELD_MAP["photo_" + angle]);
-    const fileId = extractDriveFileId(answer);   // handles drive.google.com/open?id=…
-    if (!fileId) continue;
-    try {
-      const file = DriveApp.getFileById(fileId);
-      file.moveTo(personFolder);                 // out of "(File responses)" into RunnerFaces/<name>/
-      file.setName(name + "_" + angle + "_" + Date.now() + ".jpg");
-      try {
-        file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
-      } catch (se) {
-        logErr("formSubmit setSharing " + angle, se);   // non-fatal — URL may still render if folder is shared
-      }
-      photoUrls[angle] = DRIVE_THUMBNAIL_URL(fileId, 800);
-    } catch (fe) {
-      // Per-photo isolation (Guardrail 2 spirit) — a single bad file
-      // never blocks the rest of the photos or the sheet write.
-      logErr("formSubmit move/share photo " + angle + " (" + fileId + ")", fe);
+  const combinedIds = extractDriveFileIds(formFirstValue(nv, FORM_FIELD_MAP.photos));
+  if (combinedIds.length > 0) {
+    for (let i = 0; i < combinedIds.length; i++) {
+      const angle = (i < FORM_PHOTO_ANGLES.length) ? FORM_PHOTO_ANGLES[i] : ("photo" + (i + 1));
+      const url = moveAndShareRunnerPhoto_(personFolder, name, angle, combinedIds[i]);
+      if (url && i < FORM_PHOTO_ANGLES.length) photoUrls[angle] = url;
+    }
+    logInfo("formSubmit photos (single multi-file question)", { name: name, count: combinedIds.length });
+  } else {
+    for (let i = 0; i < FORM_PHOTO_ANGLES.length; i++) {
+      const angle = FORM_PHOTO_ANGLES[i];
+      const fileId = extractDriveFileId(formFirstValue(nv, FORM_FIELD_MAP["photo_" + angle]));
+      if (!fileId) continue;
+      photoUrls[angle] = moveAndShareRunnerPhoto_(personFolder, name, angle, fileId);
     }
   }
 
@@ -238,34 +275,65 @@ function normalizeName(parts) {
 }
 
 /**
- * Find the first non-empty answer among any candidate question titles.
- * `namedValues` maps title → array of answers. Tries exact
- * (case-insensitive, trimmed) across all keys first, then substring.
+ * Find the first non-empty answer among any candidate question titles AND
+ * report which question title (key) it came from. `namedValues` maps title
+ * → array of answers. Tries exact (case-insensitive, trimmed) across all
+ * keys first, then substring. `excludeKeys` (optional) lists keys to skip —
+ * used so a COMBINED "ชื่อ-นามสกุล (Name-Surname)" question that matches
+ * both the name and surname candidates isn't read twice (which would double
+ * the name; see resolveRunnerName).
+ *
+ * Returns { value, key }; { value:"", key:null } when nothing matched.
  */
-function formFirstValue(namedValues, candidates) {
-  if (!namedValues || !candidates) return "";
+function formFirstMatch(namedValues, candidates, excludeKeys) {
+  const NONE = { value: "", key: null };
+  if (!namedValues || !candidates) return NONE;
   const keys = Object.keys(namedValues);
-  // Pass 1: exact, case-insensitive, trimmed.
-  for (let c = 0; c < candidates.length; c++) {
-    const want = String(candidates[c]).trim().toLowerCase();
-    for (let k = 0; k < keys.length; k++) {
-      if (String(keys[k]).trim().toLowerCase() === want) {
-        const v = firstNonEmpty(namedValues[keys[k]]);
-        if (v) return v;
+  const excluded = {};
+  if (excludeKeys) for (let i = 0; i < excludeKeys.length; i++) excluded[String(excludeKeys[i])] = true;
+  // pass 0 = exact (case-insensitive, trimmed); pass 1 = substring (handles
+  // "Your Name", "BIB number (1-9999)", …). Same precedence as before: ALL
+  // candidates scanned exact, THEN all scanned substring.
+  for (let pass = 0; pass < 2; pass++) {
+    for (let c = 0; c < candidates.length; c++) {
+      const want = String(candidates[c]).trim().toLowerCase();
+      if (!want) continue;
+      for (let k = 0; k < keys.length; k++) {
+        if (excluded[keys[k]]) continue;
+        const hay = String(keys[k]).trim().toLowerCase();
+        if (pass === 0 ? (hay === want) : (hay.indexOf(want) > -1)) {
+          const v = firstNonEmpty(namedValues[keys[k]]);
+          if (v) return { value: v, key: keys[k] };
+        }
       }
     }
   }
-  // Pass 2: substring (handles "Your Name", "BIB number (1-9999)", …).
-  for (let c = 0; c < candidates.length; c++) {
-    const want = String(candidates[c]).trim().toLowerCase();
-    for (let k = 0; k < keys.length; k++) {
-      if (String(keys[k]).trim().toLowerCase().indexOf(want) > -1) {
-        const v = firstNonEmpty(namedValues[keys[k]]);
-        if (v) return v;
-      }
-    }
-  }
-  return "";
+  return NONE;
+}
+
+/** Convenience wrapper: just the value of formFirstMatch (no exclusions). */
+function formFirstValue(namedValues, candidates) {
+  return formFirstMatch(namedValues, candidates, null).value;
+}
+
+/**
+ * Resolve the runner's name parts from a submission, correctly handling a
+ * form that puts the WHOLE name in ONE question ("ชื่อ-นามสกุล
+ * (Name-Surname)") as well as a form with separate first/surname fields.
+ *
+ * A combined field matches BOTH FORM_FIELD_MAP.name and .surname (it holds
+ * both "name" and "surname" / "ชื่อ" and "นามสกุล"), so reading them
+ * independently used to grab the SAME column twice and double the name
+ * ("John Smith John Smith" → "too long"/garbage, the original backfill
+ * bug). Fix: resolve the name first, then look up the surname EXCLUDING the
+ * name's own column — a combined field yields first=<full name>, last=""
+ * (no phantom surname); a genuinely separate surname column is still found.
+ */
+function resolveRunnerName(nv) {
+  const nameMatch = formFirstMatch(nv, FORM_FIELD_MAP.name, null);
+  const surnameMatch = formFirstMatch(nv, FORM_FIELD_MAP.surname,
+    nameMatch.key ? [nameMatch.key] : null);
+  return { first: nameMatch.value, last: surnameMatch.value };
 }
 
 /** First trimmed non-empty entry of a namedValues answer array. */
@@ -277,6 +345,61 @@ function firstNonEmpty(arr) {
     if (s) return s;
   }
   return "";
+}
+
+/**
+ * Extract EVERY Drive file ID from a single Form answer. A multi-file
+ * upload question stores all of its uploaded files in ONE response cell as
+ * a comma-separated list of Drive URLs
+ * ("https://drive.google.com/open?id=ID1, …?id=ID2, …"), so the
+ * single-match extractDriveFileId (Code.gs) would only ever see the FIRST
+ * file. Returns a de-duplicated, order-preserving array (possibly empty);
+ * order matters — it becomes the front→…→right angle assignment upstream.
+ *
+ * Accepts the raw answer as a string OR an array of strings (joined first),
+ * so it is robust to either namedValues representation.
+ */
+function extractDriveFileIds(answer) {
+  if (answer == null) return [];
+  const s = Array.isArray(answer) ? answer.join(",") : String(answer);
+  // One global pass over the three URL forms extractDriveFileId knows:
+  //   ?id=<id> / &id=<id>,  /file/d/<id>,  /d/<id> (lh3 + bare). Ordered so
+  //   the longer /file/d/ wins before the looser /d/ at the same position.
+  const re = /(?:[?&]id=|\/file\/d\/|\/d\/)([-\w]{25,})/g;
+  const ids = [];
+  const seen = {};
+  let m;
+  while ((m = re.exec(s)) !== null) {
+    if (!seen[m[1]]) { seen[m[1]] = true; ids.push(m[1]); }
+  }
+  return ids;
+}
+
+/**
+ * Move ONE uploaded photo out of the Form's shared "(File responses)"
+ * folder into RunnerFaces/<name>/, rename it <name>_<angle>_<ts>.jpg, and
+ * share it ANYONE_WITH_LINK/VIEW so its lh3 Photo_* URL renders
+ * (Guardrail 11). Returns the thumbnail URL, or "" on any failure.
+ *
+ * Per-photo isolation (Guardrail 2 spirit): a single bad file is logged
+ * and swallowed so it never blocks the other photos or the sheet write.
+ * Shared by both the single-question and per-angle intake paths.
+ */
+function moveAndShareRunnerPhoto_(personFolder, name, angle, fileId) {
+  try {
+    const file = DriveApp.getFileById(fileId);
+    file.moveTo(personFolder);                 // out of "(File responses)"
+    file.setName(name + "_" + angle + "_" + Date.now() + ".jpg");
+    try {
+      file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+    } catch (se) {
+      logErr("formSubmit setSharing " + angle, se);   // non-fatal if folder is shared
+    }
+    return DRIVE_THUMBNAIL_URL(fileId, 800);
+  } catch (fe) {
+    logErr("formSubmit move/share photo " + angle + " (" + fileId + ")", fe);
+    return "";
+  }
 }
 
 /**
@@ -352,10 +475,8 @@ function _backfillExistingResponses(sheetName) {
     for (let c = 0; c < headers.length; c++) nv[headers[c]] = [data[r][c]];
 
     // Pre-skip if this runner already exists (don't touch their photos).
-    const key = normalizeName([
-      formFirstValue(nv, FORM_FIELD_MAP.name),
-      formFirstValue(nv, FORM_FIELD_MAP.surname),
-    ]);
+    const rn = resolveRunnerName(nv);
+    const key = normalizeName([rn.first, rn.last]);
     if (key && existing[key]) { skipped++; continue; }
 
     try {
@@ -402,9 +523,10 @@ function findResponsesSheet_(ss) {
     for (let c = 0; c < headers.length; c++) probe[String(headers[c])] = [String(headers[c])];
     const hasName = formFirstValue(probe, FORM_FIELD_MAP.name) !== "";
     if (!hasName) continue;
-    const hasPhoto = FORM_PHOTO_ANGLES.some(function (a) {
-      return formFirstValue(probe, FORM_FIELD_MAP["photo_" + a]) !== "";
-    });
+    const hasPhoto = formFirstValue(probe, FORM_FIELD_MAP.photos) !== ""
+      || FORM_PHOTO_ANGLES.some(function (a) {
+        return formFirstValue(probe, FORM_FIELD_MAP["photo_" + a]) !== "";
+      });
     if (hasPhoto) return sh;                 // strongest signal — done
     if (!nameOnlyMatch) nameOnlyMatch = sh;  // fall back to name-only
   }
@@ -414,4 +536,124 @@ function findResponsesSheet_(ss) {
 /** Quoted, comma-separated list of every tab name (for error messages). */
 function listSheetNames_(ss) {
   return ss.getSheets().map(function (s) { return '"' + s.getName() + '"'; }).join(", ");
+}
+
+/**
+ * True iff `name` is exactly two identical halves split by one space
+ * ("John Smith John Smith") — the artifact of the pre-2026-05-22
+ * combined-"Name-Surname" doubling bug.
+ */
+function isDoubledName_(name) {
+  if (!name || name.length % 2 === 0) return false;   // "<p> <p>" has odd length
+  const half = (name.length - 1) / 2;
+  if (name.charAt(half) !== " ") return false;
+  const a = name.slice(0, half), b = name.slice(half + 1);
+  return a.length > 0 && a === b;
+}
+
+/**
+ * One-shot cleanup for the doubled-name rows created BEFORE the 2026-05-22
+ * combined-"Name-Surname" fix (see AI_CONTEXT.md). Finds Runners rows whose
+ * Name is exactly "X X" (two identical halves) and, when commit===true,
+ * trashes that runner's RunnerFaces/<name> folder and deletes the row.
+ *
+ * ⚠️ RUN ORDER MATTERS:
+ *   1) deploy the fix, 2) run _backfillExistingResponses() FIRST — it
+ *   recreates each runner under the CORRECT single name and MOVES the photos
+ *   out of the doubled folder by file ID, leaving it empty — 3) THEN run
+ *   this. Running it before the re-backfill would trash folders that still
+ *   hold the only copy of the photos.
+ *
+ * DRY RUN by default: _cleanupDoubledRunnerNames() only LOGS what it would
+ * remove. Review that list, then delete for real with
+ * _cleanupDoubledRunnerNames(true).
+ */
+function _cleanupDoubledRunnerNames(commit) {
+  const sheet = getSheet(SHEETS.RUNNERS);
+  const snap = readWholeSheet(sheet);
+  const hits = [];
+  for (let i = 0; i < snap.values.length; i++) {
+    const name = String(snap.values[i][0] || "").trim();
+    if (isDoubledName_(name)) hits.push({ rowNum: i + 2, name: name });   // +2: header + 1-based
+  }
+  if (!hits.length) { Logger.log("No doubled-name rows found — nothing to clean."); return; }
+
+  Logger.log((commit ? "DELETING " : "[DRY RUN] would delete ") + hits.length + " doubled-name row(s):");
+  for (let i = 0; i < hits.length; i++) Logger.log("  • " + hits[i].name);
+  if (!commit) {
+    Logger.log("Dry run only. After confirming the list (and AFTER running "
+      + "_backfillExistingResponses so the photos have moved out), delete for real with: "
+      + "_cleanupDoubledRunnerNames(true)");
+    return;
+  }
+
+  // Trash folders (best-effort) first, then delete rows BOTTOM-UP so the
+  // row indices don't shift mid-loop.
+  const root = getRootFolder(RUNNER_FACES_FOLDER);
+  for (let i = 0; i < hits.length; i++) {
+    try {
+      const it = root.getFoldersByName(hits[i].name);
+      while (it.hasNext()) it.next().setTrashed(true);
+    } catch (e) { logErr("cleanup trash folder " + hits[i].name, e); }
+  }
+  hits.sort(function (a, b) { return b.rowNum - a.rowNum; });
+  for (let i = 0; i < hits.length; i++) sheet.deleteRow(hits[i].rowNum);
+  invalidateRunners();
+  Logger.log("Cleanup done — removed " + hits.length + " doubled-name row(s) + their folders.");
+}
+
+/**
+ * One-shot: trash EMPTY doubled-name folders directly under RunnerFaces —
+ * the "ธนาภา ปิ่นทอง ธนาภา ปิ่นทอง" artifacts left by the pre-2026-05-22
+ * doubling bug. A folder is trashed ONLY when its name isDoubledName_ AND it
+ * is EMPTY (no files, no subfolders) — a doubled folder that still holds the
+ * only copy of someone's photos is KEPT, so this can never delete a photo.
+ * (To empty such a folder first, run _backfillExistingResponses: it moves
+ * the photos by file ID into the correct single-name folder.)
+ *
+ * DRY RUN by default — _cleanupEmptyDoubledFolders() only LOGS what it would
+ * remove + what it kept. Delete for real with
+ * _cleanupEmptyDoubledFolders(true).
+ */
+function _cleanupEmptyDoubledFolders(commit) {
+  const root = getRootFolder(RUNNER_FACES_FOLDER);
+  const folders = root.getFolders();
+  const toTrash = [];
+  let doubledSeen = 0, keptNonEmpty = 0;
+  while (folders.hasNext()) {
+    const f = folders.next();
+    const nm = String(f.getName()).trim();
+    if (!isDoubledName_(nm)) continue;
+    doubledSeen++;
+    const isEmpty = !f.getFiles().hasNext() && !f.getFolders().hasNext();
+    if (isEmpty) {
+      toTrash.push(f);
+      Logger.log((commit ? "TRASH " : "[dry run] would trash ") + "empty doubled folder: " + nm);
+    } else {
+      keptNonEmpty++;
+      Logger.log("KEEP (still has photos): " + nm + "  ← run _backfillExistingResponses to move them out first");
+    }
+  }
+  if (!doubledSeen) { Logger.log("No doubled-name folders found under RunnerFaces — nothing to clean."); return; }
+  if (!commit) {
+    Logger.log("[DRY RUN] " + toTrash.length + " empty doubled folder(s) would be trashed; "
+      + keptNonEmpty + " non-empty kept. To delete for real run: _cleanupEmptyDoubledFolders(true)");
+    return;
+  }
+  let trashed = 0;
+  for (let i = 0; i < toTrash.length; i++) {
+    try { toTrash[i].setTrashed(true); trashed++; }
+    catch (e) { logErr("trash folder " + toTrash[i].getName(), e); }
+  }
+  Logger.log("Done — trashed " + trashed + " empty doubled folder(s); kept " + keptNonEmpty + " that still have photos.");
+}
+
+/**
+ * No-arg wrapper so the editor's Run button (which can't pass arguments) can
+ * DELETE for real. Run the dry-run _cleanupEmptyDoubledFolders() first to
+ * preview, then select THIS function and Run to actually trash the empty
+ * doubled folders.
+ */
+function _cleanupEmptyDoubledFoldersCommit() {
+  _cleanupEmptyDoubledFolders(true);
 }
