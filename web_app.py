@@ -17,13 +17,15 @@ def dashboard():
 def register():
     return render_template('register.html')
 
-# Live recognition page retired 2026-05-17 in favor of the Drive Photo
-# Scanner (/scan). templates/checkpoint.html is kept on disk so live
-# mode can be reinstated by re-enabling this route, but the dashboard
-# no longer advertises it.
-# @app.route('/checkpoint')
-# def checkpoint():
-#     return render_template('checkpoint.html')
+# Live Checkpoint — real-time cheating-detection station (NO timing).
+# Restored 2026-05-22 (see AI_CONTEXT §4.2/§6.2). Identifies runners by
+# face, verifies the BIB, and flags WRONG_PERSON — including a stranger
+# wearing a registered runner's BIB — via reportViolation + markCheating,
+# with live per-type violation counters. Coexists with the Drive Scanner
+# (/scan); both share the identity-verification backend contract.
+@app.route('/checkpoint')
+def checkpoint():
+    return render_template('checkpoint.html')
 
 @app.route('/scan')
 def scan():

@@ -9,6 +9,32 @@
 > cadence, caching, or guardrails MUST update this file in the same change
 > set.
 >
+> **Last updated:** 2026-05-22 — **Live Checkpoint page revived as a
+> cheating-detection station (no timing).** `/checkpoint` is routed again
+> (`web_app.py`) and `templates/checkpoint.html` is realigned to the
+> post-pivot backend: `recordCP` now sends the `photo_verified` sentinel (a
+> real CP id would throw `schema_error` — the `Results` timing columns are
+> gone), and every WRONG_PERSON fire now also POSTs `markCheating` so the
+> leaderboard 🚨 badge lights up (it never did before). The CP selector
+> (Start/CP1-4/Finish) + `setCP` are removed; `checkpointId` → a constant
+> `CP_KEY="live"` cooldown suffix. NEW **stranger-BIB / bib-swap** check:
+> `runUnknownBibCheck` OCRs the largest UNKNOWN face and, if the consensus
+> digits exactly equal a registered BIB (`bibToOwner` — a new reverse map
+> built from ALL runners, incl. embedding-less form-only ones), fires
+> WRONG_PERSON attributed to that BIB's owner + `markCheating(owner)`; a
+> fresh fire soft-suppresses the intruder's plain UNREGISTERED via
+> `lastBibBorrowSec`. Random OCR noise can't fire it (must equal a real
+> BIB). NEW live per-type violation counters in the top bar
+> (`bumpViolationCount`, bumped inside `tryFireViolation` only on a real
+> fire). The registered-face WRONG_PERSON / NO_BIB / OBSCURED_BIB /
+> MULTIPLE_BIBS / UNREGISTERED pipeline + OCR consensus voting are
+> unchanged; the dashboard's existing `#type-filter` still categorizes the
+> persisted rows and gains a `/checkpoint` nav link. **No `Code.gs`/schema
+> change** — `_recordPhotoVerification`, `handleMarkCheating`,
+> `handleReportViolation` already accept these payloads. Updates §4.2, §6.2,
+> Guardrail 27. Files: `web_app.py`, `templates/checkpoint.html`,
+> `templates/dashboard.html`.
+>
 > **Last updated:** 2026-05-22 — **Form intake: a combined "Name-Surname"
 > question no longer doubles the name (backfill bug fix).** A real form used
 > a SINGLE `"ชื่อ-นามสกุล (Name-Surname)"` question (whole name in one
@@ -762,7 +788,7 @@ AI-Runner-Timing-System-YOLOv8/
 │
 ├── templates/             ← The active product (browser frontend)
 │   ├── register.html       ← Runner registration (5-angle face capture)
-│   ├── checkpoint.html     ← Real-time recognition (retained-but-unrouted; see §6.2)
+│   ├── checkpoint.html     ← Live cheating-detection station (/checkpoint; no timing; see §4.2)
 │   ├── photo_scanner.html  ← Drive Photo Scanner (post-race batch mode)
 │   └── dashboard.html      ← Public leaderboard + Admin portal (login-gated)
 │
@@ -790,7 +816,7 @@ AI-Runner-Timing-System-YOLOv8/
 |---|---|---|
 | `web_app.py` | Tiny Flask wrapper, 4 active routes (`/`, `/register`, `/scan`, `/admin`-alias) plus a commented-out `/checkpoint`. **Does no AI work.** | Adding/renaming a frontend page |
 | `templates/register.html` | Capture 5 face angles, compute averaged 128-d descriptor, single atomic upload | Changing capture UX, embedding format, registration payload |
-| `templates/checkpoint.html` | Live detection loop (face-api + Tesseract), per-CP cooldowns, smart OCR, violation reporting. **Retained on disk but no longer routed**; see §6.2. Still the canonical reference for the multi-frame pipeline described in §4.2. | Restoring live mode, or referencing the multi-frame pipeline for new work |
+| `templates/checkpoint.html` | **Live cheating-detection station** (`/checkpoint`, restored 2026-05-22): face-id + smart OCR consensus, WRONG_PERSON (incl. bib-swap by an unknown wearing a registered BIB), NO_BIB/OBSCURED_BIB/MULTIPLE_BIBS/UNREGISTERED, `markCheating`, live per-type counters. **No timing** — persists via the `photo_verified` sentinel. | Live-checkpoint UX, violation logic, OCR tuning (lockstep w/ scanner per Guardrail 27) |
 | `templates/photo_scanner.html` | Drive Photo Scanner — post-race batch processing of photographer-uploaded Drive folder. SSD MobileNet, single-pass per face, session-level dedup. Pre-scan auto-enroll computes embeddings for form-registered runners (§4.7). | Drive scanner tuning, batch UX, dedup strategy, auto-enroll |
 | `templates/dashboard.html` | Public leaderboard, alerts, admin portal (auth, CRUD, bulk delete, type filter) | UI/UX, admin actions, polling, type taxonomy |
 | `apps_script/Code.gs` | Backend REST + Sheets/Drive I/O + cache + migrations | Schema, endpoints, validation, cleanup logic |
@@ -961,12 +987,26 @@ My Drive/
 
 ### 4.2 Checkpoint detection (`checkpoint.html` → `recordCheckpoint`/`reportViolation`)
 
-> ⚠️ **`/checkpoint` is no longer routed** (see §6.2, 2026-05-17
-> follow-up). The file remains on disk because it is the canonical
-> reference for the multi-frame live pipeline this section describes,
-> and because restoring live mode is a one-line uncomment in
-> `web_app.py`. Treat this section as documentation of the **retained
-> implementation**; the active product is the Drive Scanner (§4.7).
+> ✅ **`/checkpoint` is routed again** (restored 2026-05-22) as a LIVE
+> **cheating-detection station — no race timing**. It identifies runners by
+> face and persists each via the `photo_verified` sentinel (like the Drive
+> Scanner), reports WRONG_PERSON / NO_BIB / OBSCURED_BIB / MULTIPLE_BIBS /
+> UNREGISTERED with live per-type counters, calls `markCheating` on every
+> WRONG_PERSON, and OCRs UNKNOWN faces to catch a stranger wearing a
+> registered runner's BIB (bib-swap). Coexists with the Drive Scanner
+> (§4.7) — both share the identity-verification backend contract; neither
+> does timing. The multi-frame loop below is still the core reference; the
+> parts that changed in the revival are summarized next.
+
+**Changed 2026-05-22 (revival).** `recordCP` → `photo_verified` sentinel
+(a real CP id would `schema_error`); CP selector removed (`checkpointId` →
+constant `CP_KEY`); every WRONG_PERSON also POSTs `markCheating`; new
+`bibToOwner` reverse map + `runUnknownBibCheck` add **bib-swap** detection
+(OCR an unknown face → if its consensus digits equal a registered BIB, fire
+WRONG_PERSON against that BIB's owner and soft-suppress the intruder's
+UNREGISTERED via `lastBibBorrowSec`); new top-bar live per-type counters
+(`bumpViolationCount`, called inside `tryFireViolation`). The detection /
+OCR-consensus loop documented below is otherwise unchanged.
 
 The pipeline has two **independent triggers**:
 
@@ -1997,6 +2037,13 @@ explicit, justified, and accompanied by an update to this file.
     duplicated across `checkpoint.html` and `photo_scanner.html` —
     they share geometry and preprocessing because those are the
     Tesseract-tuned constants Guardrail 19 + 24 protect.
+    **(2026-05-22)** `checkpoint.html` is ROUTED again (live
+    cheating-detection station, §4.2) — it is no longer "untestable", so
+    OCR crop/preprocess changes must now be validated LIVE in BOTH files,
+    not just the scanner. It additionally OCRs UNKNOWN faces
+    (`runUnknownBibCheck`) to catch a stranger wearing a registered BIB;
+    that path reuses the same `getOCRCropBox` + `preprocessForOCR` + the
+    multi-frame voter (under a `"__unknown__"` bucket).
 28. **The Drive scanner MUST fetch image bytes via `getImageBytes`,
     not via `<img crossOrigin=anonymous>` against the thumbnail URL.**
     `drive.google.com/thumbnail?id=…&sz=w800` 302-redirects to
@@ -2141,6 +2188,20 @@ explicit, justified, and accompanied by an update to this file.
   `dashboard.html`) are unchanged from their v5/v6 baselines.
 
 ### 6.2 Recent changes
+
+#### 2026-05-22 — Live Checkpoint revived (cheating-detection station)
+
+`/checkpoint` is routed again (`web_app.py`) as a **live, timing-free
+cheating detector** — see the §4.2 header + the top-of-file changelog for
+the full delta. Key points: persists via the `photo_verified` sentinel
+(not real CP ids — the timing columns are gone), `markCheating` on every
+WRONG_PERSON, a new **stranger-BIB / bib-swap** check (`runUnknownBibCheck`
++ `bibToOwner` reverse map) attributed to the BIB's owner, and live
+per-type violation counters in the top bar. The CP selector was removed
+(`checkpointId` → constant `CP_KEY`). **No backend/schema change** — the
+existing `_recordPhotoVerification` / `handleMarkCheating` /
+`handleReportViolation` handlers already accept these payloads. The
+dashboard gains a `/checkpoint` nav link.
 
 #### 2026-05-17 — v7: Drive Photo Scanner workflow
 

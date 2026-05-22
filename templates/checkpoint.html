@@ -12,10 +12,12 @@ body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--txt);min-
 .bar{background:rgba(11,15,20,.95);backdrop-filter:blur(18px);border-bottom:1px solid var(--bdr);padding:.7rem 1.5rem;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:50}
 .bar-l{display:flex;align-items:center;gap:1rem}
 .bar h1{font-family:'Bebas Neue',sans-serif;font-size:1.4rem;letter-spacing:2px;background:linear-gradient(135deg,var(--pri),#2dd4a8);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
-.cp-sel{display:flex;gap:0;flex-wrap:wrap}
-.cp-btn{padding:.4rem .7rem;font-family:'Bebas Neue',sans-serif;font-size:.85rem;letter-spacing:1px;cursor:pointer;border:1px solid var(--bdr);background:rgba(255,255,255,.03);color:var(--mut);transition:all .2s}
-.cp-btn:first-child{border-radius:8px 0 0 8px}.cp-btn:last-child{border-radius:0 8px 8px 0}
-.cp-btn.on{background:rgba(29,158,117,.2);border-color:var(--pri);color:var(--pri)}
+/* Live violation counters (per type) — replaces the old CP selector */
+.vcounts{display:flex;gap:.35rem;flex-wrap:wrap}
+.vchip{display:flex;align-items:center;gap:.3rem;padding:.3rem .55rem;border-radius:8px;border:1px solid var(--bdr);background:rgba(255,255,255,.03);font-family:'JetBrains Mono',monospace;font-size:.72rem;color:var(--mut);letter-spacing:.5px}
+.vchip b{color:var(--txt);font-size:.85rem}
+.vchip.vc-wrong{border-color:rgba(229,62,62,.5);color:#ff8585}
+.vchip.vc-wrong b{color:var(--red)}
 .bar-r{display:flex;align-items:center;gap:1rem}
 .status{display:flex;align-items:center;gap:.4rem;font-size:.8rem}
 .status.ok{color:#4ade80}.status.err{color:var(--red)}
@@ -58,13 +60,12 @@ body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--txt);min-
 <div class="bar">
  <div class="bar-l">
   <h1>📷 CHECKPOINT</h1>
-  <div class="cp-sel">
-   <button class="cp-btn on" id="cp-start-btn" onclick="setCP('start')">🟢 START</button>
-   <button class="cp-btn" id="cp-1-btn" onclick="setCP(1)">CP1</button>
-   <button class="cp-btn" id="cp-2-btn" onclick="setCP(2)">CP2</button>
-   <button class="cp-btn" id="cp-3-btn" onclick="setCP(3)">CP3</button>
-   <button class="cp-btn" id="cp-4-btn" onclick="setCP(4)">CP4</button>
-   <button class="cp-btn" id="cp-finish-btn" onclick="setCP('finish')">🏁 FINISH</button>
+  <div class="vcounts" id="vcounts" title="Live violation counts this session">
+   <span class="vchip vc-wrong" title="Wrong person / BIB mismatch (incl. bib-swap)">WRONG <b id="vc-WRONG_PERSON">0</b></span>
+   <span class="vchip" title="BIB not visible">NO BIB <b id="vc-NO_BIB">0</b></span>
+   <span class="vchip" title="BIB unreadable">OBSCURED <b id="vc-OBSCURED_BIB">0</b></span>
+   <span class="vchip" title="Multiple BIBs on one runner">MULTI <b id="vc-MULTIPLE_BIBS">0</b></span>
+   <span class="vchip" title="Unregistered runner">UNREG <b id="vc-UNREGISTERED">0</b></span>
   </div>
  </div>
  <div class="bar-r">
@@ -197,11 +198,16 @@ const MULTIPLE_BIBS_MIN_BLOCK_LEN = 2;
 const MULTIPLE_BIBS_MIN_BLOCKS = 2;
 
 // ── STATE ──────────────────────────────────────────────────────
-let checkpointId = 'start';
+// Single live station — no per-CP timing. CP_KEY is just a constant
+// cooldown-bucket suffix so the per-runner cooldown logic still works.
+const CP_KEY = "live";
 let faceMatcher = null;
 let runnerRegistry = {};                    // name → bib
-let cooldowns = {};                         // "name:cpId" → sec (per-CP record cooldown)
-let violationCooldowns = {};                // "name:cpId" → sec (per-CP violation cooldown)
+let bibToOwner = {};                        // bib → name (reverse map; stranger-BIB check)
+let cooldowns = {};                         // "name:live" → sec (per-runner record cooldown)
+let violationCooldowns = {};                // cooldownKey → sec (per-runner/-type violation cooldown)
+let violationCounts = {};                   // violationType → count (live per-type counters)
+let lastBibBorrowSec = 0;                   // last bib-swap fire — soft-suppresses UNREGISTERED for the same intruder
 let consecutiveFrames = {};                 // name → count
 let bboxEMA = {};                           // name → { x, y, width, height, missingFrames }
 let ocrVotes = {};                          // name → [{ bib, ts, conf }, ...]
@@ -215,15 +221,16 @@ let ocrReady = false;
 let videoStream = null;
 let loopRunning = false;
 let rafId = null;
-const CP_BUTTONS = ['start', 1, 2, 3, 4, 'finish'];
 
-// ── CP SELECTOR ──
-function setCP(id){
- checkpointId=id;
- CP_BUTTONS.forEach(b=>{
-  const el=document.getElementById('cp-'+b+'-btn');
-  if(el)el.classList.toggle('on',b===id);
- });
+// ── LIVE VIOLATION COUNTERS ──
+// Bumped (and reflected in the top-bar chips) only when a violation
+// actually FIRES through tryFireViolation — so the 60 s cooldown is
+// respected and the counts match what's persisted to the backend.
+function bumpViolationCount(type){
+ if(!type) return;
+ violationCounts[type] = (violationCounts[type]||0) + 1;
+ const el = document.getElementById("vc-"+type);
+ if(el) el.textContent = violationCounts[type];
 }
 
 // ── INIT ──
@@ -247,6 +254,12 @@ async function init(){
 
   const labeled=[];
   for(const r of runners){
+   // Reverse BIB→owner map covers ALL registered runners (incl. form-only
+   // ones without embeddings) so a stranger wearing their BIB is still
+   // caught by the stranger-BIB check, even if that owner can't be
+   // face-matched.
+   const ownerBib=String(r.BibNumber||"").trim();
+   if(ownerBib) bibToOwner[ownerBib]=r.Name;
    if(!r.Embeddings)continue;
    try{
     let emb=JSON.parse(r.Embeddings);
@@ -659,7 +672,7 @@ async function processLoop(){
      // is independent of OCR consensus; the FACE recognition is what
      // identifies the runner. OCR only gates VIOLATION reporting.
      if(consecutiveFrames[name]>=RECORD_AFTER_FRAMES){
-      const cdKey=name+":"+checkpointId; // per-CP so each station fires once
+      const cdKey=name+":"+CP_KEY; // per-runner record cooldown
       const nowSec=Date.now()/1000;
       if(!cooldowns[cdKey]||(nowSec-cooldowns[cdKey])>COOLDOWN_SEC){
        cooldowns[cdKey]=nowSec;
@@ -740,18 +753,32 @@ async function processLoop(){
    // known runners (a one-frame miss restarts the warmup).
    if (largestUnknownBox){
     consecutiveFrames["unknown"] = (consecutiveFrames["unknown"]||0) + 1;
+
+    // STRANGER-BIB CHECK — once the intruder has stayed visible long
+    // enough to OCR, read their chest. If they're wearing a REGISTERED
+    // runner's BIB it's a bib-swap; runUnknownBibCheck fires WRONG_PERSON
+    // attributed to the BIB's owner (and sets lastBibBorrowSec). Shares
+    // the single ocrBusy guard with known-face OCR.
+    if (consecutiveFrames["unknown"] >= OCR_AFTER_FRAMES && !ocrBusy){
+     runUnknownBibCheck(video, largestUnknownBox);
+    }
+
     if (consecutiveFrames["unknown"] >= UNREGISTERED_AFTER_FRAMES){
-     const cpLabel = checkpointId==='start' ? 'Start'
-                   : checkpointId==='finish' ? 'Finish'
-                   : 'CP'+checkpointId;
-     const fired = tryFireViolation("unknown:"+checkpointId, {
-      name: "Unknown",
-      bib: "",
-      message: `Unregistered runner detected at ${cpLabel}`,
-      violationType: "UNREGISTERED",
-      image: captureFaceCrop(video, largestUnknownBox),
-     });
-     if (fired) consecutiveFrames["unknown"] = 0;
+     const nowSec = Date.now()/1000;
+     // Suppress the plain UNREGISTERED if we just flagged this same
+     // intruder as wearing a registered BIB — that WRONG_PERSON is the
+     // stronger, more specific signal (one intruder at a checkpoint at a
+     // time, so a recent bib-swap fire is almost certainly the same face).
+     if (nowSec - lastBibBorrowSec > VIOLATION_COOLDOWN_SEC){
+      const fired = tryFireViolation("unknown:"+CP_KEY, {
+       name: "Unknown",
+       bib: "",
+       message: `Unregistered runner detected`,
+       violationType: "UNREGISTERED",
+       image: captureFaceCrop(video, largestUnknownBox),
+      });
+      if (fired) consecutiveFrames["unknown"] = 0;
+     }
     }
    }
 
@@ -832,7 +859,7 @@ async function runSmartOCR(video, box, name){
   const blockRe = new RegExp("\\d{"+MULTIPLE_BIBS_MIN_BLOCK_LEN+",}", "g");
   const blocks = rawText.match(blockRe) || [];
   if (blocks.length >= MULTIPLE_BIBS_MIN_BLOCKS){
-   const fired = tryFireViolation(name+":"+checkpointId, {
+   const fired = tryFireViolation(name+":"+CP_KEY, {
     name,
     bib: "",                                          // BIB_PATTERN rejects commas; full list lives in message
     message: `Multiple BIBs detected on ${name}: ${blocks.join(", ")}`,
@@ -863,7 +890,7 @@ async function runSmartOCR(video, box, name){
    if (ocrFailureCount[name] >= NO_BIB_AFTER_FAILURES){
     const expected = runnerRegistry[name] || "";
     const violationType = ocrLastFailureKind[name] === "empty" ? "NO_BIB" : "OBSCURED_BIB";
-    const fired = tryFireViolation(name+":"+checkpointId, {
+    const fired = tryFireViolation(name+":"+CP_KEY, {
      name, bib: expected,
      message: violationType==="NO_BIB"
       ? `BIB not visible for ${name}`
@@ -888,14 +915,17 @@ async function runSmartOCR(video, box, name){
 
   const expectedBib=runnerRegistry[name];
   if(expectedBib && consensus !== expectedBib){
-   // WRONG_PERSON shares the same name+cpId cooldown bucket with NO_BIB,
-   // OBSCURED_BIB, MULTIPLE_BIBS — see Guardrail 25.
-   tryFireViolation(name+":"+checkpointId, {
+   // Registered face A wearing a BIB that isn't A's → cheating. Shares
+   // the single name cooldown bucket with NO_BIB / OBSCURED_BIB /
+   // MULTIPLE_BIBS (Guardrail 25). On a fresh fire, flag A in
+   // Results.IsCheating so the leaderboard shows 🚨.
+   const fired = tryFireViolation(name+":"+CP_KEY, {
     name, bib: consensus,
     message: `Expected BIB ${expectedBib}, Found ${consensus}`,
     violationType: "WRONG_PERSON",
     image: captureFullFrame(video),
    });
+   if(fired) markCheating(name);
   }
  }catch(e){console.warn("OCR error:",e)}
  finally{ocrBusy=false}
@@ -907,18 +937,23 @@ async function recordCP(name){
  const timeStr=ts.toTimeString().split(" ")[0];// HH:MM:SS
  const bib=runnerRegistry[name]||"";
 
- addSidebarItem(name,`${checkpointId==='start'?'Start':checkpointId==='finish'?'Finish':'CP'+checkpointId} @ ${timeStr}`,false);
+ addSidebarItem(name,`Verified (BIB ${bib||"—"}) @ ${timeStr}`,false);
 
  try{
+  // Identity verification — the "photo_verified" sentinel routes to
+  // _recordPhotoVerification (writes Name + BibNumber + UpdatedAt; the
+  // CP_Time columns no longer exist). Same contract as the Drive
+  // Scanner's sendIdentification (Guardrail 29). A real CP id would
+  // throw schema_error on the post-pivot Results sheet.
   const resp=await fetch(API,{method:"POST",headers:{"Content-Type":"text/plain"},body:JSON.stringify({
-   action:"recordCheckpoint",name,checkpoint_id:checkpointId,timestamp:timeStr,bib
+   action:"recordCheckpoint",name,checkpoint_id:"photo_verified",timestamp:timeStr,bib
   }),redirect:"follow"});
   const result=await resp.json();
   if(!result||result.status!=="success"){
    addSidebarItem(name,`❌ บันทึกไม่สำเร็จ: ${(result&&result.message)||"Unknown"}`,true);
   }
  }catch(e){
-  console.warn("Failed to send CP:",e);
+  console.warn("Failed to send identification:",e);
   addSidebarItem(name,"❌ บันทึกไม่สำเร็จ: เชื่อมต่อเซิร์ฟเวอร์ไม่ได้",true);
  }
 }
@@ -942,6 +977,62 @@ async function reportViolation({ name, bib, message, violationType, image }){
   console.warn("Failed to send violation:",e);
   addSidebarItem(name,"❌ ส่ง violation ไม่ได้",true);
  }
+}
+
+// Flag a runner as cheating in Results.IsCheating → lights up the
+// leaderboard 🚨 badge. Fire-and-forget (idempotent on the backend);
+// mirrors photo_scanner.html's markCheating block. Used by BOTH
+// WRONG_PERSON paths: a registered face wearing the wrong BIB, and a
+// stranger wearing this runner's BIB (attributed to the BIB owner).
+function markCheating(name){
+ try{
+  fetch(API,{method:"POST",headers:{"Content-Type":"text/plain"},body:JSON.stringify({
+   action:"markCheating", name, isCheating:true
+  })});
+ }catch(e){console.warn("markCheating failed for",name,e);}
+}
+
+// ── STRANGER-BIB CHECK (bib-swap detection) ──
+// We never face-match an unknown, so there's no per-face identity to vote
+// under — votes accumulate in one "__unknown__" bucket (one intruder at a
+// checkpoint at a time, so a real bib-swapper still reaches consensus;
+// two different intruders split the vote and safely don't fire). Only
+// fires when the consensus digits EXACTLY equal a REGISTERED BIB
+// (bibToOwner) — random OCR noise that isn't a real BIB is ignored — and
+// is attributed to that BIB's registered owner, who is then flagged
+// cheating (their identity was worn by someone else). See AI_CONTEXT §4.2.
+async function runUnknownBibCheck(video, box){
+ if(ocrBusy || !ocrReady || !tesseractWorker) return;
+ ocrBusy=true;
+ try{
+  const {bx,by,bw,bh}=getOCRCropBox(box, video);   // same crop geometry as known-face OCR
+  if(bw<=0||bh<=0) return;
+  const cropCanvas=document.createElement("canvas");
+  cropCanvas.width=bw; cropCanvas.height=bh;
+  cropCanvas.getContext("2d").drawImage(video, bx, by, bw, bh, 0, 0, bw, bh);
+  const processed=preprocessForOCR(cropCanvas);
+  const result=await tesseractWorker.recognize(processed);
+  const conf=Number(result.data.confidence||0);
+  const text=String(result.data.text||"").replace(/[^0-9]/g,"").trim();
+  if(!text || text.length<BIB_MIN_LEN || text.length>BIB_MAX_LEN || conf<OCR_MIN_CONFIDENCE) return;
+  const consensus=castVote("__unknown__", text, conf);   // reuse the multi-frame voter
+  if(!consensus) return;
+  const owner=bibToOwner[consensus];
+  if(!owner) return;                                 // not a registered BIB → leave it to UNREGISTERED
+  const fired=tryFireViolation("bibborrow:"+consensus, {
+   name: owner,
+   bib: consensus,
+   message: `BIB ${consensus} (registered to ${owner}) worn by an unmatched/unregistered face`,
+   violationType: "WRONG_PERSON",
+   image: captureFullFrame(video),
+  });
+  if(fired){
+   markCheating(owner);
+   lastBibBorrowSec = Date.now()/1000;               // soft-suppress UNREGISTERED for this intruder
+   consecutiveFrames["unknown"] = 0;
+  }
+ }catch(e){console.warn("Unknown BIB check error:",e)}
+ finally{ocrBusy=false}
 }
 
 // Snapshot helpers — every fire allocates one canvas; bounded to ≤1
@@ -978,6 +1069,7 @@ function tryFireViolation(cooldownKey, payload){
   return false;
  }
  violationCooldowns[cooldownKey] = nowSec;
+ bumpViolationCount(payload.violationType);
  reportViolation(payload);
  return true;
 }
