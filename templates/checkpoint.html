@@ -416,7 +416,7 @@
     // above the recognition net's ~110px need at checkpoint distance (match
     // accuracy unchanged). Raise toward VIDEO_WIDTH (e.g. 1280) to disable the
     // downscale; lower (e.g. 720/640) for even more FPS.
-    const DETECT_MAX_WIDTH = 960;
+    const DETECT_MAX_WIDTH = 640;
 
     // ── FACE DETECTION ─────────────────────────────────────────────
     // SSD MobileNet (2026-05-22) — switched from TinyFaceDetector for higher
@@ -817,17 +817,21 @@
     // equalization, bilinearly blended between tiles. Lifts faded digit
     // strokes before thresholding; output is grayscale (re-binarized by
     // the threshold, so no gray reaches Tesseract).
+    let _sharedMaps = [], _sharedHist = new Uint32Array(256), _sharedLutPool = [];
     function enhanceContrastCLAHE(gray, w, h) {
       const T = CLAHE_TILES;
       const tw = Math.max(1, Math.floor(w / T));
       const th = Math.max(1, Math.floor(h / T));
       const nx = Math.ceil(w / tw), ny = Math.ceil(h / th);
-      const maps = new Array(nx * ny);
+      const maps = _sharedMaps;
+      maps.length = nx * ny;
+      let poolIdx = 0;
       for (let ty = 0; ty < ny; ty++) {
         for (let tx = 0; tx < nx; tx++) {
           const x0 = tx * tw, y0 = ty * th;
           const x1 = Math.min(w, x0 + tw), y1 = Math.min(h, y0 + th);
-          const hist = new Uint32Array(256);
+          const hist = _sharedHist;
+          hist.fill(0);
           let count = 0;
           for (let y = y0; y < y1; y++) {
             const row = y * w;
@@ -840,13 +844,15 @@
           const inc = Math.floor(excess / 256);
           let rem = excess - inc * 256;
           for (let i = 0; i < 256; i++) { hist[i] += inc; if (rem > 0) { hist[i]++; rem--; } }
-          const lut = new Uint8ClampedArray(256);
+          if (!_sharedLutPool[poolIdx]) _sharedLutPool[poolIdx] = new Uint8ClampedArray(256);
+          const lut = _sharedLutPool[poolIdx++];
           let cdf = 0;
           for (let i = 0; i < 256; i++) { cdf += hist[i]; lut[i] = Math.round((cdf / count) * 255); }
           maps[ty * nx + tx] = lut;
         }
       }
-      const out = new Uint8ClampedArray(w * h);
+      if (!_sharedOut || _sharedOut.length < w * h) _sharedOut = new Uint8ClampedArray(w * h);
+      const out = _sharedOut;
       for (let y = 0; y < h; y++) {
         const fy = (y + 0.5) / th - 0.5;
         let ty0 = Math.floor(fy); let wy = fy - ty0; let ty1 = ty0 + 1;
@@ -883,6 +889,9 @@
     // Nearest-neighbor (not bilinear) is intentional: the threshold output
     // is binary, and bilinear would introduce gray pixels that Tesseract
     // occasionally mistreats as noise.
+    let _sharedUpCanvas = null, _sharedDstCanvas = null, _sharedDstImg = null;
+    let _sharedGray = null, _sharedIntegral = null, _sharedThreshOut = null;
+
     function preprocessForOCR(srcCanvas) {
       // Small-crop pre-threshold bilinear upscale (mirror of
       // photo_scanner.html, Guardrail 19 + 27). Separates merged digit
@@ -892,8 +901,11 @@
       const srcMax = Math.max(srcCanvas.width, srcCanvas.height);
       if (srcMax > 0 && srcMax < OCR_PRE_UPSCALE_TARGET) {
         const f = Math.min(OCR_PRE_UPSCALE_MAX, Math.max(2, Math.round(OCR_PRE_UPSCALE_TARGET / srcMax)));
-        const up = document.createElement("canvas");
-        up.width = srcCanvas.width * f; up.height = srcCanvas.height * f;
+        if (!_sharedUpCanvas) _sharedUpCanvas = document.createElement("canvas");
+        const up = _sharedUpCanvas;
+        if (up.width !== srcCanvas.width * f || up.height !== srcCanvas.height * f) {
+          up.width = srcCanvas.width * f; up.height = srcCanvas.height * f;
+        }
         const uctx = up.getContext("2d");
         uctx.imageSmoothingEnabled = true; uctx.imageSmoothingQuality = "high";
         uctx.drawImage(srcCanvas, 0, 0, up.width, up.height);
@@ -905,7 +917,8 @@
       const src = imgData.data;
 
       // Grayscale
-      let gray = new Uint8ClampedArray(w * h);
+      if (!_sharedGray || _sharedGray.length < w * h) _sharedGray = new Uint8ClampedArray(w * h);
+      let gray = _sharedGray;
       for (let i = 0, j = 0; i < src.length; i += 4, j++) {
         gray[j] = (src[i] * 0.299 + src[i + 1] * 0.587 + src[i + 2] * 0.114) | 0;
       }
@@ -916,9 +929,13 @@
       // Integral image — Uint32Array; padded by one row/col so the local-
       // window query doesn't need boundary checks.
       const stride = w + 1;
-      const integral = new Uint32Array(stride * (h + 1));
+      const intLen = stride * (h + 1);
+      if (!_sharedIntegral || _sharedIntegral.length < intLen) _sharedIntegral = new Uint32Array(intLen);
+      const integral = _sharedIntegral;
+      for (let x = 0; x <= w; x++) integral[x] = 0; // zero first row
       for (let y = 1; y <= h; y++) {
         let rowSum = 0;
+        integral[y * stride] = 0; // zero first col
         for (let x = 1; x <= w; x++) {
           rowSum += gray[(y - 1) * w + (x - 1)];
           integral[y * stride + x] = integral[(y - 1) * stride + x] + rowSum;
@@ -929,7 +946,8 @@
       const block = ADAPTIVE_THRESHOLD_BLOCK;
       const half = block >> 1;
       const C = ADAPTIVE_THRESHOLD_C;
-      const out = new Uint8ClampedArray(w * h);
+      if (!_sharedThreshOut || _sharedThreshOut.length < w * h) _sharedThreshOut = new Uint8ClampedArray(w * h);
+      const out = _sharedThreshOut;
       for (let y = 0; y < h; y++) {
         const y0 = Math.max(0, y - half), y1 = Math.min(h, y + half + 1);
         for (let x = 0; x < w; x++) {
@@ -946,10 +964,14 @@
       // Nearest-neighbor 2× upscale.
       const s = OCR_UPSCALE;
       const w2 = w * s, h2 = h * s;
-      const dst = document.createElement("canvas");
-      dst.width = w2; dst.height = h2;
+      if (!_sharedDstCanvas) _sharedDstCanvas = document.createElement("canvas");
+      const dst = _sharedDstCanvas;
       const dstCtx = dst.getContext("2d");
-      const dstImg = dstCtx.createImageData(w2, h2);
+      if (dst.width !== w2 || dst.height !== h2 || !_sharedDstImg) {
+        dst.width = w2; dst.height = h2;
+        _sharedDstImg = dstCtx.createImageData(w2, h2);
+      }
+      const dstImg = _sharedDstImg;
       const dPix = dstImg.data;
       for (let y = 0; y < h2; y++) {
         const sy = (y / s) | 0;
@@ -1320,11 +1342,15 @@
     // crop geometry (getOCRCropBox) matches the dashed-red overlay drawn in
     // processLoop. Returns { candidates, confByBib, hadDigits } — hadDigits
     // separates a truly empty read (NO_BIB) from unreadable digits (OBSCURED_BIB).
+    let _sharedCropCanvas = null;
     async function ocrReadBib(video, box) {
       const { bx, by, bw, bh } = getOCRCropBox(box, video);
       if (bw <= 0 || bh <= 0) return { candidates: [], confByBib: {}, hadDigits: false };
-      const cropCanvas = document.createElement("canvas");
-      cropCanvas.width = bw; cropCanvas.height = bh;
+      if (!_sharedCropCanvas) _sharedCropCanvas = document.createElement("canvas");
+      const cropCanvas = _sharedCropCanvas;
+      if (cropCanvas.width !== bw || cropCanvas.height !== bh) {
+        cropCanvas.width = bw; cropCanvas.height = bh;
+      }
       cropCanvas.getContext("2d").drawImage(video, bx, by, bw, bh, 0, 0, bw, bh);
       const processed = preprocessForOCR(cropCanvas);    // CLAHE → adaptive threshold → upscale
       let candidates = [], confByBib = {}, hadDigits = false;
